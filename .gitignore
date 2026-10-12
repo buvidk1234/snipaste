@@ -1,0 +1,36 @@
+# CMake build trees and logs
+build/
+out/
+cmake-build-*/
+build-output.txt
+
+build-debug/
+build-release/
+dist/
+build-debug.log
+build-release.log
+/build*
+*.log
+docs/
+scratch/
+
+configure-output.txt
+debug-build-output.txt
+release-build-output.txt
+
+# Qt and compiler generated files
+*.moc
+*.obj
+*.o
+*.pdb
+*.ilk
+*.user
+
+# IDE metadata
+.vs/
+.vscode/*.log
+
+# Runtime data
+config.ini
+splog.txt
+state.json
