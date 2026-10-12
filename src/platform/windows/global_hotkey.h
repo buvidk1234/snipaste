@@ -1,0 +1,35 @@
+#pragma once
+
+#include <QAbstractNativeEventFilter>
+#include <QObject>
+
+namespace snipaste::platform {
+
+class GlobalHotkey final : public QObject, public QAbstractNativeEventFilter
+{
+    Q_OBJECT
+
+public:
+    explicit GlobalHotkey(QObject *parent = nullptr);
+    ~GlobalHotkey() override;
+
+    bool registerKey(int id, unsigned int modifiers, unsigned int key);
+    void unregisterKey();
+    void clearKey();
+    void setEnabled(bool enabled);
+    bool isEnabled() const;
+
+signals:
+    void triggered(int id);
+
+protected:
+    bool nativeEventFilter(const QByteArray &eventType, void *message, qintptr *result) override;
+
+private:
+    int m_id = 0;
+    unsigned int m_modifiers = 0;
+    unsigned int m_key = 0;
+    bool m_registered = false;
+};
+
+} // namespace snipaste::platform
