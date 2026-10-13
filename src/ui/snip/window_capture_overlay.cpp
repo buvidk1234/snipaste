@@ -1,5 +1,6 @@
 #include "ui/snip/window_capture_overlay.h"
 #include "platform/windows/capture_target.h"
+#include "platform/screen_capture.h"
 #if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
 #include "platform/macos/capture.h"
 #endif
@@ -92,7 +93,7 @@ WindowCaptureOverlay::WindowCaptureOverlay(QScreen *screen, bool elementMode, QW
     setMouseTracking(true);
     setCursor(Qt::CrossCursor);
     m_screenGeometry = screen->geometry();
-    m_background = screen->grabWindow(0).toImage();
+    m_background = platform::captureScreen(screen);
     m_background.setDevicePixelRatio(1);
     setGeometry(m_screenGeometry);
 }

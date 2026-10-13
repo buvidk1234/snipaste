@@ -6,6 +6,14 @@ project(snipaste
     LANGUAGES CXX
 )
 
+if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja")
+    # CMake can misdecode the localized MSVC /showIncludes prefix when the
+    # configure process uses UTF-8.  Keep Ninja's dependency scanner quiet
+    # while retaining compiler dependency tracking for the Chinese toolchain.
+    set(CMAKE_CXX_CL_SHOWINCLUDES_PREFIX "注意: 包含文件:  ")
+    set(CMAKE_CL_SHOWINCLUDES_PREFIX "注意: 包含文件:  ")
+endif()
+
 if(APPLE)
     # Carbon, AppKit, CoreGraphics, Accessibility and Vision are exposed
     # through Objective-C APIs. Keep those bridges isolated in .mm files so
@@ -45,6 +53,7 @@ set(SNIPASTE_CORE_SOURCES
 
 set(SNIPASTE_PLATFORM_SOURCES
     ${SNIPASTE_NATIVE_PLATFORM_SOURCES}
+    src/platform/screen_capture.cpp
     src/platform/windows/single_instance.cpp
 )
 
@@ -147,6 +156,7 @@ qt_add_library(snipaste_platform STATIC
     src/platform/windows/super_capture.h
     src/platform/windows/capture_target.h
     src/platform/windows/single_instance.h
+    src/platform/screen_capture.h
 )
 target_include_directories(snipaste_platform PUBLIC src)
 target_link_libraries(snipaste_platform PUBLIC Qt6::Core Qt6::Gui Qt6::Network)

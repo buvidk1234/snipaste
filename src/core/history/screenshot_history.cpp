@@ -1,10 +1,206 @@
 #include "core/history/screenshot_history.h"
 
+#include <QColorSpace>
+#include <QCryptographicHash>
+#include <QDataStream>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QImageReader>
+#include <QSaveFile>
+#include <QSet>
 #include <QUuid>
+
+#include <cstring>
+
+namespace {
+
+constexpr int kBackgroundTileSize = 256;
+const QByteArray kBackgroundManifestMagic("SNIPASTE_BG2");
+
+struct BackgroundManifest
+{
+    QSize size;
+    int tileSize = kBackgroundTileSize;
+    double devicePixelRatio = 1.0;
+    QByteArray colorProfile;
+    QStringList tileNames;
+};
+
+QString backgroundPathForKey(const QDir &directory, const QString &key)
+{
+    const QString path = directory.filePath(key + QStringLiteral(".background.tiles"));
+    return QFileInfo::exists(path) ? path : QString();
+}
+
+QString backgroundTileDirectory(const QString &historyDirectory)
+{
+    return QDir(historyDirectory).filePath(QStringLiteral("background-tiles"));
+}
+
+QString tileFileName(const QImage &tile)
+{
+    QByteArray dimensions;
+    QDataStream stream(&dimensions, QIODevice::WriteOnly);
+    stream.setByteOrder(QDataStream::LittleEndian);
+    stream << qint32(tile.width()) << qint32(tile.height());
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    hash.addData(dimensions);
+    for (int y = 0; y < tile.height(); ++y)
+        hash.addData(QByteArrayView(reinterpret_cast<const char *>(tile.constScanLine(y)),
+                                   tile.width() * 4));
+    return QString::fromLatin1(hash.result().toHex()) + QStringLiteral(".png");
+}
+
+bool saveBackgroundTiles(const QString &historyDirectory,
+                         const QString &key,
+                         const QImage &background)
+{
+    if (background.isNull())
+        return false;
+
+    QDir historyDir(historyDirectory);
+    const QString tileDirectory = backgroundTileDirectory(historyDirectory);
+    if (!QDir().mkpath(tileDirectory))
+        return false;
+
+    const int columns = (background.width() - 1) / kBackgroundTileSize + 1;
+    const int rows = (background.height() - 1) / kBackgroundTileSize + 1;
+    QStringList tileNames;
+    tileNames.reserve(columns * rows);
+    for (int row = 0; row < rows; ++row) {
+        for (int column = 0; column < columns; ++column) {
+            const QRect rect(column * kBackgroundTileSize,
+                             row * kBackgroundTileSize,
+                             qMin(kBackgroundTileSize, background.width() - column * kBackgroundTileSize),
+                             qMin(kBackgroundTileSize, background.height() - row * kBackgroundTileSize));
+            // Convert one block at a time; the worker must not allocate a
+            // second full desktop buffer just to hash or encode it.
+            QImage tile = background.copy(rect).convertToFormat(QImage::Format_RGBA8888);
+            tile.setDevicePixelRatio(1.0);
+            tile.setColorSpace({}); // The desktop profile is stored once in its manifest.
+            const QString fileName = tileFileName(tile);
+            const QString tilePath = QDir(tileDirectory).filePath(fileName);
+            if (!QFileInfo::exists(tilePath)) {
+                QSaveFile tileFile(tilePath);
+                if (!tileFile.open(QIODevice::WriteOnly) || !tile.save(&tileFile, "PNG")
+                    || !tileFile.commit())
+                    return false;
+            }
+            tileNames.append(fileName);
+        }
+    }
+
+    QSaveFile manifest(historyDir.filePath(key + QStringLiteral(".background.tiles")));
+    if (!manifest.open(QIODevice::WriteOnly))
+        return false;
+    QDataStream stream(&manifest);
+    stream.setVersion(QDataStream::Qt_6_5);
+    stream.setByteOrder(QDataStream::LittleEndian);
+    stream.writeRawData(kBackgroundManifestMagic.constData(), kBackgroundManifestMagic.size());
+    QByteArray tileHashes;
+    tileHashes.reserve(tileNames.size() * 32);
+    for (const QString &name : tileNames)
+        tileHashes.append(QByteArray::fromHex(name.left(64).toLatin1()));
+    stream << quint32(1) << qint32(background.width()) << qint32(background.height())
+           << qint32(kBackgroundTileSize) << background.devicePixelRatio()
+           << background.colorSpace().iccProfile() << tileHashes;
+    if (stream.status() != QDataStream::Ok)
+        return false;
+    return manifest.commit();
+}
+
+bool readBackgroundManifest(const QString &manifestPath, BackgroundManifest &data)
+{
+    QFile manifest(manifestPath);
+    if (!manifest.open(QIODevice::ReadOnly))
+        return false;
+    if (manifest.read(kBackgroundManifestMagic.size()) != kBackgroundManifestMagic)
+        return false;
+
+    QDataStream stream(&manifest);
+    stream.setVersion(QDataStream::Qt_6_5);
+    stream.setByteOrder(QDataStream::LittleEndian);
+    quint32 version = 0;
+    qint32 width = 0;
+    qint32 height = 0;
+    QByteArray tileHashes;
+    stream >> version >> width >> height >> data.tileSize >> data.devicePixelRatio
+           >> data.colorProfile >> tileHashes;
+    if (stream.status() != QDataStream::Ok || version != 1 || width <= 0 || height <= 0
+        || data.tileSize != kBackgroundTileSize)
+        return false;
+    const qint64 columns = (width - 1) / data.tileSize + 1;
+    const qint64 rows = (height - 1) / data.tileSize + 1;
+    if (tileHashes.size() != columns * rows * 32)
+        return false;
+    data.tileNames.reserve(columns * rows);
+    for (qsizetype offset = 0; offset < tileHashes.size(); offset += 32)
+        data.tileNames.append(QString::fromLatin1(tileHashes.mid(offset, 32).toHex())
+                              + QStringLiteral(".png"));
+    data.size = QSize(width, height);
+    return true;
+}
+
+QImage loadBackgroundTiles(const QString &manifestPath)
+{
+    BackgroundManifest data;
+    if (!readBackgroundManifest(manifestPath, data))
+        return {};
+    QImage result(data.size, QImage::Format_RGBA8888);
+    if (result.isNull())
+        return {};
+    result.setDevicePixelRatio(data.devicePixelRatio > 0.0 ? data.devicePixelRatio : 1.0);
+    if (!data.colorProfile.isEmpty())
+        result.setColorSpace(QColorSpace::fromIccProfile(data.colorProfile));
+    const int columns = (data.size.width() - 1) / data.tileSize + 1;
+    const int rows = (data.size.height() - 1) / data.tileSize + 1;
+    const QString tileDirectory = QDir(QFileInfo(manifestPath).absolutePath()).filePath(
+        QStringLiteral("background-tiles"));
+    int index = 0;
+    for (int row = 0; row < rows; ++row) {
+        for (int column = 0; column < columns; ++column, ++index) {
+            QImage tile;
+            if (!tile.load(QDir(tileDirectory).filePath(data.tileNames.at(index))))
+                return {};
+            tile = tile.convertToFormat(QImage::Format_RGBA8888);
+            const int left = column * data.tileSize;
+            const int top = row * data.tileSize;
+            const int copyWidth = qMin(data.tileSize, data.size.width() - left);
+            const int copyHeight = qMin(data.tileSize, data.size.height() - top);
+            if (tile.size() != QSize(copyWidth, copyHeight))
+                return {};
+            for (int y = 0; y < copyHeight; ++y) {
+                std::memcpy(result.scanLine(top + y) + left * 4,
+                            tile.constScanLine(y),
+                            size_t(copyWidth) * 4);
+            }
+        }
+    }
+    return result;
+}
+
+void removeUnreferencedTiles(const QDir &historyDir, const QSet<QString> &expectedFiles)
+{
+    QSet<QString> referencedTiles;
+    for (const QString &file : expectedFiles) {
+        if (!file.endsWith(QStringLiteral(".background.tiles")))
+            continue;
+        BackgroundManifest data;
+        // An unreadable manifest must not cause surviving backgrounds to
+        // lose their blocks during cleanup.
+        if (!readBackgroundManifest(historyDir.filePath(file), data))
+            return;
+        for (const QString &tile : data.tileNames)
+            referencedTiles.insert(tile);
+    }
+    QDir tileDir(backgroundTileDirectory(historyDir.absolutePath()));
+    for (const QString &file : tileDir.entryList({QStringLiteral("*.png")}, QDir::Files))
+        if (!referencedTiles.contains(file))
+            tileDir.remove(file);
+}
+
+} // namespace
 
 namespace snipaste::core {
 
@@ -19,6 +215,8 @@ void ScreenshotHistory::setMaximumCount(int maximumCount)
     m_maximumCount = qMax(1, maximumCount);
     while (m_images.size() > m_maximumCount) {
         m_images.removeLast();
+        if (!m_storageKeys.isEmpty())
+            m_storageKeys.removeLast();
         if (!m_imagePaths.isEmpty())
             m_imagePaths.removeLast();
         if (!m_backgrounds.isEmpty())
@@ -41,11 +239,14 @@ void ScreenshotHistory::add(const QImage &image, const QImage &background)
         return;
     ++m_revision;
     m_images.prepend(image);
+    m_storageKeys.prepend(QStringLiteral("capture-%1").arg(
+        QUuid::createUuid().toString(QUuid::Id128)));
     m_imagePaths.prepend(QString());
     m_backgrounds.prepend(background);
     m_backgroundPaths.prepend(QString());
     while (m_images.size() > m_maximumCount) {
         m_images.removeLast();
+        m_storageKeys.removeLast();
         m_imagePaths.removeLast();
         m_backgrounds.removeLast();
         m_backgroundPaths.removeLast();
@@ -57,6 +258,7 @@ void ScreenshotHistory::clear()
 {
     ++m_revision;
     m_images.clear();
+    m_storageKeys.clear();
     m_imagePaths.clear();
     m_backgrounds.clear();
     m_backgroundPaths.clear();
@@ -66,34 +268,39 @@ void ScreenshotHistory::loadFromDirectory(const QString &directory)
 {
     ++m_revision;
     m_images.clear();
+    m_storageKeys.clear();
     m_imagePaths.clear();
     m_backgrounds.clear();
     m_backgroundPaths.clear();
     const QDir dir(directory);
-    const QStringList files = dir.entryList({QStringLiteral("*.png")}, QDir::Files, QDir::Name);
-    for (const QString &file : files) {
-        if (file.endsWith(QStringLiteral(".background.png")))
-            continue;
-        const QString imagePath = dir.filePath(file);
+    const QString orderPath = dir.filePath(QStringLiteral(".snipaste-order"));
+    QStringList keys;
+    QFile orderFile(orderPath);
+    if (orderFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        while (!orderFile.atEnd()) {
+            const QString key = QString::fromUtf8(orderFile.readLine()).trimmed();
+            if (!key.isEmpty() && QFileInfo(key).fileName() == key)
+                keys.append(key);
+        }
+    }
+    for (const QString &key : keys) {
+        const QString imagePath = dir.filePath(key + QStringLiteral(".png"));
         QImageReader reader(imagePath);
         if (reader.canRead()) {
             // Keep the compressed selection on disk until history navigation
             // or the history dialog asks for it.  This avoids decoding all
             // historical captures when merely opening a new snip session.
             m_images.append(QImage());
+            m_storageKeys.append(key);
             m_imagePaths.append(imagePath);
-            const QString backgroundPath = dir.filePath(
-                file.left(file.size() - QStringLiteral(".png").size())
-                + QStringLiteral(".background.png"));
+            const QString backgroundPath = backgroundPathForKey(dir, key);
             // Do not decode the full-screen background during startup.  A
             // 1920x1200 RGBA frame is about 9 MB in memory, and loading 20 of
             // them just to release them during trimming leaves a large heap
             // high-water mark on Windows.  Keep only the path until history
             // navigation or persistence actually needs the frame.
             m_backgrounds.append(QImage());
-            m_backgroundPaths.append(QFileInfo::exists(backgroundPath)
-                                         ? backgroundPath
-                                         : QString());
+            m_backgroundPaths.append(backgroundPath);
         }
         if (m_images.size() >= m_maximumCount)
             break;
@@ -101,92 +308,92 @@ void ScreenshotHistory::loadFromDirectory(const QString &directory)
     trimToLimits();
 }
 
-void ScreenshotHistory::saveToDirectory(const QString &directory) const
+bool ScreenshotHistory::saveToDirectory(const QString &directory) const
 {
     QDir dir;
     if (!dir.mkpath(directory))
-        return;
+        return false;
     QDir historyDir(directory);
-    // Keep lazy backgrounds compressed while the old files are replaced.
-    // Stage them as files instead of reading every PNG into a QByteArray: on
-    // a large history this keeps the save worker's peak memory bounded too.
-    const QString cacheToken = QUuid::createUuid().toString(QUuid::Id128);
-    QList<QString> lazyImagePaths;
-    lazyImagePaths.resize(m_images.size());
-    QList<QString> lazyBackgroundPaths;
-    lazyBackgroundPaths.resize(m_images.size());
+    QStringList persistedKeys;
+    QSet<QString> expectedFiles;
     for (int index = 0; index < m_images.size(); ++index) {
-        if (m_images.at(index).isNull()
-            && index < m_imagePaths.size()
-            && !m_imagePaths.at(index).isEmpty()) {
-            const QString stagedPath = historyDir.filePath(
-                QStringLiteral(".snipaste-image-%1-%2")
-                    .arg(cacheToken)
-                    .arg(index, 3, 10, QChar('0')));
-            QFile::remove(stagedPath);
-            if (QFile::copy(m_imagePaths.at(index), stagedPath))
-                lazyImagePaths[index] = stagedPath;
+        QString key = index < m_storageKeys.size() ? m_storageKeys.at(index) : QString();
+        if (key.isEmpty())
+            key = QStringLiteral("capture-%1").arg(QUuid::createUuid().toString(QUuid::Id128));
+        const QString imageFileName = key + QStringLiteral(".png");
+        const QString imagePath = historyDir.filePath(imageFileName);
+        // The previous worker can have written this entry before the GUI
+        // thread rebased its paths. Check its stable file, not just the path
+        // list, to avoid writing it again during rapid consecutive captures.
+        if (!QFileInfo::exists(imagePath)) {
+            const QImage image = imageAt(index);
+            QSaveFile imageFile(imagePath);
+            if (image.isNull() || !imageFile.open(QIODevice::WriteOnly)
+                || !image.save(&imageFile, "PNG") || !imageFile.commit())
+                return false;
         }
-        if (index >= m_backgrounds.size() || !m_backgrounds.at(index).isNull()
-            || index >= m_backgroundPaths.size()
-            || m_backgroundPaths.at(index).isEmpty())
-            continue;
-        const QString stagedPath = historyDir.filePath(
-            QStringLiteral(".snipaste-background-%1-%2")
-                .arg(cacheToken)
-                .arg(index, 3, 10, QChar('0')));
-        QFile::remove(stagedPath);
-        if (QFile::copy(m_backgroundPaths.at(index), stagedPath))
-            lazyBackgroundPaths[index] = stagedPath;
+        persistedKeys.append(key);
+        expectedFiles.insert(imageFileName);
+
+        QString backgroundPath = backgroundPathForKey(historyDir, key);
+        if (backgroundPath.isEmpty()) {
+            const QImage background = backgroundAt(index);
+            if (!background.isNull()) {
+                if (!saveBackgroundTiles(directory, key, background))
+                    return false;
+                backgroundPath = backgroundPathForKey(historyDir, key);
+            } else if (index < m_backgroundPaths.size() && !m_backgroundPaths.at(index).isEmpty()) {
+                // A missing/corrupt historical background must not be
+                // silently committed as an entry with no desktop context.
+                return false;
+            }
+        }
+        if (!backgroundPath.isEmpty())
+            expectedFiles.insert(QFileInfo(backgroundPath).fileName());
     }
-    const QStringList oldFiles = historyDir.entryList({QStringLiteral("*.png")}, QDir::Files);
+
+    // The order file is tiny; unlike the old scheme it does not require
+    // rewriting any existing screenshot when a new item is prepended.
+    QSaveFile orderFile(historyDir.filePath(QStringLiteral(".snipaste-order")));
+    if (!orderFile.open(QIODevice::WriteOnly | QIODevice::Text))
+        return false;
+    for (const QString &key : persistedKeys) {
+        if (orderFile.write(key.toUtf8() + '\n') < 0)
+            return false;
+    }
+    if (!orderFile.commit())
+        return false;
+
+    // Delete evicted entries and their unshared blocks only after the new
+    // order is committed, so a failed save leaves the old history intact.
+    const QStringList oldFiles = historyDir.entryList(
+        {QStringLiteral("*.png"), QStringLiteral("*.background.tiles")}, QDir::Files);
     for (const QString &file : oldFiles)
-        historyDir.remove(file);
-    for (int index = 0; index < m_images.size(); ++index) {
-        const QString path = historyDir.filePath(
-            QStringLiteral("%1.png").arg(index, 3, 10, QChar('0')));
-        if (!m_images.at(index).isNull()) {
-            m_images.at(index).save(path, "PNG");
-        } else if (index < lazyImagePaths.size()
-                   && !lazyImagePaths.at(index).isEmpty()) {
-            QFile::remove(path);
-            QFile::copy(lazyImagePaths.at(index), path);
-        }
-        if (index < m_backgrounds.size() && !m_backgrounds.at(index).isNull()) {
-            const QString backgroundPath = historyDir.filePath(
-                QStringLiteral("%1.background.png").arg(index, 3, 10, QChar('0')));
-            m_backgrounds.at(index).save(backgroundPath, "PNG");
-        } else if (index < lazyBackgroundPaths.size()
-                   && !lazyBackgroundPaths.at(index).isEmpty()) {
-            const QString backgroundPath = historyDir.filePath(
-                QStringLiteral("%1.background.png").arg(index, 3, 10, QChar('0')));
-            QFile::remove(backgroundPath);
-            QFile::copy(lazyBackgroundPaths.at(index), backgroundPath);
-        }
-    }
-    for (const QString &stagedPath : lazyImagePaths)
-        if (!stagedPath.isEmpty())
-            QFile::remove(stagedPath);
-    for (const QString &stagedPath : lazyBackgroundPaths)
-        if (!stagedPath.isEmpty())
-            QFile::remove(stagedPath);
+        if (!expectedFiles.contains(file))
+            historyDir.remove(file);
+    removeUnreferencedTiles(historyDir, expectedFiles);
+    return true;
 }
 
 void ScreenshotHistory::rebaseBackgroundPaths(const QString &directory)
 {
     const QDir historyDir(directory);
     for (int index = 0; index < m_imagePaths.size(); ++index) {
-        const QString path = historyDir.filePath(
-            QStringLiteral("%1.png").arg(index, 3, 10, QChar('0')));
+        const QString key = index < m_storageKeys.size()
+            ? m_storageKeys.at(index)
+            : QStringLiteral("%1").arg(index, 3, 10, QChar('0'));
+        const QString path = historyDir.filePath(key + QStringLiteral(".png"));
         m_imagePaths[index] = QFileInfo::exists(path) ? path : QString();
     }
     for (int index = 0; index < m_backgroundPaths.size(); ++index) {
-        const QString path = historyDir.filePath(
-            QStringLiteral("%1.background.png").arg(index, 3, 10, QChar('0')));
+        const QString key = index < m_storageKeys.size()
+            ? m_storageKeys.at(index)
+            : QStringLiteral("%1").arg(index, 3, 10, QChar('0'));
+        const QString path = backgroundPathForKey(historyDir, key);
         // Newly-added entries start with an empty path.  They need to be
         // rebased too; otherwise releasing the in-memory frame would make
         // that history item impossible to restore until the next restart.
-        m_backgroundPaths[index] = QFileInfo::exists(path) ? path : QString();
+        m_backgroundPaths[index] = path;
     }
 }
 
@@ -214,10 +421,7 @@ QImage ScreenshotHistory::backgroundAt(int index) const
         return m_backgrounds.at(index);
     if (index >= m_backgroundPaths.size() || m_backgroundPaths.at(index).isEmpty())
         return {};
-    QImage background;
-    if (!background.load(m_backgroundPaths.at(index)))
-        return {};
-    return background;
+    return loadBackgroundTiles(m_backgroundPaths.at(index));
 }
 
 int ScreenshotHistory::size() const
@@ -263,6 +467,8 @@ void ScreenshotHistory::trimToLimits()
 {
     while (m_images.size() > m_maximumCount) {
         m_images.removeLast();
+        if (!m_storageKeys.isEmpty())
+            m_storageKeys.removeLast();
         if (!m_imagePaths.isEmpty())
             m_imagePaths.removeLast();
         if (!m_backgrounds.isEmpty())
@@ -302,6 +508,8 @@ void ScreenshotHistory::trimToLimits()
             break;
         usage -= m_images.constLast().sizeInBytes();
         m_images.removeLast();
+        if (!m_storageKeys.isEmpty())
+            m_storageKeys.removeLast();
         if (!m_imagePaths.isEmpty())
             m_imagePaths.removeLast();
         if (!m_backgrounds.isEmpty()) {

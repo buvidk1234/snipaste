@@ -100,6 +100,11 @@ PasteWindow::PasteWindow(QImage image, QWidget *parent)
     setFocusPolicy(Qt::StrongFocus);
     setCursor(Qt::ArrowCursor);
     setAcceptDrops(true);
+    // Keep the native window fully opaque for a newly created pin.  The
+    // manager may apply a user-selected opacity immediately afterwards, while
+    // this explicit initialization prevents a platform/window-style default
+    // from making the first frame look translucent.
+    setWindowOpacity(1.0);
 
     auto *shadow = new QGraphicsDropShadowEffect(this);
     shadow->setBlurRadius(m_shadowSize);

@@ -74,6 +74,8 @@ private slots:
     void brushesContinueOverExistingStrokes_data();
     void brushesContinueOverExistingStrokes();
     void eraserRemovesOnlyCoveredStrokeRegion();
+    void eraserRemovesOnlyCoveredShapeRegion();
+    void eraserRemovesMagnifierInteriorLocally();
     void inlineTextInputAndCancel();
     void inlineTextOutput_data();
     void inlineTextOutput();
@@ -1430,6 +1432,81 @@ void UiRegressionTest::eraserRemovesOnlyCoveredStrokeRegion()
     QCOMPARE(canvas.renderedImage(false), after);
 }
 
+void UiRegressionTest::eraserRemovesOnlyCoveredShapeRegion()
+{
+    QImage image(640, 420, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::white);
+    ui::AnnotationCanvas canvas(image);
+    canvas.resize(image.size());
+    canvas.show();
+
+    canvas.setTool(ui::AnnotationCanvas::Tool::Rectangle);
+    canvas.setPenColor(Qt::red);
+    canvas.setPenWidth(4);
+    canvas.setShapeFilled(true);
+    QTest::mousePress(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(100, 100));
+    QTest::mouseRelease(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(300, 300));
+    const QImage before = canvas.renderedImage(false);
+    QVERIFY(before.pixelColor(200, 200).red() > 180);
+    QVERIFY(before.pixelColor(120, 120).red() > 180);
+
+    canvas.setTool(ui::AnnotationCanvas::Tool::Eraser);
+    canvas.setPenWidth(40);
+    QTest::mouseClick(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(200, 200));
+    const QImage after = canvas.renderedImage(false);
+    QVERIFY(after.pixelColor(200, 200).green() > 180);
+    QVERIFY(after.pixelColor(200, 200).blue() > 180);
+    QVERIFY(after.pixelColor(120, 120).red() > 180);
+
+    canvas.undo();
+    QCOMPARE(canvas.renderedImage(false), before);
+    canvas.redo();
+    QCOMPARE(canvas.renderedImage(false), after);
+}
+
+void UiRegressionTest::eraserRemovesMagnifierInteriorLocally()
+{
+    QImage image(640, 420, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::white);
+    ui::AnnotationCanvas canvas(image);
+    canvas.resize(image.size());
+    canvas.show();
+
+    // Put a mark in the sampled area.  The magnifier enlarges it into the
+    // target frame, where the eraser must be able to remove only the covered
+    // part of the displayed content.
+    canvas.setTool(ui::AnnotationCanvas::Tool::Pen);
+    canvas.setPenColor(Qt::red);
+    canvas.setPenWidth(6);
+    QTest::mousePress(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(90, 100));
+    QTest::mouseMove(&canvas, QPoint(130, 100));
+    QTest::mouseRelease(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(130, 100));
+
+    canvas.setTool(ui::AnnotationCanvas::Tool::Magnifier);
+    QTest::mousePress(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(80, 80));
+    QTest::mouseMove(&canvas, QPoint(140, 140));
+    QTest::mouseRelease(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(140, 140));
+    const QImage before = canvas.renderedImage(false);
+    QVERIFY(before.pixelColor(90, 90).red() > 180); // source (100, 100), 2x
+    QVERIFY(before.pixelColor(100, 100).red() > 180); // source remains intact
+
+    canvas.setTool(ui::AnnotationCanvas::Tool::Eraser);
+    canvas.setPenWidth(8);
+    QTest::mouseClick(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(90, 90));
+    const QImage after = canvas.renderedImage(false);
+    const QColor erasedTarget = after.pixelColor(90, 90);
+    QVERIFY2(erasedTarget.green() > 180 && erasedTarget.blue() > 180,
+             qPrintable(QStringLiteral("target pixel is %1,%2,%3")
+                            .arg(erasedTarget.red()).arg(erasedTarget.green())
+                            .arg(erasedTarget.blue())));
+    QVERIFY(after.pixelColor(100, 100).red() > 180);
+
+    canvas.undo();
+    QCOMPARE(canvas.renderedImage(false), before);
+    canvas.redo();
+    QCOMPARE(canvas.renderedImage(false), after);
+}
+
 void UiRegressionTest::magnifierFramesMoveIndependently()
 {
     QImage image(640, 420, QImage::Format_ARGB32_Premultiplied);
@@ -1585,6 +1662,7 @@ void UiRegressionTest::inlineTextOutput_data()
     QTest::addColumn<QString>("action");
     QTest::newRow("copy-while-editing") << QStringLiteral("完成");
     QTest::newRow("pin-while-editing") << QStringLiteral("贴图");
+    QTest::newRow("global-paste-while-editing") << QStringLiteral("global-paste");
 }
 
 void UiRegressionTest::inlineTextOutput()
@@ -1603,10 +1681,13 @@ void UiRegressionTest::inlineTextOutput()
     QTest::keyClicks(editor, "Keep pending text");
     const QImage pending = canvas->renderedImage();
     QVERIFY(editor->isVisible());
-    QTest::mouseClick(overlay->findChild<QToolButton *>(action), Qt::LeftButton);
+    if (action == QStringLiteral("global-paste"))
+        overlay->pasteSelection();
+    else
+        QTest::mouseClick(overlay->findChild<QToolButton *>(action), Qt::LeftButton);
     QCOMPARE(captured.count(), 1);
     QCOMPARE(qvariant_cast<QImage>(captured.first().first()), pending);
-    if (action == QStringLiteral("贴图")) {
+    if (action == QStringLiteral("贴图") || action == QStringLiteral("global-paste")) {
         QCOMPARE(pasted.count(), 1);
         QCOMPARE(qvariant_cast<QImage>(pasted.first().first()), pending);
     } else {

@@ -67,9 +67,12 @@ void initializeLogging()
     const QString directory = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
     QDir().mkpath(directory);
     logFile().setFileName(directory + QStringLiteral("/snipaste.log"));
-    logFile().open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
+    const bool logOpened = logFile().open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
     qInstallMessageHandler(messageHandler);
-    qInfo() << "logging initialized at" << logFile().fileName();
+    if (logOpened)
+        qInfo() << "logging initialized at" << logFile().fileName();
+    else
+        qWarning() << "failed to open log file" << logFile().fileName();
 }
 
 } // namespace snipaste::app

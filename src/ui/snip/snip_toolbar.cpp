@@ -544,6 +544,8 @@ void SnipOverlay::updateAllColorWatchers(const QColor &color)
 
 void SnipOverlay::createToolbar()
 {
+    if (m_toolbar)
+        return;
     m_toolbar = new QFrame(this);
     m_toolbar->setObjectName(QStringLiteral("captureToolbar"));
     m_toolbar->setCursor(Qt::ArrowCursor);
@@ -1656,6 +1658,8 @@ void SnipOverlay::confirmSelection()
 {
     if (m_selection.isEmpty() || m_canvas)
         return;
+    if (!m_toolbar)
+        createToolbar();
     // Keep normal captures in full-screen image coordinates.  A history item
     // can have a pixel size that differs from the current desktop frame, so it
     // remains a compact canvas until the user changes the selection.
@@ -1705,6 +1709,8 @@ void SnipOverlay::confirmSelection()
 
 void SnipOverlay::resetSelection()
 {
+    if (!m_toolbar)
+        createToolbar();
     m_transformingSelection = false;
     m_movingSelection = false;
     m_resizeEdges = {};

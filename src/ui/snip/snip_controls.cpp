@@ -1,4 +1,5 @@
 #include "ui/snip/snip_overlay.h"
+#include "platform/screen_capture.h"
 #include "ui/snip/capture_icons.h"
 #include "ui/annotation/annotation_dialog.h"
 #include "platform/keyboard.h"
@@ -301,7 +302,7 @@ void SnipOverlay::selectCurrentScreen()
         // never contains its own dimming layer or selection handles.
         hide();
         QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
-        QImage image = screen->grabWindow(0).toImage();
+        QImage image = platform::captureScreen(screen);
         image.setDevicePixelRatio(1);
         show();
 
@@ -311,7 +312,7 @@ void SnipOverlay::selectCurrentScreen()
         m_singleScreenGeometry = m_screenGeometry;
         m_singleScreenBackground = image;
         m_singleScreenBackgroundProvider = [screen = QPointer<QScreen>(screen)] {
-            return screen ? screen->grabWindow(0).toImage() : QImage();
+            return screen ? platform::captureScreen(screen) : QImage();
         };
         m_backgroundProvider = m_singleScreenBackgroundProvider;
         m_background = image;
@@ -345,7 +346,7 @@ QImage SnipOverlay::captureVirtualDesktop() const
     for (QScreen *screen : screens) {
         if (!screen)
             continue;
-        QImage image = screen->grabWindow(0).toImage();
+        QImage image = platform::captureScreen(screen);
         image.setDevicePixelRatio(1);
         const QRect target = screen->geometry().translated(-virtualGeometry.topLeft());
         if (!image.isNull() && !target.isEmpty())

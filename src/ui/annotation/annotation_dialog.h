@@ -5,6 +5,7 @@
 #include <QImage>
 #include <QHash>
 #include <QPointF>
+#include <QPainterPath>
 #include <QRectF>
 #include <QString>
 #include <QVector>
@@ -13,7 +14,6 @@
 class QKeyEvent;
 class QMouseEvent;
 class QPainter;
-class QPainterPath;
 class QPlainTextEdit;
 class QWheelEvent;
 
@@ -136,6 +136,10 @@ private:
         EffectShape effectShape = EffectShape::Brush;
         bool magnifierCutout = true;
         int magnifierConnectorStyle = 0;
+        // Parts covered by the eraser are kept as a path on the shape.  The
+        // path is in image coordinates, so it remains correct when the
+        // shape is moved or rotated and can be undone with the shape state.
+        QPainterPath erasedPath;
     };
     struct ToolStyle {
         QColor color = QColor(237, 28, 36);
@@ -149,6 +153,7 @@ private:
     QRect outputPixelRect() const;
     QPointF toImagePoint(const QPointF &point) const;
     void updateToolCursor();
+    void applyErasedClip(QPainter &painter, const Shape &shape) const;
     void drawShape(QPainter &painter, const Shape &shape, qreal scale) const;
     void drawEffect(QPainter &painter, const QImage &sourceFrame, const Shape &shape) const;
     QPainterPath effectMask(const Shape &shape) const;
@@ -164,9 +169,6 @@ private:
     void copySelectedShape();
     void pasteShape();
     void applyEraserSegment(const QPointF &from, const QPointF &to);
-    QVector<Shape> erasedShapeParts(const Shape &shape,
-                                    const QPointF &from,
-                                    const QPointF &to) const;
     void invalidateEraserHistory();
     void invalidateRenderCache();
 

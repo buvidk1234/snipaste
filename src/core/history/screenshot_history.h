@@ -24,10 +24,10 @@ public:
     void add(const QImage &image, const QImage &background = {});
     void clear();
     void loadFromDirectory(const QString &directory);
-    void saveToDirectory(const QString &directory) const;
-    // After a save, lazy image/background paths follow the history indices
-    // that were just written.  This keeps subsequent saves and navigation
-    // from reading a file that belongs to a different item after a prepend.
+    // Write new entries only. Backgrounds use lossless content-addressed
+    // blocks shared by historical desktops; unchanged blocks are not written.
+    bool saveToDirectory(const QString &directory) const;
+    // Attach stable storage paths after a successful asynchronous save.
     void rebaseBackgroundPaths(const QString &directory);
     // Full-screen backgrounds are only needed while navigating history.  Once
     // the asynchronous save has completed, keep their file paths and release
@@ -59,6 +59,9 @@ private:
     int m_maximumCount;
     qint64 m_memoryLimitBytes;
     QList<QImage> m_images;
+    // Stable per-entry names prevent a prepend from renaming every older PNG.
+    // The entry order is stored separately in a small index file.
+    QStringList m_storageKeys;
     QStringList m_imagePaths;
     QList<QImage> m_backgrounds;
     QStringList m_backgroundPaths;

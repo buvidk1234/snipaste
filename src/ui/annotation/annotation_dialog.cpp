@@ -400,6 +400,28 @@ QRectF AnnotationCanvas::shapeBounds(const Shape &shape) const
     for (const QPointF &point : shape.points)
         bounds |= QRectF(point, QSizeF(0, 0));
     bounds = bounds.normalized();
+    if (shape.tool == Tool::Text) {
+        QFont textFont;
+        textFont.setFamily(shape.fontFamily.isEmpty()
+                               ? QStringLiteral("Microsoft YaHei UI")
+                               : shape.fontFamily);
+        textFont.setPixelSize(qMax(6, qRound(shape.fontSize)));
+        textFont.setBold(shape.textBold);
+        textFont.setItalic(shape.textItalic);
+        const QFontMetricsF metrics(textFont);
+        const QStringList lines = shape.text.split(QChar::LineFeed);
+        qreal width = 0.0;
+        for (const QString &line : lines)
+            width = qMax(width, metrics.horizontalAdvance(line));
+        const qreal height = qMax(metrics.lineSpacing(),
+                                  metrics.lineSpacing() * qMax(1, lines.size()));
+        bounds |= QRectF(shape.start, QSizeF(width + 6.0, height + 4.0));
+    } else if (shape.tool == Tool::Number) {
+        const qreal diameter = qMax<qreal>(1.0, shape.numberSize);
+        bounds |= QRectF(shape.start - QPointF(diameter * 0.5, diameter * 0.5),
+                         QSizeF(diameter, diameter));
+    }
+    bounds = bounds.normalized();
     const qreal margin = qMax<qreal>(6.0, shape.width * 1.5);
     bounds = bounds.adjusted(-margin, -margin, margin, margin);
     if (qFuzzyIsNull(shape.rotation))
@@ -434,97 +456,37 @@ void AnnotationCanvas::invalidateEraserHistory()
     m_lastOperationWasEraser = false;
 }
 
-QVector<AnnotationCanvas::Shape> AnnotationCanvas::erasedShapeParts(const Shape &shape,
-                                                                      const QPointF &from,
-                                                                      const QPointF &to) const
-{
-    const qreal radius = qMax<qreal>(1.0, m_penWidth * 0.5);
-    const auto distanceToSegment = [](const QPointF &point,
-                                      const QPointF &a,
-                                      const QPointF &b) {
-        const QPointF delta = b - a;
-        const qreal lengthSquared = QPointF::dotProduct(delta, delta);
-        if (lengthSquared <= 0.0001)
-            return QLineF(point, a).length();
-        const qreal t = qBound<qreal>(0.0,
-                                      QPointF::dotProduct(point - a, delta) / lengthSquared,
-                                      1.0);
-        return QLineF(point, a + delta * t).length();
-    };
-    const auto covered = [&](const QPointF &point) {
-        return distanceToSegment(point, from, to) <= radius;
-    };
-
-    const bool brush = shape.tool == Tool::Pen || shape.tool == Tool::Marker
-        || ((shape.tool == Tool::Mosaic || shape.tool == Tool::Blur)
-            && shape.effectShape == EffectShape::Brush);
-    if (!brush) {
-        const QRectF eraseBounds(QPointF(qMin(from.x(), to.x()) - radius,
-                                         qMin(from.y(), to.y()) - radius),
-                                 QPointF(qMax(from.x(), to.x()) + radius,
-                                         qMax(from.y(), to.y()) + radius));
-        return shapeBounds(shape).intersects(eraseBounds)
-            ? QVector<Shape>() : QVector<Shape>{shape};
-    }
-
-    QVector<QPointF> points = shape.points;
-    if (points.isEmpty())
-        points = {shape.start, shape.end};
-    if (points.size() > 1) {
-        QVector<QPointF> sampled;
-        sampled.reserve(points.size() * 2);
-        sampled.append(points.first());
-        for (int index = 1; index < points.size(); ++index) {
-            const QPointF a = points.at(index - 1);
-            const QPointF b = points.at(index);
-            const qreal length = QLineF(a, b).length();
-            const int steps = qMax(1, qCeil(length / qMax<qreal>(1.0, radius * 0.45)));
-            for (int step = 1; step <= steps; ++step)
-                sampled.append(a + (b - a) * (qreal(step) / steps));
-        }
-        points = std::move(sampled);
-    }
-
-    QVector<Shape> result;
-    QVector<QPointF> run;
-    const auto flush = [&] {
-        if (run.isEmpty())
-            return;
-        if (run.size() == 1 && points.size() > 1)
-            run.clear();
-        else {
-            Shape part = shape;
-            part.points = run;
-            part.start = run.first();
-            part.end = run.last();
-            result.append(std::move(part));
-            run.clear();
-        }
-    };
-    for (const QPointF &point : points) {
-        if (covered(point))
-            flush();
-        else
-            run.append(point);
-    }
-    flush();
-    return result;
-}
-
 void AnnotationCanvas::applyEraserSegment(const QPointF &from, const QPointF &to)
 {
-    QVector<Shape> next;
-    next.reserve(m_shapes.size());
+    const qreal radius = qMax<qreal>(0.5, m_penWidth * 0.5);
+    QPainterPath centerline;
+    centerline.moveTo(from);
+    if (QLineF(from, to).length() > 0.001)
+        centerline.lineTo(to);
+    QPainterPath eraserPath;
+    QPainterPathStroker stroker;
+    stroker.setWidth(radius * 2.0);
+    stroker.setCapStyle(Qt::RoundCap);
+    stroker.setJoinStyle(Qt::RoundJoin);
+    eraserPath = stroker.createStroke(centerline);
+    if (eraserPath.isEmpty())
+        eraserPath.addEllipse(QRectF(from - QPointF(radius, radius),
+                                     QSizeF(radius * 2.0, radius * 2.0)));
+
+    const QRectF eraseBounds = eraserPath.boundingRect();
     bool changed = false;
-    for (const Shape &shape : std::as_const(m_shapes)) {
-        const QVector<Shape> parts = erasedShapeParts(shape, from, to);
-        if (parts.size() != 1 || (parts.size() == 1 && parts.first().points != shape.points))
-            changed = true;
-        next += parts;
+    for (Shape &shape : m_shapes) {
+        if (!shapeBounds(shape).intersects(eraseBounds))
+            continue;
+        // Keep the original vector shape and accumulate covered regions.
+        // Rendering subtracts this path from this shape only, so a later
+        // annotation is still painted on top of an earlier erased area.
+        shape.erasedPath.setFillRule(Qt::WindingFill);
+        shape.erasedPath.addPath(eraserPath);
+        changed = true;
     }
     if (!changed)
         return;
-    m_shapes = std::move(next);
     invalidateRenderCache();
     m_redoShapes.clear();
     emit historyChanged();
@@ -538,6 +500,7 @@ void AnnotationCanvas::translateShape(Shape &shape, const QPointF &delta) const
     shape.sourceRect.translate(delta);
     for (QPointF &point : shape.points)
         point += delta;
+    shape.erasedPath.translate(delta);
 }
 
 void AnnotationCanvas::translateMagnifierPart(Shape &shape,
@@ -554,6 +517,7 @@ void AnnotationCanvas::translateMagnifierPart(Shape &shape,
     }
     shape.start += delta;
     shape.end += delta;
+    shape.erasedPath.translate(delta);
 }
 
 void AnnotationCanvas::rotateSelected(qreal degrees)
@@ -562,6 +526,12 @@ void AnnotationCanvas::rotateSelected(qreal degrees)
         return;
     Shape &shape = m_shapes[m_selectedShape];
     invalidateEraserHistory();
+    Shape unrotated = shape;
+    unrotated.rotation = 0.0;
+    const QPointF center = shapeBounds(unrotated).center();
+    const QTransform transform = QTransform().translate(center.x(), center.y())
+        .rotate(degrees).translate(-center.x(), -center.y());
+    shape.erasedPath = transform.map(shape.erasedPath);
     shape.rotation = std::fmod(shape.rotation + degrees + 360.0, 360.0);
     if (shape.rotation > 180.0)
         shape.rotation -= 360.0;
@@ -763,8 +733,36 @@ void AnnotationCanvas::updateToolCursor()
     setCursor(QCursor(pixmap, canvasSize / 2, canvasSize / 2));
 }
 
+void AnnotationCanvas::applyErasedClip(QPainter &painter, const Shape &shape) const
+{
+    if (shape.erasedPath.isEmpty())
+        return;
+
+    // QPainter clips by intersection.  Build the part of the image outside
+    // the accumulated eraser path, then intersect it with the caller's
+    // existing clip.  The path is in image coordinates and is transformed
+    // together with the painter, including rotated/zoomed previews.
+    const QSizeF imageSize = m_image.isNull()
+        ? QSizeF(1.0, 1.0) : QSizeF(m_image.size());
+    QRectF outer(QPointF(-2.0, -2.0), imageSize + QSizeF(4.0, 4.0));
+    QPainterPath keep;
+    keep.setFillRule(Qt::WindingFill);
+    keep.addRect(outer);
+    keep = keep.subtracted(shape.erasedPath);
+    painter.setClipPath(keep, Qt::IntersectClip);
+}
+
 void AnnotationCanvas::drawShape(QPainter &painter, const Shape &shape, qreal scale) const
 {
+    if (!shape.erasedPath.isEmpty()) {
+        painter.save();
+        applyErasedClip(painter, shape);
+        Shape visible = shape;
+        visible.erasedPath.clear();
+        drawShape(painter, visible, scale);
+        painter.restore();
+        return;
+    }
     if (!qFuzzyIsNull(shape.rotation)) {
         Shape unrotated = shape;
         unrotated.rotation = 0.0;
@@ -1167,7 +1165,8 @@ void AnnotationCanvas::drawEffect(QPainter &painter,
 
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, false);
-    painter.setClipPath(mask);
+    applyErasedClip(painter, shape);
+    painter.setClipPath(mask, Qt::IntersectClip);
     painter.drawImage(effectRect.topLeft(), filtered);
     painter.restore();
 }
@@ -1833,16 +1832,17 @@ QImage AnnotationCanvas::fullRenderedImage(bool includePendingText) const
                 continue;
             const QImage sourceFrame = result;
             painter.save();
+            applyErasedClip(painter, shape);
             if (shape.effectShape == EffectShape::Ellipse) {
                 QPainterPath clip;
                 clip.addEllipse(target);
-                painter.setClipPath(clip);
+                painter.setClipPath(clip, Qt::IntersectClip);
             } else if (shape.cornerRadius > 0.0) {
                 QPainterPath clip;
                 clip.addRoundedRect(target, shape.cornerRadius, shape.cornerRadius);
-                painter.setClipPath(clip);
+                painter.setClipPath(clip, Qt::IntersectClip);
             } else {
-                painter.setClipRect(target);
+                painter.setClipRect(target, Qt::IntersectClip);
             }
             painter.setRenderHint(QPainter::SmoothPixmapTransform);
             // Map the source centre onto the target centre.  Drawing the

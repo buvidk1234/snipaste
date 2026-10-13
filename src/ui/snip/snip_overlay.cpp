@@ -1,6 +1,7 @@
 #include "ui/snip/snip_overlay.h"
 #include "ui/annotation/annotation_dialog.h"
 #include "platform/keyboard.h"
+#include "platform/screen_capture.h"
 #include "platform/windows/capture_target.h"
 
 #include <QApplication>
@@ -75,13 +76,12 @@ SnipOverlay::SnipOverlay(QScreen *screen,
 
     m_screenGeometry = screen->geometry();
     m_singleScreenGeometry = m_screenGeometry;
-    const QPixmap capture = screen->grabWindow(0);
-    m_background = capture.toImage();
+    m_background = platform::captureScreen(screen);
     m_background.setDevicePixelRatio(1);
     m_cleanBackground = m_background;
     m_singleScreenBackground = m_background;
     m_singleScreenBackgroundProvider = [screen = QPointer<QScreen>(screen)] {
-        return screen ? screen->grabWindow(0).toImage() : QImage();
+        return screen ? platform::captureScreen(screen) : QImage();
     };
     m_backgroundProvider = m_singleScreenBackgroundProvider;
     setGeometry(m_screenGeometry);
@@ -98,7 +98,24 @@ SnipOverlay::SnipOverlay(QScreen *screen,
         drawCapturedCursor(screen);
     if (!m_initialSelection.isEmpty())
         m_selection = m_initialSelection.intersected(rect());
-    createToolbar();
+    // Building the complete annotation toolbar (nine option pages and their
+    // icons) is comparatively expensive.  Show the captured frame first and
+    // finish constructing controls on the next event turn; a very fast first
+    // click still calls createToolbar() from confirmSelection().
+    if (m_initialSelection.isEmpty() && QGuiApplication::platformName() != QStringLiteral("offscreen")) {
+        // Let the first captured frame reach the compositor before building
+        // the large widget toolbar.  A selection made during this short
+        // window still creates it synchronously from confirmSelection().
+        QTimer::singleShot(40, this, [this] {
+            if (!m_toolbar) {
+                createToolbar();
+                updateToolbarGeometry();
+                update();
+            }
+        });
+    } else {
+        createToolbar();
+    }
     m_selectionBorder = new SnipBorderOverlay(this);
     m_selectionBorder->setGeometry(rect());
     m_selectionBorder->show();
@@ -171,7 +188,7 @@ void SnipOverlay::setSelectionHistory(const QList<QRect> &regions)
     }
 }
 
-void SnipOverlay::updateHoverTarget()
+void SnipOverlay::updateHoverTarget(bool allowElements)
 {
     if (m_selectionConfirmed || m_dragging)
         return;
@@ -180,14 +197,15 @@ void SnipOverlay::updateHoverTarget()
     }
     if (m_targetPoint != m_cursorPosition || m_targetHierarchy.isEmpty()) {
         m_targetPoint = m_cursorPosition; m_targetLevel = 0; m_targetHierarchy.clear();
+        const bool detectElements = allowElements && m_elementMode && m_detectElements;
         if (m_nativeTargetDetector && QGuiApplication::platformName() != QStringLiteral("offscreen")) {
             m_targetHierarchy = platform::captureTargetHierarchyAt(m_cursorPosition, size(), winId(),
-                                                                  m_elementMode && m_detectElements,
+                                                                  detectElements,
                                                                   m_excludedDetectionProcesses,
                                                                   m_unstableDetectionProcesses);
         } else if (!m_nativeTargetDetector && m_targetDetector) {
             const QRect window = m_targetDetector(m_cursorPosition, false).intersected(rect());
-            const QRect element = m_elementMode && m_detectElements
+            const QRect element = detectElements
                 ? m_targetDetector(m_cursorPosition, true).intersected(rect()) : window;
             for (const QRect candidate : {element, window})
                 if (candidate.contains(m_cursorPosition) && !m_targetHierarchy.contains(candidate))
@@ -674,9 +692,26 @@ void SnipOverlay::showEvent(QShowEvent *event)
     activateWindow();
     raise();
     setFocus();
-    updateHoverTarget();
+    // The first frame only needs the underlying window rectangle.  Element
+    // detection uses IAccessible/UIAutomation and can block the GUI thread;
+    // defer it until the frame is already visible and the cursor has stayed
+    // still.  A cursor move or a click will perform the detailed hit test on
+    // demand through the normal event path.
+    updateHoverTarget(false);
     updateToolbarGeometry();
     update();
+    if (m_detectElements && m_elementMode) {
+        const QPoint initialCursor = m_cursorPosition;
+        QTimer::singleShot(120, this, [this, initialCursor] {
+            if (!isVisible() || m_selectionConfirmed || m_dragging
+                || m_cursorPosition != initialCursor)
+                return;
+            m_targetPoint = QPoint(-1, -1);
+            m_targetHierarchy.clear();
+            updateHoverTarget(true);
+            update();
+        });
+    }
 }
 
 QPoint SnipOverlay::sampledPixel() const
@@ -1112,11 +1147,11 @@ void SnipOverlay::printSelection(bool closeAfter)
         close();
 }
 
-void SnipOverlay::pasteSelection(bool closeAfter)
+bool SnipOverlay::pasteSelection(bool closeAfter)
 {
     const QImage image = selectionImage();
     if (image.isNull())
-        return;
+        return false;
 
     emit selectionCaptured(globalSelection());
     emit screenshotCaptured(image);
@@ -1125,6 +1160,7 @@ void SnipOverlay::pasteSelection(bool closeAfter)
     emit pasteRequested(image);
     if (closeAfter)
         close();
+    return true;
 }
 
 void SnipOverlay::executeConfiguredAction(const QString &action, bool closeAfter)

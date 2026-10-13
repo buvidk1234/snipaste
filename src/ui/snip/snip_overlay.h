@@ -35,6 +35,9 @@ public:
                 QWidget *parent = nullptr);
 
     void captureSelectionImmediately();
+    // The global paste command uses the current selection while this
+    // capture session is open, before it has entered clipboard/history.
+    bool pasteSelection(bool closeAfter = true);
     void setFixedSelectionSize(const QSize &size);
     using TargetDetector = std::function<QRect(QPoint, bool)>;
     void setTargetDetector(TargetDetector detector);
@@ -120,7 +123,6 @@ private:
     void saveSelection(bool closeAfter = true);
     void quickSaveSelection(bool closeAfter = true);
     void printSelection(bool closeAfter = true);
-    void pasteSelection(bool closeAfter = true);
     void executeConfiguredAction(const QString &action, bool closeAfter);
     void annotateSelection();
     void ocrSelection();
@@ -134,7 +136,10 @@ private:
     // WA_DeleteOnClose is asynchronous, and the image can otherwise remain
     // resident while a popup or a nested event loop is finishing.
     void releaseCaptureResources();
-    void updateHoverTarget();
+    // Window hit testing is cheap, while element hit testing may enter the
+    // Windows accessibility/UI Automation stack.  Callers that are trying to
+    // get the first frame on screen can explicitly skip the latter.
+    void updateHoverTarget(bool allowElements = true);
     void updateDragSelection(QPoint position, Qt::KeyboardModifiers modifiers);
     QPoint sampledPixel() const;
     QString sampledColorText() const;

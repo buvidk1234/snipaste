@@ -147,7 +147,11 @@ private:
     PasteManager *m_pasteManager = nullptr;
     bool m_showToolbar = true;
     bool m_showAnnotations = true;
-    bool m_borderEnabled = false;
+    // A pin should remain distinguishable from the desktop even when its
+    // shadow is disabled or the captured pixels are dark.  Keep this as a
+    // lightweight one-pixel edge; the per-pin context menu can still turn it
+    // off when an unobstructed export is needed.
+    bool m_borderEnabled = true;
     int m_shadowSize = 32;
     QColor m_shadowColor = QColor(0, 0, 0, 150);
     int m_borderWidth = 1;

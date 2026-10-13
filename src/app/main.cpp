@@ -4,6 +4,7 @@
 #include "core/config/config_store.h"
 #include "core/control/hot_corner_state.h"
 #include "platform/keyboard.h"
+#include "platform/screen_capture.h"
 #include "core/history/screenshot_history.h"
 #include "core/recognition/ocr_service.h"
 #include "core/recognition/barcode_service.h"
@@ -60,6 +61,7 @@
 #include <QStandardPaths>
 #include <QStyle>
 #include <QThread>
+#include <QThreadPool>
 #include <QTimer>
 #include <QUrl>
 #include <QVector>
@@ -76,6 +78,7 @@
 
 #ifdef Q_OS_WIN
 #include <windows.h>
+#include <malloc.h>
 #elif defined(Q_OS_MACOS) || defined(Q_OS_MAC)
 #include <Carbon/Carbon.h>
 #endif
@@ -466,7 +469,7 @@ QImage captureScreens(const QList<QScreen *> &screens)
     for (QScreen *screen : screens) {
         if (!screen)
             continue;
-        QImage image = screen->grabWindow(0).toImage();
+        QImage image = snipaste::platform::captureScreen(screen);
         const QRect target = screen->geometry().translated(-virtualGeometry.topLeft());
         if (image.size() != target.size())
             image = image.scaled(target.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
@@ -632,7 +635,7 @@ QColor colorAtCursor()
     if (!screen)
         return {};
     const QPoint local = QCursor::pos() - screen->geometry().topLeft();
-    const QImage image = screen->grabWindow(0).toImage();
+    const QImage image = snipaste::platform::captureScreen(screen);
     if (image.isNull() || screen->geometry().width() <= 0 || screen->geometry().height() <= 0)
         return {};
     const qreal scaleX = qreal(image.width()) / qreal(screen->geometry().width());
@@ -672,14 +675,17 @@ void saveHistorySnapshotAsync(snipaste::core::ScreenshotHistory &history,
         generation = ++latestGeneration;
     }
 
-    QtConcurrent::run([snapshot, directory, generation, snapshotRevision, historyPtr = &history] {
+    QThreadPool::globalInstance()->start([snapshot, directory, generation, snapshotRevision, historyPtr = &history] {
         QMutexLocker saveLocker(&saveMutex);
         {
             QMutexLocker generationLocker(&generationMutex);
             if (generation != latestGeneration)
                 return;
         }
-        snapshot.saveToDirectory(directory);
+        if (!snapshot.saveToDirectory(directory)) {
+            qWarning() << "failed to save screenshot history" << directory;
+            return;
+        }
         // Rebase only after the write that owns this generation completed.
         // A newer capture may have prepended an item while the worker was
         // writing; the revision check prevents its paths from being changed
@@ -717,11 +723,13 @@ QString outputFilePath(const QString &value, const snipaste::core::ConfigStore &
 void trimIdleProcessMemory()
 {
 #ifdef Q_OS_WIN
-    // Qt has already released the screenshot/overlay objects at this point.
-    // Ask Windows to evict those now-unused pages so the idle Working Set
-    // reflects the release instead of waiting for system memory pressure.
-    SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1),
-                             static_cast<SIZE_T>(-1));
+    // The screenshot/overlay objects have already been released.  Compact
+    // free CRT heap blocks, but keep the process working set intact: passing
+    // (-1, -1) to SetProcessWorkingSetSize is EmptyWorkingSet and evicts Qt,
+    // font, window, and application code pages as well.  That makes the tray
+    // process look tiny while making the next hotkey pay the page-fault cost
+    // of a cold start again.
+    _heapmin();
 #endif
 }
 
@@ -990,6 +998,10 @@ int main(int argc, char *argv[])
                                       const QImage &image,
                                       const QImage &background = {}) {
         ensureHistoryLoaded();
+        // History navigation must restore the exact desktop around a capture.
+        // ScreenshotHistory stores the background losslessly in deduplicated
+        // tiles, so retaining it does not rewrite a multi-megabyte PNG for
+        // every capture.
         history.add(image, background);
         saveHistorySnapshotAsync(history, historyPath);
     };
@@ -1011,7 +1023,7 @@ int main(int argc, char *argv[])
         const bool softwareMetadata = config.value(QStringLiteral("misc/software_metadata"),
                                                    config.value(QStringLiteral("software_metadata"), true)).toBool();
         const QImage source = image;
-        QtConcurrent::run([source, directory, fileName, removeAlpha, softwareMetadata] {
+        QThreadPool::globalInstance()->start([source, directory, fileName, removeAlpha, softwareMetadata] {
             if (!QDir().mkpath(directory))
                 return;
             QImage output = addSoftwareMetadata(removeRedundantAlpha(source, removeAlpha), softwareMetadata);
@@ -1143,7 +1155,7 @@ int main(int argc, char *argv[])
                             recordScreenshot,
                             autoSaveScreenshot,
                             showPaste,
-                             outputCapture](bool autoCopy, bool reuseLast, QSize fixedSize = {}, QRect requestedSelection = {},
+                            outputCapture](bool autoCopy, bool reuseLast, QSize fixedSize = {}, QRect requestedSelection = {},
                                             bool pinAfterCapture = false, QString outputSpec = {}, bool hold = false,
                                             bool noAutoSave = false, bool keepAspect = false) {
         if (activeOverlay) {
@@ -1518,7 +1530,7 @@ int main(int argc, char *argv[])
                 screen = QGuiApplication::primaryScreen();
             if (!screen)
                 return;
-            QImage image = screen->grabWindow(0).toImage();
+            QImage image = snipaste::platform::captureScreen(screen);
             image.setDevicePixelRatio(1.0);
             if (image.isNull())
                 return;
@@ -1639,7 +1651,7 @@ int main(int argc, char *argv[])
                     screen = QGuiApplication::primaryScreen();
                 if (!screen)
                     return;
-                QImage image = screen->grabWindow(0).toImage();
+                QImage image = snipaste::platform::captureScreen(screen);
                 image.setDevicePixelRatio(1.0);
                 pasteManager.rememberCapture(image, screen->geometry());
                 recordScreenshot(image, image);
@@ -1662,7 +1674,14 @@ int main(int argc, char *argv[])
     commands.registerCommand({
         QStringLiteral("paste.clipboard"),
         QStringLiteral("贴图"),
-        [&pasteManager, &config, &lastPastedFileClipboard] {
+        [&activeOverlay, &pasteManager, &config, &lastPastedFileClipboard] {
+            // F3 during selection must output that live capture. It has not
+            // reached the clipboard or history yet; reading either here
+            // would paste an older image and leave the snip session open.
+            if (activeOverlay && activeOverlay->isVisible()) {
+                if (activeOverlay->pasteSelection())
+                    return;
+            }
             QImage image = QApplication::clipboard()->image();
             QString sourceText;
             const QMimeData *mime = QApplication::clipboard()->mimeData();
