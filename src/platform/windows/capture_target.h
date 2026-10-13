@@ -14,10 +14,12 @@ namespace snipaste::platform {
 QRect captureTargetAt(QPoint localPosition, QSize logicalScreenSize,
                       WId overlayWindow, bool elementMode,
                       const QStringList &excludedProcesses = {},
-                      const QStringList &unstableProcesses = {});
+                      const QStringList &unstableProcesses = {},
+                      quintptr *nativeWindow = nullptr);
 QList<QRect> captureTargetHierarchyAt(QPoint localPosition, QSize logicalScreenSize,
                                       WId overlayWindow, bool elementMode,
                                       const QStringList &excludedProcesses = {},
-                                      const QStringList &unstableProcesses = {});
+                                      const QStringList &unstableProcesses = {},
+                                      quintptr *nativeWindow = nullptr);
 
 } // namespace snipaste::platform

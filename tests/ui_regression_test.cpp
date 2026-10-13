@@ -7,6 +7,7 @@
 #include "ui/snip/snip_overlay.h"
 #include "ui/tray/tray_controller.h"
 #include "core/command/command_registry.h"
+#include "platform/keyboard.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -330,7 +331,7 @@ void UiRegressionTest::trayContextMenuMatchesReference()
     QCOMPARE(actions.at(0)->text(), QStringLiteral("截屏"));
     QCOMPARE(actions.at(0)->shortcut(), QKeySequence(Qt::Key_F1));
     QCOMPARE(actions.at(1)->text(), QStringLiteral("截屏并自动复制"));
-    QCOMPARE(actions.at(1)->shortcut(), QKeySequence(Qt::CTRL | Qt::Key_F1));
+    QCOMPARE(actions.at(1)->shortcut(), snipaste::platform::primaryKeySequence(Qt::Key_F1));
     QCOMPARE(actions.at(2)->text(), QStringLiteral("自定义截屏"));
     QCOMPARE(actions.at(2)->shortcut(), QKeySequence(Qt::SHIFT | Qt::Key_F1));
     QCOMPARE(actions.at(3)->text(), QStringLiteral("贴图"));
@@ -499,7 +500,7 @@ void UiRegressionTest::detectionModesAndColorShortcuts()
     overlay->setLastSelection(icon);
     QTest::keyClick(overlay, Qt::Key_R);
     QCOMPARE(overlay->findChild<ui::AnnotationCanvas *>()->geometry(), icon);
-    QTest::keyClick(overlay, Qt::Key_A, Qt::ControlModifier);
+    QTest::keyClick(overlay, Qt::Key_A, snipaste::platform::primaryModifier());
     QCOMPARE(overlay->findChild<ui::AnnotationCanvas *>()->geometry(), overlay->rect());
     overlay->close();
     QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
@@ -799,7 +800,7 @@ void UiRegressionTest::proHistoryAndSelectionShortcuts()
     QCOMPARE(canvas->geometry(), window.translated(1, 0).adjusted(-1, -1, 1, 1));
     QTest::keyClick(overlay, Qt::Key_2);
     QCOMPARE(canvas->geometry(), window.translated(1, 0));
-    QTest::keyClick(overlay, Qt::Key_Down, Qt::ControlModifier);
+    QTest::keyClick(overlay, Qt::Key_Down, snipaste::platform::primaryModifier());
     QCOMPARE(canvas->height(), window.height() + 1);
     QTest::keyClick(overlay, Qt::Key_Down, Qt::ShiftModifier);
     QCOMPARE(canvas->height(), window.height());
@@ -826,7 +827,7 @@ void UiRegressionTest::proHistoryAndSelectionShortcuts()
     canvas = overlay->findChild<ui::AnnotationCanvas *>();
     QCOMPARE(canvas->geometry(), recent);
     QCOMPARE(canvas->renderedImage(), live);
-    QTest::keyClick(overlay, Qt::Key_A, Qt::ControlModifier);
+    QTest::keyClick(overlay, Qt::Key_A, snipaste::platform::primaryModifier());
     QCOMPARE(canvas->geometry(), overlay->rect());
     QVERIFY(overlay->rect().contains(overlay->findChild<QFrame *>(QStringLiteral("captureSizeToolbar"))->geometry()));
     overlay->close();
@@ -890,7 +891,7 @@ void UiRegressionTest::proLayoutAndAnnotations()
     auto *editor = canvas->findChild<QPlainTextEdit *>();
     QVERIFY(editor->isVisible());
     editor->setPlainText(QStringLiteral("专业版界面 · 文字输入"));
-    QTest::keyClick(editor, Qt::Key_Return, Qt::ControlModifier);
+    QTest::keyClick(editor, Qt::Key_Return, snipaste::platform::primaryModifier());
     const QImage beforeMagnifier = canvas->renderedImage();
     draw(QStringLiteral("放大镜标注"), QPoint(580, 90), QPoint(780, 270));
     const QImage enlarged = canvas->renderedImage();
@@ -1391,7 +1392,7 @@ void UiRegressionTest::brushesContinueOverExistingStrokes()
     QCOMPARE(canvas.renderedImage(false), second);
 
     // Ctrl must not duplicate/move brush marks either.
-    stroke(QPoint(160, 140), QPoint(260, 240), Qt::ControlModifier);
+    stroke(QPoint(160, 140), QPoint(260, 240), snipaste::platform::primaryModifier());
     canvas.undo();
     QCOMPARE(canvas.renderedImage(false), second);
 }
@@ -1538,13 +1539,13 @@ void UiRegressionTest::inlineTextInputAndCancel()
         QVERIFY(overlay->grab().save(QDir(artifactDir).filePath(
             QStringLiteral("inline-text-%1.png").arg(overlay->devicePixelRatioF()))));
     }
-    QTest::keyClick(editor, Qt::Key_Return, Qt::ControlModifier);
+    QTest::keyClick(editor, Qt::Key_Return, snipaste::platform::primaryModifier());
     QVERIFY(!editor->isVisible());
     QVERIFY(overlay->isVisible());
     QCOMPARE(canvas->renderedImage(), pending);
-    QTest::keyClick(canvas, Qt::Key_Z, Qt::ControlModifier);
+    QTest::keyClick(canvas, Qt::Key_Z, snipaste::platform::primaryModifier());
     QCOMPARE(canvas->renderedImage(), original);
-    QTest::keyClick(canvas, Qt::Key_Y, Qt::ControlModifier);
+    QTest::keyClick(canvas, Qt::Key_Y, snipaste::platform::primaryModifier());
     QCOMPARE(canvas->renderedImage(), pending);
     QTest::mouseClick(canvas, Qt::LeftButton, Qt::NoModifier, QPoint(25, 125));
     QTest::keyClicks(editor, "Discard this");
@@ -1567,8 +1568,8 @@ void UiRegressionTest::ctrlASelectsCurrentScreenOnFirstPress()
     QSignalSpy selectionCaptured(&overlay, &ui::SnipOverlay::selectionCaptured);
     overlay.show();
     QTest::qWait(10);
-    QKeyEvent press(QEvent::KeyPress, Qt::Key_A, Qt::ControlModifier);
-    QKeyEvent release(QEvent::KeyRelease, Qt::Key_A, Qt::ControlModifier);
+    QKeyEvent press(QEvent::KeyPress, Qt::Key_A, snipaste::platform::primaryModifier());
+    QKeyEvent release(QEvent::KeyRelease, Qt::Key_A, snipaste::platform::primaryModifier());
     QCoreApplication::sendEvent(&overlay, &press);
     QCoreApplication::sendEvent(&overlay, &release);
     QKeyEvent confirmPress(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
@@ -1886,7 +1887,7 @@ void UiRegressionTest::pasteDoubleClickRestores()
     QCOMPARE(pin->cursor().shape(), Qt::ArrowCursor);
     QTest::keyClick(pin, Qt::Key_Escape);
     QCOMPARE(manager.pasteClipboard(source), pin.data());
-    QTest::keyClick(pin, Qt::Key_W, Qt::ControlModifier);
+    QTest::keyClick(pin, Qt::Key_W, snipaste::platform::primaryModifier());
     QCOMPARE(manager.pasteClipboard(source), pin.data());
     QCOMPARE(quitting.count(), 0);
 }

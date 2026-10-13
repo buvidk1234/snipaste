@@ -6,6 +6,26 @@ project(snipaste
     LANGUAGES CXX
 )
 
+if(APPLE)
+    # Carbon, AppKit, CoreGraphics, Accessibility and Vision are exposed
+    # through Objective-C APIs. Keep those bridges isolated in .mm files so
+    # the Windows target remains ordinary C++/Win32.
+    enable_language(OBJCXX)
+    set(SNIPASTE_PLATFORM_SOURCES
+        src/platform/macos/global_hotkey_macos.mm
+        src/platform/macos/super_capture_macos.mm
+        src/platform/macos/capture_target_macos.mm
+    )
+    set(SNIPASTE_CAPTURE_TARGET_SOURCE src/platform/macos/capture_target_macos.mm)
+else()
+    set(SNIPASTE_PLATFORM_SOURCES
+        src/platform/windows/global_hotkey.cpp
+        src/platform/windows/super_capture.cpp
+        src/platform/windows/capture_target.cpp
+    )
+    set(SNIPASTE_CAPTURE_TARGET_SOURCE src/platform/windows/capture_target.cpp)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -24,9 +44,7 @@ set(SNIPASTE_SOURCES
     src/core/history/screenshot_history.cpp
     src/core/recognition/ocr_service.cpp
     src/core/recognition/barcode_service.cpp
-    src/platform/windows/global_hotkey.cpp
-    src/platform/windows/super_capture.cpp
-    src/platform/windows/capture_target.cpp
+    ${SNIPASTE_PLATFORM_SOURCES}
     src/platform/windows/single_instance.cpp
     src/ui/paste/paste_window.cpp
     src/ui/paste/paste_manager.cpp
@@ -45,6 +63,13 @@ set(SNIPASTE_SOURCES
     src/ui/tray/tray_controller.cpp
 )
 
+if(APPLE)
+    list(APPEND SNIPASTE_SOURCES
+        src/platform/macos/vision_ocr.mm
+        src/platform/macos/system.mm
+    )
+endif()
+
 set(SNIPASTE_HEADERS
     src/app/logging.h
     src/core/command/command_registry.h
@@ -57,6 +82,7 @@ set(SNIPASTE_HEADERS
     src/platform/windows/super_capture.h
     src/platform/windows/capture_target.h
     src/platform/windows/single_instance.h
+    src/platform/keyboard.h
     src/ui/paste/paste_window.h
     src/ui/paste/paste_manager.h
     src/ui/annotation/annotation_dialog.h
@@ -68,6 +94,14 @@ set(SNIPASTE_HEADERS
     src/ui/snip/window_capture_overlay.h
     src/ui/tray/tray_controller.h
 )
+
+if(APPLE)
+    list(APPEND SNIPASTE_HEADERS
+        src/platform/macos/capture.h
+        src/platform/macos/vision_ocr.h
+        src/platform/macos/system.h
+    )
+endif()
 
 qt_add_executable(snipaste ${SNIPASTE_SOURCES} ${SNIPASTE_HEADERS})
 
@@ -114,6 +148,32 @@ if(WIN32)
     target_link_libraries(snipaste PRIVATE user32 oleacc ole32 dwmapi uiautomationcore windowsapp)
 endif()
 
+if(APPLE)
+    set(SNIPASTE_MAC_FRAMEWORKS
+        "-framework Carbon"
+        "-framework AppKit"
+        "-framework ApplicationServices"
+        "-framework CoreGraphics"
+        "-framework Vision"
+        "-framework ImageIO"
+        "-framework Foundation"
+    )
+    target_link_libraries(snipaste PRIVATE ${SNIPASTE_MAC_FRAMEWORKS})
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/resources/macos/Info.plist.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/snipaste-info.plist"
+        @ONLY
+    )
+    set_target_properties(snipaste PROPERTIES
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.snipaste.local"
+        MACOSX_BUNDLE_BUNDLE_NAME "Snipaste Local"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_INFO_STRING "Snipaste Local screenshot and pin tool"
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_BINARY_DIR}/snipaste-info.plist"
+    )
+endif()
+
 target_compile_definitions(snipaste
     PRIVATE
         SNIPASTE_VERSION=\"${PROJECT_VERSION}\"
@@ -137,11 +197,15 @@ option(SNIPASTE_BUILD_TESTS "Build UI regression tests" OFF)
 if(SNIPASTE_BUILD_TESTS)
     enable_testing()
     find_package(Qt6 REQUIRED COMPONENTS Test)
+    set(SNIPASTE_TEST_PLATFORM_SOURCES ${SNIPASTE_CAPTURE_TARGET_SOURCE})
+    if(APPLE)
+        list(APPEND SNIPASTE_TEST_PLATFORM_SOURCES src/platform/macos/system.mm)
+    endif()
     qt_add_executable(snipaste_ui_tests
         tests/ui_regression_test.cpp
         src/core/command/command_registry.cpp
         src/core/config/config_store.cpp
-        src/platform/windows/capture_target.cpp
+        ${SNIPASTE_TEST_PLATFORM_SOURCES}
         src/ui/preferences/preferences_dialog_rich.cpp
         src/ui/preferences/preferences_appearance.cpp
         src/ui/preferences/appearance_settings.cpp
@@ -158,6 +222,9 @@ if(SNIPASTE_BUILD_TESTS)
     )
     target_include_directories(snipaste_ui_tests PRIVATE src)
     target_link_libraries(snipaste_ui_tests PRIVATE Qt6::Widgets Qt6::Network Qt6::Test)
+    if(APPLE)
+        target_link_libraries(snipaste_ui_tests PRIVATE ${SNIPASTE_MAC_FRAMEWORKS})
+    endif()
     if(WIN32)
         target_link_libraries(snipaste_ui_tests PRIVATE user32 oleacc ole32 dwmapi uiautomationcore windowsapp)
         add_executable(snipaste_capture_probe tests/capture_target_probe.cpp

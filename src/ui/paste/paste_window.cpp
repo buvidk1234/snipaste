@@ -2,6 +2,7 @@
 #include "ui/paste/paste_manager.h"
 
 #include "ui/annotation/annotation_dialog.h"
+#include "platform/keyboard.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -47,6 +48,10 @@
 
 #ifdef Q_OS_WIN
 #include <windows.h>
+#endif
+
+#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#include "platform/macos/system.h"
 #endif
 
 namespace snipaste::ui {
@@ -135,6 +140,10 @@ void PasteWindow::showExisting()
 #ifdef Q_OS_WIN
     if (m_virtualDesktopPinned)
         pinWindowToVirtualDesktops(reinterpret_cast<HWND>(winId()), true);
+#elif defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+    // A newly shown QWidget may own a different NSWindow after flags or
+    // screen changes, so apply the Space policy after show() each time.
+    snipaste::platform::setMacWindowCollectionBehavior(winId(), m_virtualDesktopPinned);
 #endif
     updateDisplaySize();
     activateWindow();
@@ -300,11 +309,16 @@ QString PasteWindow::mouseAction(int index, const QString &fallback) const
 bool PasteWindow::mouseModifierMatches(const QString &value, Qt::KeyboardModifiers modifiers) const
 {
     const QString expected = value.trimmed();
-    const Qt::KeyboardModifiers actual = modifiers & (Qt::ControlModifier | Qt::ShiftModifier | Qt::AltModifier);
+    const Qt::KeyboardModifiers actual = modifiers & (Qt::ControlModifier
+                                                       | Qt::MetaModifier
+                                                       | Qt::ShiftModifier
+                                                       | Qt::AltModifier);
     if (expected.isEmpty() || expected == QStringLiteral("无"))
         return actual == Qt::NoModifier;
     if (expected == QStringLiteral("Ctrl"))
         return actual == Qt::ControlModifier;
+    if (expected == QStringLiteral("Command") || expected == QStringLiteral("Cmd"))
+        return actual == snipaste::platform::primaryModifier();
     if (expected == QStringLiteral("Shift"))
         return actual == Qt::ShiftModifier;
     if (expected == QStringLiteral("Alt"))
@@ -331,6 +345,9 @@ void PasteWindow::setVirtualDesktopPinned(bool enabled)
 #ifdef Q_OS_WIN
     if (isVisible())
         pinWindowToVirtualDesktops(reinterpret_cast<HWND>(winId()), enabled);
+#elif defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+    if (isVisible())
+        snipaste::platform::setMacWindowCollectionBehavior(winId(), enabled);
 #endif
 }
 
@@ -963,7 +980,8 @@ void PasteWindow::keyPressEvent(QKeyEvent *event)
     }
 
     if (event->key() == Qt::Key_Escape
-        || (event->key() == Qt::Key_W && modifiers.testFlag(Qt::ControlModifier))) {
+        || (event->key() == Qt::Key_W
+            && modifiers.testFlag(snipaste::platform::primaryModifier()))) {
         if (m_escapeAction == QStringLiteral("关闭贴图"))
             hidePaste();
         else if (m_escapeAction == QStringLiteral("销毁贴图"))
@@ -971,7 +989,7 @@ void PasteWindow::keyPressEvent(QKeyEvent *event)
         return;
     }
 
-    if (modifiers.testFlag(Qt::ControlModifier)) {
+    if (modifiers.testFlag(snipaste::platform::primaryModifier())) {
         if (event->key() == Qt::Key_A) {
             emit selectAllRequested(this);
             event->accept();
@@ -1018,7 +1036,7 @@ void PasteWindow::keyPressEvent(QKeyEvent *event)
     const bool minus = event->key() == Qt::Key_Minus
                        || event->key() == Qt::Key_Underscore;
     if (plus || minus) {
-        if (modifiers.testFlag(Qt::ControlModifier))
+        if (modifiers.testFlag(snipaste::platform::primaryModifier()))
             adjustOpacity(plus ? 0.05 : -0.05);
         else
             changeScale(plus ? 1.1 : 1.0 / 1.1);
@@ -1079,7 +1097,7 @@ void PasteWindow::keyPressEvent(QKeyEvent *event)
         rebuildImage();
         return;
     case Qt::Key_V:
-        if (modifiers.testFlag(Qt::ControlModifier)) {
+        if (modifiers.testFlag(snipaste::platform::primaryModifier())) {
             const QImage image = QApplication::clipboard()->image();
             if (!image.isNull())
                 setSourceImage(image);

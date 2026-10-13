@@ -32,6 +32,14 @@ private:
     void finishCapture(const QPoint &globalPosition);
     void cancelCapture();
     void *m_hook = nullptr;
+#elif defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+    void installMonitor();
+    void uninstallMonitor();
+    bool handleNativeMouseEvent(void *event);
+    void finishCapture(const QPoint &globalPosition);
+    void cancelCapture();
+    void *m_globalMonitor = nullptr;
+    void *m_localMonitor = nullptr;
 #endif
     bool m_enabled = false;
     Qt::KeyboardModifier m_modifier = Qt::NoModifier;

@@ -1,4 +1,8 @@
 #include "ui/snip/window_capture_overlay.h"
+#include "platform/windows/capture_target.h"
+#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#include "platform/macos/capture.h"
+#endif
 
 #include <QApplication>
 #include <QKeyEvent>
@@ -142,6 +146,18 @@ void WindowCaptureOverlay::updateTarget()
         m_targetWindow = 0;
         m_targetGeometry = {};
     }
+#elif defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+    const QPoint localPosition = QCursor::pos() - m_screenGeometry.topLeft();
+    quintptr nativeWindow = 0;
+    const QRect localTarget = platform::captureTargetAt(localPosition, size(), winId(), m_elementMode,
+                                                        {}, {}, &nativeWindow);
+    if (!localTarget.isEmpty() && localTarget != rect() && nativeWindow) {
+        m_targetWindow = nativeWindow;
+        m_targetGeometry = localTarget.translated(m_screenGeometry.topLeft());
+    } else {
+        m_targetWindow = 0;
+        m_targetGeometry = {};
+    }
 #else
     m_targetWindow = 0;
     m_targetGeometry = {};
@@ -154,6 +170,36 @@ void WindowCaptureOverlay::captureTarget()
     if (!m_screen || !m_targetWindow || m_targetGeometry.isEmpty())
         return;
 
+#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+    QImage image = platform::captureMacWindow(m_targetWindow);
+    if (m_elementMode && !image.isNull()) {
+        const QRect windowBounds = platform::macWindowBounds(m_targetWindow);
+        const QRect crop = m_targetGeometry.translated(-windowBounds.topLeft());
+        if (!windowBounds.isEmpty() && !crop.isEmpty()) {
+            const qreal scaleX = qreal(image.width()) / qreal(windowBounds.width());
+            const qreal scaleY = qreal(image.height()) / qreal(windowBounds.height());
+            const QRect pixels(qRound(crop.left() * scaleX),
+                               qRound(crop.top() * scaleY),
+                               qMax(1, qRound(crop.width() * scaleX)),
+                               qMax(1, qRound(crop.height() * scaleY)));
+            const QRect clipped = pixels.intersected(image.rect());
+            image = clipped.isEmpty() ? QImage() : image.copy(clipped);
+        } else {
+            image = {};
+        }
+    }
+    if (image.isNull()) {
+        const QRect local = m_targetGeometry.translated(-m_screenGeometry.topLeft())
+                                .intersected(rect());
+        const qreal scaleX = width() > 0 ? qreal(m_background.width()) / width() : 1.0;
+        const qreal scaleY = height() > 0 ? qreal(m_background.height()) / height() : 1.0;
+        const QRect pixels(qRound(local.left() * scaleX),
+                           qRound(local.top() * scaleY),
+                           qMax(1, qRound(local.width() * scaleX)),
+                           qMax(1, qRound(local.height() * scaleY)));
+        image = local.isEmpty() ? QImage() : m_background.copy(pixels.intersected(m_background.rect()));
+    }
+#else
     QImage image = m_screen->grabWindow(static_cast<WId>(m_targetWindow)).toImage();
     image.setDevicePixelRatio(1);
     if (image.isNull()) {
@@ -161,6 +207,7 @@ void WindowCaptureOverlay::captureTarget()
                                 .intersected(rect());
         image = m_background.copy(local);
     }
+#endif
     if (!image.isNull()) {
         emit screenshotCaptured(image);
         close();

@@ -19,6 +19,10 @@
 #include <winrt/base.h>
 #endif
 
+#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#include "platform/macos/vision_ocr.h"
+#endif
+
 namespace snipaste::core {
 
 namespace {
@@ -131,7 +135,7 @@ OcrResult recognizeWithTesseract(const QImage &image)
     if (executable.isEmpty()) {
         return {false,
                 {},
-                QStringLiteral("未找到可用的 OCR 引擎。请安装 Windows OCR 语言包，或安装 Tesseract 并将 tesseract.exe 加入 PATH。")};
+                QStringLiteral("未找到可用的 OCR 引擎。请启用系统 OCR，或安装 Tesseract 并将其加入 PATH。")};
     }
 
     QTemporaryFile inputFile;
@@ -171,6 +175,12 @@ OcrResult OcrService::recognize(const QImage &image)
     if (image.isNull())
         return {false, {}, QStringLiteral("没有可识别的图像")};
 
+#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+    const OcrResult visionResult = platform::recognizeWithMacVision(image);
+    if (visionResult.success)
+        return visionResult;
+#endif
+
 #ifdef Q_OS_WIN
     const OcrResult windowsResult = recognizeWithWindowsOcr(image);
     if (windowsResult.success)
@@ -186,6 +196,10 @@ OcrResult OcrService::recognize(const QImage &image)
 #ifdef Q_OS_WIN
     if (!windowsResult.error.isEmpty() && !tesseractResult.error.isEmpty())
         return {false, {}, windowsResult.error + QStringLiteral("\n") + tesseractResult.error};
+#endif
+#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+    if (!visionResult.error.isEmpty() && !tesseractResult.error.isEmpty())
+        return {false, {}, visionResult.error + QStringLiteral("\n") + tesseractResult.error};
 #endif
     return tesseractResult;
 }

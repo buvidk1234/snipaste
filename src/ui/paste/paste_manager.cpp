@@ -1,4 +1,5 @@
 #include "ui/paste/paste_manager.h"
+#include "platform/keyboard.h"
 
 #include "ui/paste/paste_window.h"
 
@@ -871,7 +872,7 @@ void PasteManager::onWindowActivated(PasteWindow *window, Qt::KeyboardModifiers 
 {
     if (!window)
         return;
-    if (modifiers.testFlag(Qt::ControlModifier)) {
+    if (modifiers.testFlag(snipaste::platform::primaryModifier())) {
         const int index = m_selected.indexOf(window);
         if (index >= 0)
             m_selected.removeAt(index);

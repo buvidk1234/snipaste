@@ -186,9 +186,12 @@ bool processMatches(HWND window, const QStringList &patterns)
 QList<QRect> captureTargetHierarchyAt(QPoint localPosition, QSize logicalScreenSize,
                                       WId overlayWindow, bool elementMode,
                                       const QStringList &excludedProcesses,
-                                      const QStringList &unstableProcesses)
+                                      const QStringList &unstableProcesses,
+                                      quintptr *nativeWindow)
 {
 #ifdef Q_OS_WIN
+    if (nativeWindow)
+        *nativeWindow = 0;
     if (logicalScreenSize.isEmpty())
         return {};
     const HWND overlay = reinterpret_cast<HWND>(overlayWindow);
@@ -203,6 +206,8 @@ QList<QRect> captureTargetHierarchyAt(QPoint localPosition, QSize logicalScreenS
     EnumWindows(findUnderlyingWindow, reinterpret_cast<LPARAM>(&search));
     if (!search.found)
         return {};
+    if (nativeWindow)
+        *nativeWindow = reinterpret_cast<quintptr>(search.found);
     const QRect screenRect(QPoint(), logicalScreenSize);
     if (processMatches(search.found, excludedProcesses))
         return {screenRect};
@@ -258,16 +263,19 @@ QList<QRect> captureTargetHierarchyAt(QPoint localPosition, QSize logicalScreenS
     Q_UNUSED(elementMode)
     Q_UNUSED(excludedProcesses)
     Q_UNUSED(unstableProcesses)
+    Q_UNUSED(nativeWindow)
     return {};
 #endif
 }
 
 QRect captureTargetAt(QPoint localPosition, QSize logicalScreenSize, WId overlayWindow, bool elementMode,
                       const QStringList &excludedProcesses,
-                      const QStringList &unstableProcesses)
+                      const QStringList &unstableProcesses,
+                      quintptr *nativeWindow)
 {
     const auto hierarchy = captureTargetHierarchyAt(localPosition, logicalScreenSize, overlayWindow,
-                                                    elementMode, excludedProcesses, unstableProcesses);
+                                                    elementMode, excludedProcesses, unstableProcesses,
+                                                    nativeWindow);
     return hierarchy.isEmpty() ? QRect() : hierarchy.first();
 }
 

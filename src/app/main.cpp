@@ -2,12 +2,16 @@
 #include "core/command/command_registry.h"
 #include "core/config/config_store.h"
 #include "core/control/hot_corner_state.h"
+#include "platform/keyboard.h"
 #include "core/history/screenshot_history.h"
 #include "core/recognition/ocr_service.h"
 #include "core/recognition/barcode_service.h"
 #include "platform/windows/global_hotkey.h"
 #include "platform/windows/super_capture.h"
 #include "platform/windows/single_instance.h"
+#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#include "platform/macos/system.h"
+#endif
 #include "ui/paste/paste_window.h"
 #include "ui/paste/paste_manager.h"
 #include "ui/annotation/annotation_dialog.h"
@@ -71,6 +75,8 @@
 
 #ifdef Q_OS_WIN
 #include <windows.h>
+#elif defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#include <Carbon/Carbon.h>
 #endif
 
 namespace {
@@ -130,6 +136,63 @@ HotkeySpec parseHotkey(const QString &text)
         default: break;
         }
     }
+#elif defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+    if (qtModifiers.testFlag(Qt::ControlModifier))
+        result.modifiers |= controlKey;
+    if (qtModifiers.testFlag(Qt::AltModifier))
+        result.modifiers |= optionKey;
+    if (qtModifiers.testFlag(Qt::ShiftModifier))
+        result.modifiers |= shiftKey;
+    if (qtModifiers.testFlag(Qt::MetaModifier))
+        result.modifiers |= cmdKey;
+
+    static constexpr unsigned short letters[] = {
+        kVK_ANSI_A, kVK_ANSI_B, kVK_ANSI_C, kVK_ANSI_D, kVK_ANSI_E,
+        kVK_ANSI_F, kVK_ANSI_G, kVK_ANSI_H, kVK_ANSI_I, kVK_ANSI_J,
+        kVK_ANSI_K, kVK_ANSI_L, kVK_ANSI_M, kVK_ANSI_N, kVK_ANSI_O,
+        kVK_ANSI_P, kVK_ANSI_Q, kVK_ANSI_R, kVK_ANSI_S, kVK_ANSI_T,
+        kVK_ANSI_U, kVK_ANSI_V, kVK_ANSI_W, kVK_ANSI_X, kVK_ANSI_Y,
+        kVK_ANSI_Z,
+    };
+    static constexpr unsigned short digits[] = {
+        kVK_ANSI_0, kVK_ANSI_1, kVK_ANSI_2, kVK_ANSI_3, kVK_ANSI_4,
+        kVK_ANSI_5, kVK_ANSI_6, kVK_ANSI_7, kVK_ANSI_8, kVK_ANSI_9,
+    };
+    if (base >= Qt::Key_A && base <= Qt::Key_Z)
+        result.key = letters[base - Qt::Key_A];
+    else if (base >= Qt::Key_0 && base <= Qt::Key_9)
+        result.key = digits[base - Qt::Key_0];
+    else if (base >= Qt::Key_F1 && base <= Qt::Key_F20) {
+        // Carbon's function-key virtual codes are intentionally sparse (for
+        // example F1=122, F2=120, F3=99), so they cannot be derived by adding
+        // an offset to kVK_F1.
+        static constexpr unsigned short functionKeys[] = {
+            kVK_F1, kVK_F2, kVK_F3, kVK_F4, kVK_F5,
+            kVK_F6, kVK_F7, kVK_F8, kVK_F9, kVK_F10,
+            kVK_F11, kVK_F12, kVK_F13, kVK_F14, kVK_F15,
+            kVK_F16, kVK_F17, kVK_F18, kVK_F19, kVK_F20,
+        };
+        result.key = functionKeys[base - Qt::Key_F1];
+    }
+    else {
+        switch (base) {
+        case Qt::Key_Space: result.key = kVK_Space; break;
+        case Qt::Key_Tab: result.key = kVK_Tab; break;
+        case Qt::Key_Return:
+        case Qt::Key_Enter: result.key = kVK_Return; break;
+        case Qt::Key_Escape: result.key = kVK_Escape; break;
+        case Qt::Key_Delete: result.key = kVK_ForwardDelete; break;
+        case Qt::Key_Home: result.key = kVK_Home; break;
+        case Qt::Key_End: result.key = kVK_End; break;
+        case Qt::Key_PageUp: result.key = kVK_PageUp; break;
+        case Qt::Key_PageDown: result.key = kVK_PageDown; break;
+        case Qt::Key_Left: result.key = kVK_LeftArrow; break;
+        case Qt::Key_Right: result.key = kVK_RightArrow; break;
+        case Qt::Key_Up: result.key = kVK_UpArrow; break;
+        case Qt::Key_Down: result.key = kVK_DownArrow; break;
+        default: break;
+        }
+    }
 #else
     Q_UNUSED(qtModifiers)
     Q_UNUSED(base)
@@ -140,10 +203,13 @@ HotkeySpec parseHotkey(const QString &text)
 
 bool isApplicationIgnored(const snipaste::core::ConfigStore &config, const QString &key)
 {
-#ifdef Q_OS_WIN
-    const QStringList ignored = config.value(key).toStringList();
+    QStringList ignored = config.value(key).toStringList();
+    if (ignored.isEmpty())
+        ignored = config.value(key).toString().split(QRegularExpression(QStringLiteral("[,;\\n]+")),
+                                                     Qt::SkipEmptyParts);
     if (ignored.isEmpty())
         return false;
+#ifdef Q_OS_WIN
     HWND window = GetForegroundWindow();
     if (!window)
         return false;
@@ -166,6 +232,8 @@ bool isApplicationIgnored(const snipaste::core::ConfigStore &config, const QStri
         if (!normalized.isEmpty() && executable.contains(normalized))
             return true;
     }
+#elif defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+    return snipaste::platform::macForegroundApplicationMatches(ignored);
 #else
     Q_UNUSED(config)
     Q_UNUSED(key)
@@ -358,9 +426,29 @@ QStringList resolvePasteFileArguments(const QStringList &arguments)
     return resolved;
 }
 
+bool ensureMacScreenCaptureAccess(const QString &operation)
+{
+#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+    if (snipaste::platform::macScreenCaptureAccessGranted()
+        || snipaste::platform::requestMacScreenCaptureAccess())
+        return true;
+    QMessageBox::warning(nullptr,
+                          QStringLiteral("需要屏幕录制权限"),
+                          QStringLiteral("请在“系统设置 → 隐私与安全性 → 屏幕录制”中允许 snipaste，\n"
+                                         "然后重新开始%1。")
+                              .arg(operation));
+    return false;
+#else
+    Q_UNUSED(operation)
+    return true;
+#endif
+}
+
 QImage captureScreens(const QList<QScreen *> &screens)
 {
     if (screens.isEmpty())
+        return {};
+    if (!ensureMacScreenCaptureAccess(QStringLiteral("截图")))
         return {};
 
     const QRect virtualGeometry = screens.first()->virtualGeometry();
@@ -475,6 +563,9 @@ void pasteClipboardAsKeyboardInput()
     inputs[3].ki.wVk = VK_CONTROL;
     inputs[3].ki.dwFlags = KEYEVENTF_KEYUP;
     SendInput(4, inputs, sizeof(INPUT));
+#elif defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+    if (!snipaste::platform::postMacPasteShortcut())
+        qWarning() << "macOS rejected Cmd+V injection; grant Accessibility permission to snipaste";
 #endif
 }
 
@@ -523,6 +614,10 @@ bool startExternalCommand(const QStringList &command)
 
 QColor colorAtCursor()
 {
+#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+    if (!ensureMacScreenCaptureAccess(QStringLiteral("取色")))
+        return {};
+#endif
     QScreen *screen = QGuiApplication::screenAt(QCursor::pos());
     if (!screen)
         screen = QGuiApplication::primaryScreen();
@@ -530,9 +625,13 @@ QColor colorAtCursor()
         return {};
     const QPoint local = QCursor::pos() - screen->geometry().topLeft();
     const QImage image = screen->grabWindow(0).toImage();
-    if (!image.rect().contains(local))
+    if (image.isNull() || screen->geometry().width() <= 0 || screen->geometry().height() <= 0)
         return {};
-    return image.pixelColor(local);
+    const qreal scaleX = qreal(image.width()) / qreal(screen->geometry().width());
+    const qreal scaleY = qreal(image.height()) / qreal(screen->geometry().height());
+    const QPoint pixel(qBound(0, qRound(local.x() * scaleX), image.width() - 1),
+                       qBound(0, qRound(local.y() * scaleY), image.height() - 1));
+    return image.pixelColor(pixel);
 }
 
 QString expandOutputFilePattern(const QString &pattern, const QDateTime &dateTime)
@@ -1095,6 +1194,10 @@ int main(int argc, char *argv[])
             activeOverlay->activateWindow();
             return;
         }
+#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+        if (!ensureMacScreenCaptureAccess(QStringLiteral("截图")))
+            return;
+#endif
 
         QScreen *screen = requestedSelection.isValid()
                               ? QGuiApplication::screenAt(requestedSelection.center())
@@ -1297,7 +1400,11 @@ int main(int argc, char *argv[])
     const auto configureSuperCapture = [&config, &superCapture] {
         const QString modifier = config.value(QStringLiteral("control/superCaptureModifier"), QStringLiteral("none")).toString();
         Qt::KeyboardModifier selectedModifier = Qt::NoModifier;
-        if (modifier.contains(QStringLiteral("Ctrl"), Qt::CaseInsensitive))
+        if (modifier.contains(QStringLiteral("Cmd"), Qt::CaseInsensitive)
+            || modifier.contains(QStringLiteral("Meta"), Qt::CaseInsensitive)
+            || modifier.contains(QStringLiteral("Command"), Qt::CaseInsensitive))
+            selectedModifier = Qt::MetaModifier;
+        else if (modifier.contains(QStringLiteral("Ctrl"), Qt::CaseInsensitive))
             selectedModifier = Qt::ControlModifier;
         else if (modifier.contains(QStringLiteral("Shift"), Qt::CaseInsensitive))
             selectedModifier = Qt::ShiftModifier;
@@ -1390,11 +1497,15 @@ int main(int argc, char *argv[])
                 qWarning() << "global hotkey unavailable" << key << value;
         };
         registerConfigured(QStringLiteral("hotkeys/snip"), QStringLiteral("F1"), screenshotHotkey, 1);
-        registerConfigured(QStringLiteral("hotkeys/copy"), QStringLiteral("Ctrl+F1"), screenshotCopyHotkey, 3);
+        registerConfigured(QStringLiteral("hotkeys/copy"),
+                           snipaste::platform::primaryPortableShortcutText(QStringLiteral("F1")),
+                           screenshotCopyHotkey, 3);
         registerConfigured(QStringLiteral("hotkeys/paste"), QStringLiteral("F3"), pasteHotkey, 2);
         registerConfigured(QStringLiteral("hotkeys/custom"), QStringLiteral("Shift+F1"), customSnipHotkey, 4);
         registerConfigured(QStringLiteral("hotkeys/toggleImages"), QStringLiteral("Shift+F3"), toggleImagesHotkey, 5);
-        registerConfigured(QStringLiteral("hotkeys/switchGroup"), QStringLiteral("Ctrl+F3"), switchGroupHotkey, 6);
+        registerConfigured(QStringLiteral("hotkeys/switchGroup"),
+                           snipaste::platform::primaryPortableShortcutText(QStringLiteral("F3")),
+                           switchGroupHotkey, 6);
         registerConfigured(QStringLiteral("hotkeys/clickThrough"), QString(), clickThroughHotkey, 7);
         if (!hotkeysEnabled) {
             screenshotHotkey.setEnabled(false);
@@ -1436,12 +1547,15 @@ int main(int argc, char *argv[])
         QStringLiteral("snip.activeScreen"),
         QStringLiteral("截取当前屏幕"),
         [recordScreenshot, autoSaveScreenshot, &pasteManager] {
+            if (!ensureMacScreenCaptureAccess(QStringLiteral("当前屏幕截图")))
+                return;
             QScreen *screen = QGuiApplication::screenAt(QCursor::pos());
             if (!screen)
                 screen = QGuiApplication::primaryScreen();
             if (!screen)
                 return;
-            const QImage image = screen->grabWindow(0).toImage();
+            QImage image = screen->grabWindow(0).toImage();
+            image.setDevicePixelRatio(1.0);
             if (image.isNull())
                 return;
             recordScreenshot(image, image);
@@ -1465,6 +1579,10 @@ int main(int argc, char *argv[])
             screen = QGuiApplication::primaryScreen();
         if (!screen)
             return;
+#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+        if (!ensureMacScreenCaptureAccess(QStringLiteral("窗口截图")))
+            return;
+#endif
         activeWindowOverlay = new snipaste::ui::WindowCaptureOverlay(screen, elementMode);
         QObject::connect(activeWindowOverlay,
                          &snipaste::ui::WindowCaptureOverlay::screenshotCaptured,
@@ -1545,12 +1663,15 @@ int main(int argc, char *argv[])
                 if (heightOk)
                     startSnip(false, false, QSize(width, height));
             } else if (selected == fullScreenAction) {
+                if (!ensureMacScreenCaptureAccess(QStringLiteral("当前屏幕截图")))
+                    return;
                 QScreen *screen = QGuiApplication::screenAt(QCursor::pos());
                 if (!screen)
                     screen = QGuiApplication::primaryScreen();
                 if (!screen)
                     return;
-                const QImage image = screen->grabWindow(0).toImage();
+                QImage image = screen->grabWindow(0).toImage();
+                image.setDevicePixelRatio(1.0);
                 pasteManager.rememberCapture(image, screen->geometry());
                 history.add(image, image);
                 saveHistorySnapshotAsync(history, historyPath);

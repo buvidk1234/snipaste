@@ -1,17 +1,21 @@
 #include "ui/preferences/preferences_dialog.h"
 
 #include "core/config/config_store.h"
+#include "platform/keyboard.h"
 
 #include <QCheckBox>
 #include <QColor>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QDebug>
 #include <QApplication>
 #include <QColorDialog>
 #include <QDesktopServices>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFile>
+#include <QSaveFile>
 #include <QFontComboBox>
 #include <QFormLayout>
 #include <QFont>
@@ -48,6 +52,12 @@
 #include <QToolButton>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <QTextStream>
+#include <QProcess>
+
+#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#include <unistd.h>
+#endif
 
 namespace snipaste::ui {
 
@@ -59,6 +69,48 @@ QLabel *makeHint(const QString &text, QWidget *parent)
     label->setStyleSheet(QStringLiteral("color: #666666;"));
     return label;
 }
+
+#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+bool setMacLoginStartup(bool enabled)
+{
+    const QString launchAgentsPath = QDir::home().filePath(QStringLiteral("Library/LaunchAgents"));
+    const QString plistPath = QDir(launchAgentsPath).filePath(QStringLiteral("com.snipaste.plist"));
+    const QString domain = QStringLiteral("gui/%1").arg(static_cast<qulonglong>(getuid()));
+
+    // Remove an older loaded service before changing its definition.  A
+    // missing service is expected when this is the first enable/disable.
+    QProcess::execute(QStringLiteral("/bin/launchctl"),
+                      {QStringLiteral("bootout"), domain, plistPath});
+
+    if (!enabled)
+        return !QFile::exists(plistPath) || QFile::remove(plistPath);
+
+    if (!QDir().mkpath(launchAgentsPath))
+        return false;
+    QSaveFile file(plistPath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
+        return false;
+    QTextStream stream(&file);
+    stream << QStringLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
+           << QStringLiteral("<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" ")
+           << QStringLiteral("\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n")
+           << QStringLiteral("<plist version=\"1.0\"><dict>\n")
+           << QStringLiteral("<key>Label</key><string>com.snipaste</string>\n")
+           << QStringLiteral("<key>ProgramArguments</key><array><string>")
+           << QFileInfo(QCoreApplication::applicationFilePath()).absoluteFilePath().toHtmlEscaped()
+           << QStringLiteral("</string></array>\n")
+           << QStringLiteral("<key>RunAtLoad</key><true/>\n")
+           << QStringLiteral("</dict></plist>\n");
+    if (!file.commit())
+        return false;
+
+    // Loading immediately makes the preference effective without requiring a
+    // logout.  The app's single-instance guard prevents a second resident
+    // tray process if the current process is already running.
+    return QProcess::execute(QStringLiteral("/bin/launchctl"),
+                             {QStringLiteral("bootstrap"), domain, plistPath}) == 0;
+}
+#endif
 
 QPushButton *makeColorButton(const QColor &color, QWidget *parent)
 {
@@ -842,6 +894,12 @@ PreferencesDialog::PreferencesDialog(core::ConfigStore &config, QWidget *parent)
     m_outputCopyWindowsBitmapCheck = new QCheckBox(QStringLiteral("以 Windows Bitmap 格式复制图片:"), bitmapRow);
     m_outputCopyWindowsBitmapCheck->setChecked(
         m_config.value(QStringLiteral("output/clipboardWindowsBitmap"), true).toBool());
+#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+    // CF_DIB is a Windows clipboard compatibility format and is not exposed
+    // by the Cocoa clipboard backend.
+    m_outputCopyWindowsBitmapCheck->hide();
+    m_outputCopyWindowsBitmapCheck->setChecked(false);
+#endif
     m_outputCopyScreenshotCheck = new QCheckBox(QStringLiteral("截图"), bitmapRow);
     m_outputCopyScreenshotCheck->setChecked(
         m_config.value(QStringLiteral("output/clipboardScreenshot"), true).toBool());
@@ -859,7 +917,8 @@ PreferencesDialog::PreferencesDialog(core::ConfigStore &config, QWidget *parent)
     copyFileLayout->setContentsMargins(0, 0, 0, 0);
     copyFileLayout->addWidget(new QLabel(QStringLiteral("复制图像为文件:"), copyFileRow));
     m_outputCopyAsFileAlwaysRadio = new QRadioButton(QStringLiteral("总是"), copyFileRow);
-    m_outputCopyAsFileShortcutRadio = new QRadioButton(QStringLiteral("Ctrl + Alt + S"), copyFileRow);
+    m_outputCopyAsFileShortcutRadio = new QRadioButton(
+        QStringLiteral("%1 + Alt + S").arg(snipaste::platform::primaryModifierText()), copyFileRow);
     m_outputCopyAsFileDisabledRadio = new QRadioButton(QStringLiteral("禁用"), copyFileRow);
     copyFileLayout->addWidget(m_outputCopyAsFileAlwaysRadio);
     copyFileLayout->addWidget(m_outputCopyAsFileShortcutRadio);
@@ -918,7 +977,13 @@ PreferencesDialog::PreferencesDialog(core::ConfigStore &config, QWidget *parent)
     ocrLanguageRow->addStretch();
     textRecognitionLayout->addLayout(ocrLanguageRow);
 
-    auto *ocrNote = new QLabel(QStringLiteral("* 需要 Windows 10 版本 1903 或更高版本"), textRecognition);
+    auto *ocrNote = new QLabel(
+#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+        QStringLiteral("* 使用 macOS Vision；无结果时回退到 Tesseract")
+#else
+        QStringLiteral("* 需要 Windows 10 版本 1903 或更高版本")
+#endif
+        , textRecognition);
     ocrNote->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     textRecognitionLayout->addWidget(ocrNote);
     textRecognitionLayout->addStretch();
@@ -947,7 +1012,8 @@ PreferencesDialog::PreferencesDialog(core::ConfigStore &config, QWidget *parent)
     globalKeysLayout->addWidget(m_snipHotkeyEdit->parentWidget());
     m_copyHotkeyEdit = makeEditableHotkeyRow(
         QStringLiteral("截屏并自动复制:"),
-        QKeySequence(m_config.value(QStringLiteral("hotkeys/copy"), QStringLiteral("Ctrl+F1")).toString()),
+        QKeySequence(m_config.value(QStringLiteral("hotkeys/copy"),
+                                    snipaste::platform::primaryPortableShortcutText(QStringLiteral("F1"))).toString()),
         globalKeys);
     globalKeysLayout->addWidget(m_copyHotkeyEdit->parentWidget());
     const auto addGlobalHotkey = [this, globalKeys, globalKeysLayout](const QString &label,
@@ -970,7 +1036,8 @@ PreferencesDialog::PreferencesDialog(core::ConfigStore &config, QWidget *parent)
         globalKeys);
     globalKeysLayout->addWidget(m_pasteHotkeyEdit->parentWidget());
     addGlobalHotkey(QStringLiteral("隐藏/显示所有贴图:"), QStringLiteral("hotkeys/toggleImages"), QStringLiteral("Shift+F3"));
-    addGlobalHotkey(QStringLiteral("切换到另一贴图组:"), QStringLiteral("hotkeys/switchGroup"), QStringLiteral("Ctrl+F3"));
+    addGlobalHotkey(QStringLiteral("切换到另一贴图组:"), QStringLiteral("hotkeys/switchGroup"),
+                    snipaste::platform::primaryPortableShortcutText(QStringLiteral("F3")));
     addGlobalHotkey(QStringLiteral("开/关鼠标穿透:"), QStringLiteral("hotkeys/clickThrough"), QString());
     m_snipHotkeyEdit->setObjectName(QStringLiteral("hotkeys/snip"));
     m_copyHotkeyEdit->setObjectName(QStringLiteral("hotkeys/copy"));
@@ -1067,18 +1134,29 @@ PreferencesDialog::PreferencesDialog(core::ConfigStore &config, QWidget *parent)
     globalKeysLayout->addWidget(addGlobalCommand, 0, Qt::AlignLeft);
 
     auto *superGroup = new QGroupBox(QStringLiteral("超级截屏"), globalKeys);
-    superGroup->setToolTip(QStringLiteral("Win+??????????????????"));
+    superGroup->setToolTip(QStringLiteral("%1 + 鼠标拖拽触发截图")
+                           .arg(snipaste::platform::primaryModifierText()));
     auto *superLayout = new QGridLayout(superGroup);
     superLayout->setContentsMargins(8, 5, 8, 6);
     superLayout->setHorizontalSpacing(4);
     superLayout->setVerticalSpacing(4);
     auto *superModifier = new QComboBox(superGroup);
-    superModifier->addItems({QStringLiteral("无"), QStringLiteral("Ctrl"), QStringLiteral("Shift"), QStringLiteral("Alt")});
+    superModifier->addItems({QStringLiteral("无"), QStringLiteral("Ctrl"), QStringLiteral("Shift"), QStringLiteral("Alt")
+#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+                             , QStringLiteral("Command")
+#endif
+    });
     superModifier->setCurrentText(m_config.value(QStringLiteral("control/superCaptureModifier"), QStringLiteral("无")).toString());
     auto *superMouse = new QComboBox(superGroup);
     superMouse->addItems({QStringLiteral("鼠标左键拖拽"), QStringLiteral("鼠标右键拖拽")});
     superMouse->setCurrentText(m_config.value(QStringLiteral("control/superCaptureMouse"), QStringLiteral("鼠标左键拖拽")).toString());
-    superLayout->addWidget(new QLabel(QStringLiteral("Win"), superGroup), 0, 0);
+    superLayout->addWidget(new QLabel(
+#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+        QStringLiteral("修饰键")
+#else
+        QStringLiteral("Win")
+#endif
+        , superGroup), 0, 0);
     superLayout->addWidget(new QLabel(QStringLiteral("+"), superGroup), 0, 1);
     superLayout->addWidget(superModifier, 0, 2);
     superLayout->addWidget(new QLabel(QStringLiteral("+"), superGroup), 0, 3);
@@ -1099,7 +1177,8 @@ PreferencesDialog::PreferencesDialog(core::ConfigStore &config, QWidget *parent)
         for (auto *edit : globalKeys->findChildren<QKeySequenceEdit *>())
             if (edit->property("defaultShortcut").isValid()) edit->setKeySequence(QKeySequence(edit->property("defaultShortcut").toString()));
         m_snipHotkeyEdit->setKeySequence(QKeySequence(QStringLiteral("F1")));
-        m_copyHotkeyEdit->setKeySequence(QKeySequence(QStringLiteral("Ctrl+F1")));
+        m_copyHotkeyEdit->setKeySequence(QKeySequence(
+            snipaste::platform::primaryPortableShortcutText(QStringLiteral("F1"))));
         m_pasteHotkeyEdit->setKeySequence(QKeySequence(QStringLiteral("F3")));
         superModifier->setCurrentText(QStringLiteral("无"));
         superMouse->setCurrentText(QStringLiteral("鼠标左键拖拽"));
@@ -1114,7 +1193,10 @@ PreferencesDialog::PreferencesDialog(core::ConfigStore &config, QWidget *parent)
     auto *applicationLayout = new QVBoxLayout(applicationKeys);
     applicationLayout->setContentsMargins(10, 8, 10, 8);
     applicationLayout->setSpacing(5);
-    auto *printHotkey = makeEditableHotkeyRow(QStringLiteral("打印:"), QKeySequence(QStringLiteral("Ctrl+P")), applicationKeys);
+    auto *printHotkey = makeEditableHotkeyRow(
+        QStringLiteral("打印:"),
+        QKeySequence(snipaste::platform::primaryPortableShortcutText(QStringLiteral("P"))),
+        applicationKeys);
     applicationLayout->addWidget(printHotkey->parentWidget());
     auto *addApplicationCommand = new QPushButton(QStringLiteral("＋ 添加新命令"), applicationKeys);
     addApplicationCommand->setToolTip(QStringLiteral("打开命令快捷键编辑器；应用内命令和全局命令使用同一套配置。"));
@@ -1128,15 +1210,20 @@ PreferencesDialog::PreferencesDialog(core::ConfigStore &config, QWidget *parent)
     internalKeysButton->setToolTip(QStringLiteral("截图和贴图窗口中的快捷键"));
     QObject::connect(internalKeysButton, &QPushButton::clicked, this, [this] {
         QMessageBox::information(this, QStringLiteral("内部快捷键"),
-                                 QStringLiteral("截图：Enter 复制，Ctrl+T 贴图，Ctrl+S 保存，Ctrl+Z/Ctrl+Y 撤销/重做；\n"
-                                                "贴图：1/2 旋转，3/4 镜像，5 灰度，6 反色，Esc 关闭，Shift+Esc 销毁。"));
+                                 QStringLiteral("截图：Enter 复制，%1 贴图，%2 保存，%3/%4 撤销/重做；\n"
+                                                "贴图：1/2 旋转，3/4 镜像，5 灰度，6 反色，Esc 关闭，Shift+Esc 销毁。")
+                                 .arg(snipaste::platform::primaryShortcutText(QStringLiteral("T")))
+                                 .arg(snipaste::platform::primaryShortcutText(QStringLiteral("S")))
+                                 .arg(snipaste::platform::primaryShortcutText(QStringLiteral("Z")))
+                                 .arg(snipaste::platform::primaryShortcutText(QStringLiteral("Y"))));
     });
     applicationLayout->addWidget(internalKeysButton, 0, Qt::AlignLeft);
     applicationLayout->addStretch();
     auto *applicationRestore = new QPushButton(QStringLiteral("恢复默认"), applicationKeys);
     applicationRestore->setFixedWidth(86);
     QObject::connect(applicationRestore, &QPushButton::clicked, printHotkey, [printHotkey] {
-        printHotkey->setKeySequence(QKeySequence(QStringLiteral("Ctrl+P")));
+        printHotkey->setKeySequence(QKeySequence(
+            snipaste::platform::primaryPortableShortcutText(QStringLiteral("P"))));
     });
     applicationLayout->addWidget(applicationRestore, 0, Qt::AlignRight);
     controlTabs->addTab(applicationKeys, QStringLiteral("应用内快捷键"));
@@ -1161,6 +1248,9 @@ PreferencesDialog::PreferencesDialog(core::ConfigStore &config, QWidget *parent)
         auto *firstBox = new QComboBox(pasteMouseGroup);
         auto *secondBox = new QComboBox(pasteMouseGroup);
         firstBox->addItems({QStringLiteral("无"), QStringLiteral("Ctrl"), QStringLiteral("Shift"), QStringLiteral("Alt")});
+#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+        firstBox->addItem(QStringLiteral("Cmd"));
+#endif
         secondBox->addItems({QStringLiteral("无"), QStringLiteral("左键双击"), QStringLiteral("中键单击"),
                              QStringLiteral("右键单击"), QStringLiteral("鼠标右键拖拽")});
         firstBox->setProperty("defaultText", first);
@@ -1202,7 +1292,8 @@ PreferencesDialog::PreferencesDialog(core::ConfigStore &config, QWidget *parent)
         if (showInfo) mouseGrid->addWidget(makeInfoButton(pasteMouseGroup), row, 8);
     };
     addMouseRow(0, QStringLiteral("贴图缩放:"), QStringLiteral("无"), QStringLiteral("无"), QStringLiteral("鼠标滚轮"), QStringLiteral("+/-"));
-    addMouseRow(1, QStringLiteral("调整透明度:"), QStringLiteral("Ctrl"), QStringLiteral("无"), QStringLiteral("鼠标滚轮"), QStringLiteral("+/-"));
+    addMouseRow(1, QStringLiteral("调整透明度:"), snipaste::platform::primaryModifierText(),
+                QStringLiteral("无"), QStringLiteral("鼠标滚轮"), QStringLiteral("+/-"));
     addMouseRow(2, QStringLiteral("关闭贴图:"), QStringLiteral("无"), QStringLiteral("左键双击"), QString(), QString());
     addMouseRow(3, QStringLiteral("重置贴图:"), QStringLiteral("无"), QStringLiteral("中键单击"), QString(), QString());
     addMouseRow(4, QStringLiteral("快速缩略图:"), QStringLiteral("Shift"), QStringLiteral("左键双击"), QString(), QString());
@@ -1774,6 +1865,9 @@ void PreferencesDialog::accept()
     }
     startupSettings.sync();
     }
+#elif defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+    if (startupChanged && !setMacLoginStartup(m_startupCheck->isChecked()))
+        qWarning() << "failed to update macOS login item";
 #else
     Q_UNUSED(startupChanged)
 #endif

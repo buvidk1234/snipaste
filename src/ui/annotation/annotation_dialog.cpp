@@ -1,4 +1,5 @@
 #include "ui/annotation/annotation_dialog.h"
+#include "platform/keyboard.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -74,7 +75,8 @@ AnnotationCanvas::AnnotationCanvas(QImage image, QWidget *parent)
     m_textEditor->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_textEditor->document()->setDocumentMargin(0);
     m_textEditor->setPlaceholderText(QStringLiteral("输入文字"));
-    m_textEditor->setToolTip(QStringLiteral("Enter 换行 · Ctrl+Enter 完成 · Esc 取消"));
+    m_textEditor->setToolTip(QStringLiteral("Enter 换行 · %1+Enter 完成 · Esc 取消")
+                             .arg(snipaste::platform::primaryModifierText()));
     m_textEditor->installEventFilter(this);
     m_textEditor->hide();
     connect(m_textEditor, &QPlainTextEdit::textChanged, this, [this] {
@@ -1329,7 +1331,7 @@ void AnnotationCanvas::mousePressEvent(QMouseEvent *event)
     // Freehand tools must always start a new stroke, even over an existing
     // stroke or effect.  Their wide bounds are not selection handles.
     const int hit = isNonMovableBrush(m_tool) ? -1 : shapeAt(imagePoint);
-    if (hit >= 0 && event->modifiers().testFlag(Qt::ControlModifier)
+    if (hit >= 0 && event->modifiers().testFlag(snipaste::platform::primaryModifier())
         && m_tool != Tool::Eraser && m_tool != Tool::Text && m_tool != Tool::Number) {
         // Ctrl-drag duplicates an existing annotation.  The small initial
         // offset makes the duplicate visible even when the pointer does not
@@ -1350,7 +1352,7 @@ void AnnotationCanvas::mousePressEvent(QMouseEvent *event)
         event->accept();
         return;
     }
-    if (hit >= 0 && (event->modifiers().testFlag(Qt::ControlModifier)
+    if (hit >= 0 && (event->modifiers().testFlag(snipaste::platform::primaryModifier())
                      || m_shapes.at(hit).tool == m_tool)
         && m_tool != Tool::Eraser && m_tool != Tool::Text && m_tool != Tool::Number) {
         m_selectedShape = hit;
@@ -1499,7 +1501,7 @@ bool AnnotationCanvas::eventFilter(QObject *watched, QEvent *event)
             auto *key = static_cast<QKeyEvent *>(event);
             if (key->key() == Qt::Key_Escape
                 || ((key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter)
-                    && key->modifiers().testFlag(Qt::ControlModifier))) {
+                    && key->modifiers().testFlag(snipaste::platform::primaryModifier()))) {
                 finishTextInput(key->key() != Qt::Key_Escape);
                 setFocus();
                 event->accept();
@@ -1742,33 +1744,33 @@ void AnnotationCanvas::keyPressEvent(QKeyEvent *event)
         update();
         return;
     }
-    if (event->modifiers().testFlag(Qt::ControlModifier)
+    if (event->modifiers().testFlag(snipaste::platform::primaryModifier())
         && event->modifiers().testFlag(Qt::ShiftModifier)
         && event->key() == Qt::Key_C) {
         copySelectedShape();
         event->accept();
         return;
     }
-    if (event->modifiers().testFlag(Qt::ControlModifier)
+    if (event->modifiers().testFlag(snipaste::platform::primaryModifier())
         && event->modifiers().testFlag(Qt::ShiftModifier)
         && event->key() == Qt::Key_V) {
         pasteShape();
         event->accept();
         return;
     }
-    if (event->modifiers().testFlag(Qt::ControlModifier)
+    if (event->modifiers().testFlag(snipaste::platform::primaryModifier())
         && event->modifiers().testFlag(Qt::ShiftModifier)
         && event->key() == Qt::Key_Z) {
         clearAnnotations();
         event->accept();
         return;
     }
-    if (event->modifiers().testFlag(Qt::ControlModifier)
+    if (event->modifiers().testFlag(snipaste::platform::primaryModifier())
         && event->key() == Qt::Key_Z) {
         undo();
         return;
     }
-    if (event->modifiers().testFlag(Qt::ControlModifier)
+    if (event->modifiers().testFlag(snipaste::platform::primaryModifier())
         && (event->key() == Qt::Key_Y || event->key() == Qt::Key_R)) {
         redo();
         return;

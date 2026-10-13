@@ -92,8 +92,10 @@ if [[ -z "${QT_ROOT:-}" ]]; then
     CANDIDATES=(
         "/opt/homebrew/opt/qt6"
         "/opt/homebrew/opt/qt"
+        "/opt/homebrew/opt/qtbase"
         "/usr/local/opt/qt6"
         "/usr/local/opt/qt"
+        "/usr/local/opt/qtbase"
     )
     for candidate in "${CANDIDATES[@]}"; do
         if [[ -f "$candidate/lib/cmake/Qt6/Qt6Config.cmake" ]]; then
@@ -138,8 +140,13 @@ fi
 
 if [[ $NO_BUILD -eq 0 ]]; then
     CPU_CORES="$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
-    echo "> cmake --build \"$BUILD_DIR\" --target snipaste --parallel $CPU_CORES"
-    cmake --build "$BUILD_DIR" --target snipaste --parallel "$CPU_CORES"
+    if [[ $RUN_TESTS -eq 1 ]]; then
+        echo "> cmake --build \"$BUILD_DIR\" --parallel $CPU_CORES"
+        cmake --build "$BUILD_DIR" --parallel "$CPU_CORES"
+    else
+        echo "> cmake --build \"$BUILD_DIR\" --target snipaste --parallel $CPU_CORES"
+        cmake --build "$BUILD_DIR" --target snipaste --parallel "$CPU_CORES"
+    fi
 fi
 
 if [[ $RUN_TESTS -eq 1 ]]; then
@@ -171,5 +178,9 @@ if [[ $PREFERENCES -eq 1 ]]; then ARGS+=("open-preferences"); fi
 if [[ $SNIP -eq 1 ]]; then ARGS+=("--snip"); fi
 
 echo "Starting snipaste ($EXECUTABLE)..."
-"$EXECUTABLE" "${ARGS[@]}" &
+if [[ ${#ARGS[@]} -eq 0 ]]; then
+    "$EXECUTABLE" &
+else
+    "$EXECUTABLE" "${ARGS[@]}" &
+fi
 echo "Started development build (PID: $!)."
