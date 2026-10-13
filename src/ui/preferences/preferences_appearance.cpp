@@ -302,8 +302,14 @@ QWidget *PreferencesDialog::createGeneralPage(QWidget *parent)
     admin->setChecked(m_config.value(QStringLiteral("general/startupAsAdmin"), false).toBool());
     admin->setEnabled(m_startupCheck->isChecked());
     connect(m_startupCheck, &QCheckBox::toggled, admin, &QWidget::setEnabled);
+#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+    admin->hide();
+#endif
     startupRow->addWidget(m_startupCheck); startupRow->addWidget(admin);
     auto *adminInfo = infoLabel(page, QStringLiteral("管理员启动需要 Windows 授权。"));
+#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+    adminInfo->hide();
+#endif
     startupRow->addWidget(adminInfo); startupRow->addStretch();
     const auto check = [this, page, row](const QString &text, const QString &key, bool fallback) {
         auto *b = new QCheckBox(text, page); b->setObjectName(key);

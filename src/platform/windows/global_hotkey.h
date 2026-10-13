@@ -18,6 +18,7 @@ public:
     void clearKey();
     void setEnabled(bool enabled);
     bool isEnabled() const;
+    int registeredId() const { return m_id; }
 
 signals:
     void triggered(int id);
@@ -30,6 +31,11 @@ private:
     unsigned int m_modifiers = 0;
     unsigned int m_key = 0;
     bool m_registered = false;
+#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+    // Opaque Carbon handles keep the public header free of platform headers.
+    void *m_nativeHotKey = nullptr;
+    void *m_nativeEventHandler = nullptr;
+#endif
 };
 
 } // namespace snipate::platform

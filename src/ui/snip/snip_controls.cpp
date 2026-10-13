@@ -1,6 +1,7 @@
 #include "ui/snip/snip_overlay.h"
 #include "ui/snip/capture_icons.h"
 #include "ui/annotation/annotation_dialog.h"
+#include "platform/keyboard.h"
 
 #include <QAction>
 #include <QApplication>
@@ -202,7 +203,8 @@ void SnipOverlay::createSizeToolbar()
         button->setFixedSize(35, 28); button->setFocusPolicy(Qt::NoFocus);
         row->addWidget(button); return button;
     };
-    connect(add(CaptureIcon::SelectScreen, QStringLiteral("选择屏幕"), QStringLiteral("选择当前屏幕 (Ctrl+A)")),
+    connect(add(CaptureIcon::SelectScreen, QStringLiteral("选择屏幕"),
+               QStringLiteral("选择当前屏幕 (%1)").arg(snipate::platform::primaryShortcutText(QStringLiteral("A")))),
             &QToolButton::clicked, this, &SnipOverlay::selectCurrentScreen);
     connect(add(CaptureIcon::Refresh, QStringLiteral("刷新截图"), QStringLiteral("刷新截图 (F5)")),
             &QToolButton::clicked, this, &SnipOverlay::refreshBackground);
@@ -520,7 +522,7 @@ bool SnipOverlay::handleProShortcut(QKeyEvent *event)
             : (m_regionHistoryIndex + direction + count) % count;
         resetSelection(); m_selection = m_regionHistory.at(m_regionHistoryIndex); confirmSelection(); return true;
     }
-    if (key == Qt::Key_A && modifiers == Qt::ControlModifier) {
+    if (key == Qt::Key_A && modifiers == snipate::platform::primaryModifier()) {
         // Keep the repeated shortcut cycle identical to the normal key path:
         // current screen -> all screens -> current screen.  In particular,
         // the first press from an unconfirmed overlay must not jump directly
@@ -570,8 +572,8 @@ bool SnipOverlay::handleProShortcut(QKeyEvent *event)
     }
     if (!direction.isNull() && m_selectionConfirmed) {
         QRect next = m_selection;
-        if (modifiers == Qt::ControlModifier || modifiers == Qt::ShiftModifier) {
-            const int step = modifiers == Qt::ControlModifier ? 1 : -1;
+        if (modifiers == snipate::platform::primaryModifier() || modifiers == Qt::ShiftModifier) {
+            const int step = modifiers == snipate::platform::primaryModifier() ? 1 : -1;
             if (direction.x() < 0) next.adjust(-step, 0, 0, 0);
             if (direction.x() > 0) next.adjust(0, 0, step, 0);
             if (direction.y() < 0) next.adjust(0, -step, 0, 0);

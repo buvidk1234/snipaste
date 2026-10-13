@@ -2,12 +2,12 @@
 
 一个面向 Windows 与 macOS 的跨平台开源截屏、贴图和标注工具，目标是提供与 Snipaste 2.x 接近的操作模型、快捷键和界面行为。
 
-项目已经完成 Windows 端首个可运行功能版本并持续补齐 Snipaste 专业版能力；目前正规划/推进 macOS 平台后端适配。API、配置格式和文件格式暂不承诺稳定。
+项目已经完成 Windows 与 macOS 端首个可运行功能版本，并持续补齐 Snipaste 专业版能力。API、配置格式和文件格式暂不承诺稳定。
 
 ## 平台支持状态
 
 - **Windows**: 已实现（Qt 6.12.0 + MSVC + Ninja，已支持完整截屏、贴图、标注、首选项及便携版发布）。
-- **macOS**: 规划与适配中（已配置跨平台 CMake 架构、`CMakePresets.json` 预设及平台开发工作流脚本）。
+- **macOS**: 已适配（Carbon 全局热键、屏幕/窗口/元素捕获、Vision OCR、贴图跨 Space、登录启动）。
 
 ## 快速开始与构建 (Build & Run)
 
@@ -58,9 +58,11 @@
 - Qt 6（桌面组件、Gui、Widgets、Concurrent、Network，按功能启用）
 - CMake 3.28 或更高版本
 - **Windows 平台**：Visual Studio 2026（MSVC v143 工具集）、Windows SDK、Ninja（Qt 路径示例：`D:/Qt/6.12.0/msvc2022_64`）
-- **macOS 平台**：Xcode Command Line Tools、Ninja、Homebrew 安装的 Qt 6（`brew install qt@6`）
+- **macOS 平台**：Xcode Command Line Tools、CMake、Ninja、Homebrew Qt 6（`brew install qtbase cmake ninja`）
 
 当前已生成 Windows 便携版：`dist/snipate-0.1.0-windows-x64.zip`。解压后直接运行 `snipate.exe`。
+
+首次在 macOS 上运行时，请在“系统设置 -> 隐私与安全性”中允许 snipate 使用“屏幕录制”和“辅助功能”。前者用于读取屏幕像素，后者用于全局快捷键、超级截屏和向前台应用发送 Cmd+V；修改权限后需重新启动 snipate。
 
 ## 文档
 

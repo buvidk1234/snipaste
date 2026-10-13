@@ -1,6 +1,7 @@
 #include "ui/snip/snip_overlay.h"
 #include "ui/snip/capture_icons.h"
 #include "ui/annotation/annotation_dialog.h"
+#include "platform/keyboard.h"
 
 #include <QButtonGroup>
 #include <QColorDialog>
@@ -724,8 +725,10 @@ void SnipOverlay::createToolbar()
     separator();
     connect(button(CaptureIcon::Ocr, QStringLiteral("文字识别"), QStringLiteral("识别选区文字")),
             &QToolButton::clicked, this, &SnipOverlay::ocrSelection);
-    auto *undo = button(CaptureIcon::Undo, QStringLiteral("撤销"), QStringLiteral("撤销 (Ctrl+Z)"));
-    auto *redo = button(CaptureIcon::Redo, QStringLiteral("重做"), QStringLiteral("重做 (Ctrl+Y)"));
+    auto *undo = button(CaptureIcon::Undo, QStringLiteral("撤销"),
+                        QStringLiteral("撤销 (%1)").arg(snipate::platform::primaryShortcutText(QStringLiteral("Z"))));
+    auto *redo = button(CaptureIcon::Redo, QStringLiteral("重做"),
+                        QStringLiteral("重做 (%1)").arg(snipate::platform::primaryShortcutText(QStringLiteral("Y"))));
     undo->setEnabled(false);
     redo->setEnabled(false);
     connect(undo, &QToolButton::clicked, this, [this] { if (m_canvas) m_canvas->undo(); });
@@ -737,9 +740,11 @@ void SnipOverlay::createToolbar()
     connect(share, &QToolButton::clicked, this, [this, share] {
         showOutputMenu(share->mapToGlobal(QPoint(0, share->height())), true);
     });
-    connect(button(CaptureIcon::Paste, QStringLiteral("贴图"), QStringLiteral("贴到屏幕 (Ctrl+T)")),
+    connect(button(CaptureIcon::Paste, QStringLiteral("贴图"),
+                  QStringLiteral("贴到屏幕 (%1)").arg(snipate::platform::primaryShortcutText(QStringLiteral("T")))),
             &QToolButton::clicked, this, [this] { pasteSelection(); });
-    connect(button(CaptureIcon::Save, QStringLiteral("保存"), QStringLiteral("保存 (Ctrl+S)")),
+    connect(button(CaptureIcon::Save, QStringLiteral("保存"),
+                  QStringLiteral("保存 (%1)").arg(snipate::platform::primaryShortcutText(QStringLiteral("S")))),
             &QToolButton::clicked, this, [this] { saveSelection(); });
     connect(button(CaptureIcon::Finish, QStringLiteral("完成"), QStringLiteral("复制到剪贴板 (Enter)")),
             &QToolButton::clicked, this, [this] { copySelection(); });

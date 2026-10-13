@@ -252,7 +252,22 @@ QWidget *PreferencesDialog::createCapturePage(QWidget *parent)
     auto *disableScroll = keyCheck(QStringLiteral("禁用鼠标滚轮功能"), QStringLiteral("capture/disableWheel"), m_config.value(QStringLiteral("capture/disableWheel"), false).toBool());
     auto *confirmEsc = keyCheck(QStringLiteral("按下 Esc 键时弹出确认对话框"), QStringLiteral("capture/confirmEsc"), m_config.value(QStringLiteral("capture/confirmEsc"), false).toBool());
     auto *ignoreCopy = keyCheck(QStringLiteral("忽略其他程序模拟的“复制”命令"), QStringLiteral("capture/ignoreSimulatedCopy"), m_config.value(QStringLiteral("capture/ignoreSimulatedCopy"), true).toBool());
-    auto *winRow = new QHBoxLayout; winRow->addWidget(new QLabel(QStringLiteral("屏蔽 Win 键:"), keys)); auto *winLeft = new QCheckBox(QStringLiteral("左"), keys); auto *winRight = new QCheckBox(QStringLiteral("右"), keys); winLeft->setChecked(m_config.value(QStringLiteral("capture/blockWinLeft"), true).toBool()); winRight->setChecked(m_config.value(QStringLiteral("capture/blockWinRight"), false).toBool()); winRow->addWidget(winLeft); winRow->addWidget(winRight); winRow->addStretch(); keysLayout->addLayout(winRow);
+    auto *winRowWidget = new QWidget(keys);
+    auto *winRow = new QHBoxLayout(winRowWidget);
+    winRow->setContentsMargins(0, 0, 0, 0);
+    winRow->addWidget(new QLabel(QStringLiteral("屏蔽 Win 键:"), winRowWidget));
+    auto *winLeft = new QCheckBox(QStringLiteral("左"), winRowWidget);
+    auto *winRight = new QCheckBox(QStringLiteral("右"), winRowWidget);
+    winLeft->setChecked(m_config.value(QStringLiteral("capture/blockWinLeft"), true).toBool());
+    winRight->setChecked(m_config.value(QStringLiteral("capture/blockWinRight"), false).toBool());
+    winRow->addWidget(winLeft);
+    winRow->addWidget(winRight);
+    winRow->addStretch();
+#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+    // Windows key suppression has no macOS equivalent in this backend.
+    winRowWidget->hide();
+#endif
+    keysLayout->addWidget(winRowWidget);
     auto *actionGroup = new QGroupBox(QStringLiteral("动作"), keys); auto *actionLayout = new QFormLayout(actionGroup); actionLayout->setContentsMargins(12, 18, 12, 10); actionLayout->setVerticalSpacing(7);
     const auto actionRow = [actionGroup, actionLayout, this](const QString &label, const QString &key, const QString &fallback, const QString &exitKey) { auto *rowWidget = new QWidget(actionGroup); auto *rowLayout = new QHBoxLayout(rowWidget); rowLayout->setContentsMargins(0, 0, 0, 0); auto *combo = new QComboBox(rowWidget); combo->setObjectName(key); combo->addItems({QStringLiteral("复制到剪贴板"), QStringLiteral("贴到屏幕"), QStringLiteral("保存文件"), QStringLiteral("无")}); combo->setCurrentText(m_config.value(key, fallback).toString()); auto *then = new QCheckBox(QStringLiteral("然后"), rowWidget); auto *exit = new QCheckBox(QStringLiteral("退出截屏"), rowWidget); exit->setChecked(m_config.value(exitKey, true).toBool()); rowLayout->addWidget(combo); rowLayout->addWidget(then); rowLayout->addWidget(exit); rowLayout->addStretch(); actionLayout->addRow(label, rowWidget); return std::pair<QComboBox *, QCheckBox *>(combo, exit); };
     const auto left = actionRow(QStringLiteral("左键双击:"), QStringLiteral("capture/doubleClickAction"), QStringLiteral("复制到剪贴板"), QStringLiteral("capture/doubleClickExit"));

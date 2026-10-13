@@ -2,6 +2,7 @@
 
 #include "core/command/command_registry.h"
 #include "core/config/config_store.h"
+#include "platform/keyboard.h"
 
 #include <QAction>
 #include <QApplication>
@@ -99,7 +100,7 @@ TrayController::TrayController(core::CommandRegistry &commands, core::ConfigStor
     addCommand(menu, QStringLiteral("截屏"), QStringLiteral("snip.start"), QKeySequence(Qt::Key_F1));
     addCommand(menu, QStringLiteral("截屏并自动复制"),
                QStringLiteral("snip.copy"),
-               QKeySequence(Qt::CTRL | Qt::Key_F1));
+               snipate::platform::primaryKeySequence(Qt::Key_F1));
     addCommand(menu, QStringLiteral("自定义截屏"),
                QStringLiteral("snip.custom"),
                QKeySequence(Qt::SHIFT | Qt::Key_F1));
@@ -109,7 +110,7 @@ TrayController::TrayController(core::CommandRegistry &commands, core::ConfigStor
                QKeySequence(Qt::SHIFT | Qt::Key_F3));
     addCommand(menu, QStringLiteral("切换到另一贴图组"),
                QStringLiteral("paste.switchGroup"),
-               QKeySequence(Qt::CTRL | Qt::Key_F3));
+               snipate::platform::primaryKeySequence(Qt::Key_F3));
     addCommand(menu, QStringLiteral("清空截屏历史"), QStringLiteral("history.clear"));
     menu->addSeparator();
 
@@ -122,7 +123,7 @@ TrayController::TrayController(core::CommandRegistry &commands, core::ConfigStor
     addCommand(pasteMenu, QStringLiteral("隐藏/显示所有贴图"), QStringLiteral("paste.toggleAll"),
                QKeySequence(Qt::SHIFT | Qt::Key_F3));
     addCommand(pasteMenu, QStringLiteral("切换到另一贴图组"), QStringLiteral("paste.switchGroup"),
-               QKeySequence(Qt::CTRL | Qt::Key_F3));
+               snipate::platform::primaryKeySequence(Qt::Key_F3));
     pasteMenu->addSeparator();
     addCommand(pasteMenu, QStringLiteral("管理贴图组"), QStringLiteral("paste.groupManager"));
     addCommand(pasteMenu, QStringLiteral("Solo 模式"), QStringLiteral("paste.solo"));

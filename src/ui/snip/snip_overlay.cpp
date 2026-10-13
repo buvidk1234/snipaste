@@ -1,5 +1,6 @@
 #include "ui/snip/snip_overlay.h"
 #include "ui/annotation/annotation_dialog.h"
+#include "platform/keyboard.h"
 #include "platform/windows/capture_target.h"
 
 #include <QApplication>
@@ -504,7 +505,7 @@ void SnipOverlay::keyPressEvent(QKeyEvent *event)
     }
 
     if (m_canvas && event->key() == Qt::Key_Z
-        && event->modifiers() == (Qt::ControlModifier | Qt::ShiftModifier)) {
+        && event->modifiers() == (snipate::platform::primaryModifier() | Qt::ShiftModifier)) {
         m_canvas->clearAnnotations();
         event->accept();
         return;
@@ -578,10 +579,10 @@ void SnipOverlay::keyPressEvent(QKeyEvent *event)
         }
     }
 
-    if ((event->key() == Qt::Key_A && event->modifiers() == Qt::ControlModifier)
+    if ((event->key() == Qt::Key_A && event->modifiers() == snipate::platform::primaryModifier())
         || (event->key() == Qt::Key_R && event->modifiers() == Qt::NoModifier)) {
-        if (event->key() == Qt::Key_A && event->modifiers() == Qt::ControlModifier) {
-            // Snipaste cycles the full-screen target on repeated Ctrl+A:
+        if (event->key() == Qt::Key_A && event->modifiers() == snipate::platform::primaryModifier()) {
+            // Snipaste cycles the full-screen target on repeated primary+A:
             // current screen -> virtual desktop -> current screen.  The
             // first press must always establish the current-screen frame,
             // even when the overlay started with no confirmed selection.
@@ -603,7 +604,8 @@ void SnipOverlay::keyPressEvent(QKeyEvent *event)
         return;
     }
 
-    if (event->key() == Qt::Key_S && event->modifiers().testFlag(Qt::ControlModifier)) {
+    if (event->key() == Qt::Key_S
+        && event->modifiers().testFlag(snipate::platform::primaryModifier())) {
         if (event->modifiers().testFlag(Qt::ShiftModifier))
             quickSaveSelection();
         else
@@ -612,19 +614,21 @@ void SnipOverlay::keyPressEvent(QKeyEvent *event)
     }
 
     if (event->key() == Qt::Key_P
-        && event->modifiers() == Qt::ControlModifier) {
+        && event->modifiers() == snipate::platform::primaryModifier()) {
         printSelection();
         return;
     }
 
-    if (event->key() == Qt::Key_T && event->modifiers().testFlag(Qt::ControlModifier)) {
+    if (event->key() == Qt::Key_T
+        && event->modifiers().testFlag(snipate::platform::primaryModifier())) {
         pasteSelection();
         return;
     }
 
-    if ((event->key() == Qt::Key_C && event->modifiers().testFlag(Qt::ControlModifier))
+    if ((event->key() == Qt::Key_C
+         && event->modifiers().testFlag(snipate::platform::primaryModifier()))
         || (event->key() == Qt::Key_Insert
-            && event->modifiers().testFlag(Qt::ControlModifier))) {
+            && event->modifiers().testFlag(snipate::platform::primaryModifier()))) {
         copySelection();
         return;
     }
