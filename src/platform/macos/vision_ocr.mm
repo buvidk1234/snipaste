@@ -29,7 +29,7 @@ void releaseObject(id object)
 
 } // namespace
 
-core::OcrResult recognizeWithMacVision(const QImage &image)
+core::OcrResult recognizeWithMacVision(const QImage &image, const QString &language)
 {
     if (image.isNull())
         return {false, {}, QStringLiteral("没有可识别的图像")};
@@ -71,9 +71,17 @@ core::OcrResult recognizeWithMacVision(const QImage &image)
         request.recognitionLevel = VNRequestTextRecognitionLevelAccurate;
         request.usesLanguageCorrection = YES;
         if (@available(macOS 10.15, *)) {
-            // Supplying preferred languages improves mixed Chinese/English
-            // screenshots, while Vision still falls back to installed packs.
-            request.recognitionLanguages = @[ @"zh-Hans", @"en-US" ];
+            // Supplying a selected language improves recognition while the
+            // default keeps the historical mixed Chinese/English behavior.
+            const QString folded = language.trimmed().toCaseFolded();
+            if (folded == QStringLiteral("en") || folded.startsWith(QStringLiteral("en-"))
+                || folded.contains(QStringLiteral("english")))
+                request.recognitionLanguages = @[ @"en-US" ];
+            else if (folded == QStringLiteral("zh") || folded.startsWith(QStringLiteral("zh-"))
+                     || folded.contains(QStringLiteral("中文")))
+                request.recognitionLanguages = @[ @"zh-Hans" ];
+            else
+                request.recognitionLanguages = @[ @"zh-Hans", @"en-US" ];
         }
 
         VNImageRequestHandler *handler = [[VNImageRequestHandler alloc]

@@ -8,6 +8,8 @@
 #include <QStandardPaths>
 #include <QString>
 #include <QTextStream>
+#include <QtGlobal>
+#include <atomic>
 
 namespace {
 
@@ -21,6 +23,12 @@ QMutex &logMutex()
 {
     static QMutex mutex;
     return mutex;
+}
+
+std::atomic_int &loggingLevel()
+{
+    static std::atomic_int level{1};
+    return level;
 }
 
 QString messageTypeName(QtMsgType type)
@@ -42,6 +50,10 @@ QString messageTypeName(QtMsgType type)
 
 void messageHandler(QtMsgType type, const QMessageLogContext &, const QString &message)
 {
+    const int level = loggingLevel().load(std::memory_order_relaxed);
+    if ((level <= 0 && type == QtInfoMsg)
+        || (level <= 1 && type == QtDebugMsg))
+        return;
     QMutexLocker locker(&logMutex());
     const QString line = QStringLiteral("[%1] [%2] %3\n")
                              .arg(QDateTime::currentDateTime().toString(Qt::ISODateWithMs),
@@ -73,6 +85,11 @@ void initializeLogging()
         qInfo() << "logging initialized at" << logFile().fileName();
     else
         qWarning() << "failed to open log file" << logFile().fileName();
+}
+
+void setLoggingLevel(int level)
+{
+    loggingLevel().store(qBound(0, level, 2), std::memory_order_relaxed);
 }
 
 } // namespace snipaste::app

@@ -1,4 +1,5 @@
 #include "ui/annotation/annotation_dialog.h"
+#include "ui/clipboard_output.h"
 #include "platform/keyboard.h"
 
 #include <QApplication>
@@ -101,9 +102,10 @@ void AnnotationCanvas::setTool(Tool tool)
     m_editingShape = false;
     m_resizingHandle = -1;
     m_editingRotation = false;
-    m_toolStyles.insert(int(m_tool), ToolStyle{m_penColor, m_penWidth, m_penStyle});
+    if (m_rememberToolColors)
+        m_toolStyles.insert(int(m_tool), ToolStyle{m_penColor, m_penWidth, m_penStyle});
     m_tool = tool;
-    if (m_toolStyles.contains(int(tool))) {
+    if (m_rememberToolColors && m_toolStyles.contains(int(tool))) {
         const ToolStyle style = m_toolStyles.value(int(tool));
         const QColor oldColor = m_penColor;
         const qreal oldWidth = m_penWidth;
@@ -1203,7 +1205,8 @@ void AnnotationCanvas::paintEvent(QPaintEvent *)
         }
         drawShape(painter, preview, 1.0);
     }
-    if (m_selectedShape >= 0 && m_selectedShape < m_shapes.size()) {
+    if (!(m_tool == Tool::Eraser && m_disableEraserEditing)
+        && m_selectedShape >= 0 && m_selectedShape < m_shapes.size()) {
         const Shape &sel = m_shapes.at(m_selectedShape);
         QRectF bounds = shapeBounds(sel);
         painter.save();
@@ -1279,7 +1282,8 @@ void AnnotationCanvas::mousePressEvent(QMouseEvent *event)
     finishTextInput();
     setFocus();
     const QPointF imagePoint = toImagePoint(event->position());
-    if (m_selectedShape >= 0 && m_selectedShape < m_shapes.size()) {
+    if (!(m_tool == Tool::Eraser && m_disableEraserEditing)
+        && m_selectedShape >= 0 && m_selectedShape < m_shapes.size()) {
         const Shape &sel = m_shapes.at(m_selectedShape);
         QRectF bounds = shapeBounds(sel);
         const QPointF rotHandleCenter(bounds.center().x(), bounds.top() - 20.0);
@@ -1333,7 +1337,8 @@ void AnnotationCanvas::mousePressEvent(QMouseEvent *event)
         event->accept();
         return;
     }
-    if (hit >= 0 && (event->modifiers().testFlag(snipaste::platform::primaryModifier())
+    if (hit >= 0 && (m_freeSelect
+                     || event->modifiers().testFlag(snipaste::platform::primaryModifier())
                      || m_shapes.at(hit).tool == m_tool)
         && m_tool != Tool::Eraser && m_tool != Tool::Text && m_tool != Tool::Number) {
         m_selectedShape = hit;
@@ -2136,7 +2141,7 @@ AnnotationDialog::AnnotationDialog(const QImage &image, QWidget *parent)
     connect(redo, &QPushButton::clicked, m_canvas, &AnnotationCanvas::redo);
     connect(clear, &QPushButton::clicked, m_canvas, &AnnotationCanvas::clearAnnotations);
     connect(copy, &QPushButton::clicked, this, [this] {
-        QApplication::clipboard()->setImage(resultImage());
+        copyImageToClipboard(resultImage(), false, ClipboardImageSource::Screenshot);
     });
     connect(save, &QPushButton::clicked, this, [this] {
         const QString path = QFileDialog::getSaveFileName(

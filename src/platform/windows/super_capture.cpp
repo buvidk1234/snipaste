@@ -75,15 +75,29 @@ void SuperCapture::setMouseButton(Qt::MouseButton button)
         m_button = button;
 }
 
+void SuperCapture::setBlockWindowsKeys(bool left, bool right)
+{
+    m_blockWinLeft = left;
+    m_blockWinRight = right;
+}
+
 #ifdef Q_OS_WIN
 void SuperCapture::installHook()
 {
-    if (m_hook)
+    if (m_hook && m_keyboardHook)
         return;
     s_instance = this;
-    m_hook = reinterpret_cast<void *>(SetWindowsHookExW(
-        WH_MOUSE_LL, reinterpret_cast<HOOKPROC>(&SuperCapture::hookProc),
-        GetModuleHandleW(nullptr), 0));
+    const HMODULE module = GetModuleHandleW(nullptr);
+    if (!m_hook) {
+        m_hook = reinterpret_cast<void *>(SetWindowsHookExW(
+            WH_MOUSE_LL, reinterpret_cast<HOOKPROC>(&SuperCapture::hookProc), module, 0));
+    }
+    if (!m_keyboardHook) {
+        m_keyboardHook = reinterpret_cast<void *>(SetWindowsHookExW(
+            WH_KEYBOARD_LL, reinterpret_cast<HOOKPROC>(&SuperCapture::keyboardHookProc), module, 0));
+    }
+    if (!m_hook && !m_keyboardHook)
+        s_instance = nullptr;
 }
 
 void SuperCapture::uninstallHook()
@@ -91,6 +105,10 @@ void SuperCapture::uninstallHook()
     if (m_hook) {
         UnhookWindowsHookEx(reinterpret_cast<HHOOK>(m_hook));
         m_hook = nullptr;
+    }
+    if (m_keyboardHook) {
+        UnhookWindowsHookEx(reinterpret_cast<HHOOK>(m_keyboardHook));
+        m_keyboardHook = nullptr;
     }
     if (s_instance == this)
         s_instance = nullptr;
@@ -104,6 +122,28 @@ long __stdcall SuperCapture::hookProc(int code, quintptr wParam, qintptr lParam)
             return 1;
     }
     return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+long __stdcall SuperCapture::keyboardHookProc(int code, quintptr wParam, qintptr lParam)
+{
+    if (code >= 0 && s_instance && s_instance->m_enabled) {
+        const auto *data = reinterpret_cast<const KBDLLHOOKSTRUCT *>(lParam);
+        if (data && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN
+                     || wParam == WM_KEYUP || wParam == WM_SYSKEYUP)
+            && s_instance->shouldBlockWindowsKey(data->vkCode)) {
+            return 1;
+        }
+    }
+    return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+bool SuperCapture::shouldBlockWindowsKey(unsigned int virtualKey) const
+{
+    if (virtualKey == VK_LWIN)
+        return m_blockWinLeft;
+    if (virtualKey == VK_RWIN)
+        return m_blockWinRight;
+    return false;
 }
 
 bool SuperCapture::handleMouseMessage(quintptr message, const QPoint &globalPosition)

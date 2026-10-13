@@ -2,6 +2,7 @@
 
 #include <QDir>
 #include <QDebug>
+#include <QFile>
 #include <QFileInfo>
 
 namespace snipaste::core {
@@ -25,6 +26,13 @@ bool ConfigStore::load()
 bool ConfigStore::save()
 {
     QDir().mkpath(QFileInfo(m_filePath).absolutePath());
+    if (m_settings->value(QStringLiteral("general/backup"), true).toBool()
+        && QFileInfo::exists(m_filePath)) {
+        const QString backupPath = m_filePath + QStringLiteral(".bak");
+        QFile::remove(backupPath);
+        if (!QFile::copy(m_filePath, backupPath))
+            qWarning() << "failed to back up configuration:" << m_filePath;
+    }
     m_settings->sync();
     if (m_settings->status() != QSettings::NoError) {
         qWarning() << "failed to save configuration:" << m_filePath;

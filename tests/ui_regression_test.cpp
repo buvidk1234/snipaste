@@ -5,6 +5,7 @@
 #include "ui/paste/paste_manager.h"
 #include "ui/paste/paste_window.h"
 #include "ui/snip/snip_overlay.h"
+#include "ui/clipboard_output.h"
 #include "ui/tray/tray_controller.h"
 #include "core/command/command_registry.h"
 #include "platform/keyboard.h"
@@ -18,6 +19,7 @@
 #include <QFrame>
 #include <QFontDatabase>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -56,6 +58,7 @@ private slots:
     void preferencesCloseSavesWithoutQuitting();
     void preferencesPendingCallbacksAreCancelled();
     void preferencesProfessionalReferencePages();
+    void copyAsFileModesProduceExpectedClipboardFormats();
     void trayContextMenuMatchesReference();
     void hotCornerDwellState();
     void toolbarOnlyAfterSelection();
@@ -105,6 +108,36 @@ private slots:
     void pastePersistence();
     void independentWidthPresetsAndCornerRadius();
 };
+
+void UiRegressionTest::copyAsFileModesProduceExpectedClipboardFormats()
+{
+    QImage image(QSize(7, 5), QImage::Format_ARGB32_Premultiplied);
+    image.fill(QColor(12, 34, 56, 255));
+    auto *clipboard = QApplication::clipboard();
+    QVERIFY(clipboard);
+
+    const auto verify = [&](ui::CopyAsFileMode mode, bool shortcut, bool expectFile) {
+        clipboard->clear();
+        QVERIFY(ui::copyImageToClipboard(image, mode, shortcut));
+        const QMimeData *mime = clipboard->mimeData();
+        QVERIFY(mime);
+        QVERIFY(mime->hasImage());
+        QCOMPARE(mime->hasUrls(), expectFile);
+        if (expectFile) {
+            QCOMPARE(mime->urls().size(), 1);
+            const QString path = mime->urls().first().toLocalFile();
+            QVERIFY(!path.isEmpty());
+            QVERIFY(QFileInfo::exists(path));
+            QVERIFY(QFile(path).remove());
+        }
+    };
+
+    verify(ui::CopyAsFileMode::Disabled, false, false);
+    verify(ui::CopyAsFileMode::Shortcut, false, false);
+    verify(ui::CopyAsFileMode::Shortcut, true, true);
+    verify(ui::CopyAsFileMode::Always, false, true);
+    clipboard->clear();
+}
 
 void UiRegressionTest::preferencesCloseSavesWithoutQuitting()
 {

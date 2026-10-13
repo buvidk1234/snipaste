@@ -20,7 +20,7 @@ struct CaptureAppearance {
     bool hideHexPrefix = false;
     bool uppercaseHex = false;
     int magnifierZoom = 9;
-    QStringList colorFormats{QStringLiteral("RGB")};
+    QStringList colorFormats{QStringLiteral("RGB"), QStringLiteral("HEX")};
     bool rememberToolColors = true;
     bool showShare = true;
     int penCount = 3;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QImage>
+#include <QColor>
 #include <QList>
 #include <QPointer>
 #include <QRect>
@@ -56,16 +57,65 @@ public:
     void setBackgroundProvider(std::function<QImage()> provider);
     void setHoldAfterCapture(bool enabled) { m_holdAfterCapture = enabled; }
     void setKeepAspectRatio(bool enabled) { m_keepAspectRatio = enabled; }
+    // Capture display options are kept on the overlay so each new capture
+    // reflects the preferences without relying on process globals.
+    void setCaptureDisplayOptions(bool showAnchor,
+                                  const QColor &maskColor,
+                                  const QColor &anchorColor,
+                                  int borderWidth,
+                                  bool magnifierMask,
+                                  bool magnifierBorder,
+                                  bool magnifierAnchor,
+                                  bool crosshair,
+                                  bool disableGuides,
+                                  bool hideOneByOne);
+    void setMagnifierOptions(bool automatic,
+                             bool superCapture,
+                             const QStringList &colorFormats,
+                             bool hideHexPrefix,
+                             bool uppercaseHex,
+                             bool grid,
+                             bool coordinates,
+                             bool hints,
+                             int zoom,
+                             bool superMode);
+    void setDefaultAnnotation(const QString &annotation) { m_defaultAnnotation = annotation.trimmed(); }
+    void setCaptureSound(bool enabled, const QString &file, bool onQuickSave)
+    {
+        m_captureSoundEnabled = enabled;
+        m_captureSoundFile = file.trimmed();
+        m_captureSoundQuickSave = onQuickSave;
+    }
     void setExitOnFocusLoss(bool enabled) { m_exitOnFocusLoss = enabled; }
     void setWheelEnabled(bool enabled) { m_wheelEnabled = enabled; }
     void setConfirmEscape(bool enabled) { m_confirmEscape = enabled; }
     void setHistoryCycling(bool enabled) { m_historyCycle = enabled; }
     void setIncludeUnsavedHistory(bool enabled) { m_includeUnsavedHistory = enabled; }
     void setAutoSelectAnnotations(bool enabled) { m_autoSelectAnnotations = enabled; }
+    void setRememberToolColors(bool enabled);
+    void setFreeSelect(bool enabled);
+    void setDisableEraserEditing(bool enabled);
+    void setQuickResponse(bool enabled);
     void setAnchorThreshold(int pixels) { m_anchorThreshold = qMax(0, pixels); }
     void setUppercaseHexColor(bool enabled) { m_uppercaseHexColor = enabled; }
     void setHideOutputOptions(bool enabled);
+    void setShowShareButton(bool enabled);
+    // 0 = always copy images as files, 1 = only the copy-as-file shortcut,
+    // 2 = copy image data.  These values match output/copyAsFileMode.
+    void setCopyAsFileMode(int mode)
+    {
+        m_copyAsFileMode = mode >= 0 && mode <= 2 ? mode : 2;
+    }
     void setQuickSaveDirectory(const QString &directory) { m_quickSaveDirectory = directory; }
+    // Output settings are supplied by the application when a capture session
+    // is created.  Keeping them on the overlay makes both the toolbar's
+    // manual save and quick-save paths follow the same preferences.
+    void setOutputFileNamePattern(const QString &pattern) { m_outputFileNamePattern = pattern; }
+    void setOutputImageQuality(int quality) { m_outputImageQuality = qBound(-1, quality, 100); }
+    void setRememberExtension(bool enabled) { m_rememberExtension = enabled; }
+    void setRememberedExtension(const QString &extension) { m_lastSavedExtension = extension.trimmed(); }
+    void setQuickSaveNotification(bool enabled) { m_quickSaveNotification = enabled; }
+    void setHideOnFileDialog(bool enabled) { m_hideOnFileDialog = enabled; }
     void setPenTipCount(int count) { m_penTipCount = qBound(1, count, 5); }
     void setAnnotationPalette(const QStringList &palette) { m_annotationPalette = palette; }
     void setMouseActions(const QString &doubleClickAction, bool doubleClickExit,
@@ -99,6 +149,10 @@ signals:
     void ocrRequested(const QImage &image);
     void barcodeRequested(const QImage &image);
     void printRequested(const QImage &image);
+    // Emitted after a file has been written successfully.  The application
+    // can use it to persist the selected extension for the next dialog.
+    void fileSaved(const QString &path);
+    void quickSaveCompleted(const QString &path);
 
 private:
     QRect imageSelection() const;
@@ -119,7 +173,7 @@ private:
     void updateToolbarGeometry();
     void confirmSelection();
     void resetSelection();
-    void copySelection(bool closeAfter = true);
+    void copySelection(bool closeAfter = true, bool copyAsFileShortcut = false);
     void saveSelection(bool closeAfter = true);
     void quickSaveSelection(bool closeAfter = true);
     void printSelection(bool closeAfter = true);
@@ -132,6 +186,7 @@ private:
     void drawMagnifier(QPainter &painter) const;
     void drawMagnifierGuides(QPainter &painter) const;
     void drawShortcutHints(QPainter &painter) const;
+    void playCaptureSound() const;
     // Release the full-screen capture as soon as the capture session ends.
     // WA_DeleteOnClose is asynchronous, and the image can otherwise remain
     // resident while a popup or a nested event loop is finishing.
@@ -199,6 +254,7 @@ private:
     bool m_toolbarHidden = false;
     bool m_refreshing = false;
     bool m_autoCopy = false;
+    int m_copyAsFileMode = 2;
     bool m_captureCursor = false;
     QRect m_initialSelection;
     QSize m_fixedSelectionSize;
@@ -223,11 +279,34 @@ private:
     QToolButton *m_roundedButton = nullptr;
     QWidget *m_radiusStepperWidget = nullptr;
     QToolButton *m_outputOptionsButton = nullptr;
+    QToolButton *m_shareButton = nullptr;
+    bool m_showShareButton = true;
     AnnotationCanvas *m_canvas = nullptr;
     QWidget *m_selectionBorder = nullptr;
     QPoint m_cursorPosition;
     bool m_showMagnifier = true;
     bool m_showMagnifierGuides = false;
+    bool m_magnifierGrid = true;
+    bool m_magnifierCoordinates = true;
+    bool m_magnifierHints = true;
+    bool m_magnifierHideHexPrefix = false;
+    bool m_magnifierUppercaseHex = true;
+    int m_magnifierZoom = 9;
+    QStringList m_magnifierColorFormats{QStringLiteral("RGB"), QStringLiteral("HEX")};
+    bool m_showAnchor = true;
+    QColor m_maskColor = QColor(0, 0, 0, 120);
+    QColor m_anchorColor = Qt::white;
+    int m_captureBorderWidth = 2;
+    bool m_magnifierMask = true;
+    bool m_magnifierBorder = true;
+    bool m_magnifierAnchor = false;
+    bool m_showCrosshair = false;
+    bool m_disableGuides = false;
+    bool m_hideOneByOne = true;
+    QString m_defaultAnnotation;
+    bool m_captureSoundEnabled = true;
+    bool m_captureSoundQuickSave = false;
+    QString m_captureSoundFile = QStringLiteral("sound/snip.wav");
     bool m_roundedCorners = false;
     int m_captureCornerRadius = 8;
     bool m_outputShadow = false;
@@ -246,10 +325,20 @@ private:
     bool m_historyCycle = false;
     bool m_includeUnsavedHistory = false;
     bool m_autoSelectAnnotations = true;
+    bool m_rememberToolColors = true;
+    bool m_freeSelect = true;
+    bool m_disableEraserEditing = true;
+    bool m_quickResponse = true;
     int m_anchorThreshold = 80;
     bool m_uppercaseHexColor = true;
     bool m_hideOutputOptions = false;
     QString m_quickSaveDirectory;
+    QString m_outputFileNamePattern = QStringLiteral("Snipaste_$yyyy-MM-dd_HH-mm-ss$.png");
+    QString m_lastSavedExtension;
+    int m_outputImageQuality = -1;
+    bool m_rememberExtension = true;
+    bool m_quickSaveNotification = true;
+    bool m_hideOnFileDialog = true;
     int m_penTipCount = 3;
     QStringList m_annotationPalette;
     QStringList m_excludedDetectionProcesses;

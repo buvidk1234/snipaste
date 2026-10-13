@@ -1,11 +1,14 @@
 #include "ui/preferences/preferences_dialog.h"
 #include "core/config/config_store.h"
 
+#include <QApplication>
 #include <QCheckBox>
 #include <QColorDialog>
 #include <QColor>
 #include <QComboBox>
+#include <QDesktopServices>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -15,6 +18,7 @@
 #include <QPainter>
 #include <QPixmap>
 #include <QPushButton>
+#include <QUrl>
 #include <QSpinBox>
 #include <QStyle>
 #include <QTabWidget>
@@ -238,6 +242,13 @@ QWidget *PreferencesDialog::createCapturePage(QWidget *parent)
     behaviorLayout->addWidget(sound); behaviorLayout->addStretch();
     auto *behaviorFooter = new QHBoxLayout; behaviorFooter->addStretch(); auto *behaviorRestore = new QPushButton(QStringLiteral("恢复默认"), behavior); behaviorFooter->addWidget(behaviorRestore); behaviorLayout->addLayout(behaviorFooter);
     connect(changeSound, &QPushButton::clicked, this, [this] { const QString path = QFileDialog::getOpenFileName(this, QStringLiteral("选择音效"), {}, QStringLiteral("音频 (*.wav *.mp3)")); if (!path.isEmpty()) m_captureSoundFileEdit->setText(path); });
+    connect(play, &QToolButton::clicked, this, [this] {
+        const QString path = m_captureSoundFileEdit->text().trimmed();
+        if (!path.isEmpty() && QFileInfo::exists(path))
+            QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absoluteFilePath()));
+        else
+            QApplication::beep();
+    });
     connect(behaviorRestore, &QPushButton::clicked, this, [this, hideOverlay, annotationCombo, cycle, unsaved, soundQuick] {
         m_captureAutoDetectWindowCheck->setChecked(true); m_captureHideOneByOneCheck->setChecked(true); m_captureAutoDetectElementsCheck->setChecked(true); m_captureCursorCheck->setChecked(false); m_captureDisableCheck->setChecked(false); m_captureAdjustHdrCheck->setChecked(true); m_captureExitOnFocusCheck->setChecked(true); hideOverlay->setChecked(true); annotationCombo->setCurrentText(QStringLiteral("无")); m_captureHistoryRegionSpin->setValue(8); cycle->setChecked(false); m_captureHistorySpin->setValue(20); unsaved->setChecked(false); m_captureSoundCheck->setChecked(true); soundQuick->setChecked(false); m_captureSoundFileEdit->setText(QStringLiteral("sound/snip.wav"));
     });

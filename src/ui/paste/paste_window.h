@@ -2,8 +2,10 @@
 
 #include <QImage>
 #include <QColor>
+#include <QSize>
 #include <QTransform>
 #include <QStringList>
+#include <QTimer>
 #include <QWidget>
 
 class QContextMenuEvent;
@@ -28,6 +30,11 @@ public:
     void showAtCursor();
     void showAtPosition(const QPoint &globalPosition);
     void showExisting();
+    void setActivateOnShow(bool enabled) { m_activateOnShow = enabled; }
+    void setFlashTransparency(bool enabled);
+    void setKeepOnDrag(bool enabled) { m_keepOnDrag = enabled; }
+    void flash();
+    bool isFlashing() const { return m_flashActive; }
     State state() const;
     void restoreClosed();
     const QImage &sourceImage() const;
@@ -42,6 +49,14 @@ public:
     bool resizeEnabled() const;
     void setExchangeNavigationKeys(bool enabled);
     void setMaxNetworkImageBytes(qint64 bytes);
+    void setMaxSize(int pixels);
+    void setThumbnailSize(const QSize &size);
+    void setWheelCenter(bool enabled);
+    void setResetTransform(bool enabled);
+    void setDisableDpiScaling(bool enabled);
+    void setHelpKeys(bool enabled) { m_helpKeys = enabled; }
+    void setCloseConfirm(bool enabled) { m_closeConfirm = enabled; }
+    void setDestroyConfirm(bool enabled) { m_destroyConfirm = enabled; }
     bool isSoloHidden() const;
     void setSoloHidden(bool hidden);
     int rotationQuarterTurns() const;
@@ -59,6 +74,7 @@ public:
     void setVirtualDesktopPinned(bool enabled);
     bool virtualDesktopPinned() const;
     void setPasteManager(PasteManager *manager);
+    void setCopyAsFileShortcutEnabled(bool enabled) { m_copyAsFileShortcutEnabled = enabled; }
     bool alwaysOnTop() const;
     bool thumbnailMode() const;
     void setThumbnailMode(bool enabled);
@@ -78,6 +94,7 @@ signals:
     void pasteClosed(snipaste::ui::PasteWindow *window);
     void selectAllRequested(snipaste::ui::PasteWindow *window);
     void copyRequested(snipaste::ui::PasteWindow *window);
+    void copyAsFileRequested(snipaste::ui::PasteWindow *window);
     void moveRequested(snipaste::ui::PasteWindow *window, QPoint delta);
     void positionChanged(snipaste::ui::PasteWindow *window);
     void wheelTransformRequested(snipaste::ui::PasteWindow *window,
@@ -99,6 +116,7 @@ protected:
 
 private:
     void setSourceImage(const QImage &image);
+    void applyDroppedImage(const QImage &image);
     void rebuildImage();
     void updateDisplaySize();
     void hidePaste();
@@ -140,11 +158,27 @@ private:
     QString m_shiftEscapeAction = QStringLiteral("销毁贴图");
     QStringList m_mouseActions;
     qint64 m_maxNetworkImageBytes = 20LL * 1024 * 1024;
+    int m_maxSize = 12000;
+    QSize m_thumbnailSize = QSize(62, 62);
+    bool m_wheelCenter = false;
+    bool m_resetTransform = true;
+    bool m_disableDpiScaling = false;
+    bool m_helpKeys = false;
+    bool m_closeConfirm = true;
+    bool m_destroyConfirm = true;
     bool m_soloHidden = false;
     bool m_virtualDesktopPinned = false;
+    bool m_activateOnShow = true;
+    bool m_flashTransparency = true;
+    bool m_keepOnDrag = false;
+    bool m_flashActive = false;
+    bool m_flashBorder = false;
+    int m_flashStep = 0;
+    QTimer m_flashTimer;
     bool m_thumbnailMode = false;
     qreal m_scaleBeforeThumbnail = 1.0;
     PasteManager *m_pasteManager = nullptr;
+    bool m_copyAsFileShortcutEnabled = false;
     bool m_showToolbar = true;
     bool m_showAnnotations = true;
     // A pin should remain distinguishable from the desktop even when its

@@ -98,6 +98,7 @@ set(SNIPASTE_HEADERS
     src/platform/keyboard.h
     src/ui/paste/paste_window.h
     src/ui/paste/paste_manager.h
+    src/ui/clipboard_output.h
     src/ui/annotation/annotation_dialog.h
     src/ui/history/screenshot_history_dialog.h
     src/ui/preferences/preferences_dialog.h
@@ -172,6 +173,7 @@ qt_add_library(snipaste_ui STATIC
     ${SNIPASTE_UI_SOURCES}
     src/ui/paste/paste_window.h
     src/ui/paste/paste_manager.h
+    src/ui/clipboard_output.h
     src/ui/annotation/annotation_dialog.h
     src/ui/history/screenshot_history_dialog.h
     src/ui/preferences/preferences_dialog.h
@@ -191,6 +193,9 @@ target_link_libraries(snipaste_ui
         Qt6::Concurrent
         Qt6::PrintSupport
 )
+if(WIN32)
+    target_link_libraries(snipaste_ui PUBLIC winmm)
+endif()
 
 qt_add_executable(snipaste ${SNIPASTE_APP_SOURCES})
 

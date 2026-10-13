@@ -1,5 +1,6 @@
 #include "ui/paste/paste_window.h"
 #include "ui/paste/paste_manager.h"
+#include "ui/clipboard_output.h"
 
 #include "ui/annotation/annotation_dialog.h"
 #include "platform/keyboard.h"
@@ -33,6 +34,7 @@
 #include <QInputDialog>
 #include <QKeyEvent>
 #include <QMenu>
+#include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QScreen>
@@ -106,6 +108,23 @@ PasteWindow::PasteWindow(QImage image, QWidget *parent)
     // from making the first frame look translucent.
     setWindowOpacity(1.0);
 
+    connect(&m_flashTimer, &QTimer::timeout, this, [this] {
+        if (!m_flashActive) {
+            m_flashTimer.stop();
+            return;
+        }
+        ++m_flashStep;
+        if (m_flashStep >= 6) {
+            m_flashTimer.stop();
+            m_flashActive = false;
+            m_flashBorder = false;
+            update();
+            return;
+        }
+        m_flashBorder = (m_flashStep % 2) == 0;
+        update();
+    });
+
     auto *shadow = new QGraphicsDropShadowEffect(this);
     shadow->setBlurRadius(m_shadowSize);
     shadow->setOffset(0, 3);
@@ -141,7 +160,12 @@ void PasteWindow::showExisting()
     flags.setFlag(Qt::WindowStaysOnTopHint, m_alwaysOnTop);
     if (flags != windowFlags())
         setWindowFlags(flags);
+    const bool showWithoutActivating = !m_activateOnShow;
+    if (showWithoutActivating)
+        setAttribute(Qt::WA_ShowWithoutActivating, true);
     show();
+    if (showWithoutActivating)
+        setAttribute(Qt::WA_ShowWithoutActivating, false);
 #ifdef Q_OS_WIN
     if (m_virtualDesktopPinned)
         pinWindowToVirtualDesktops(reinterpret_cast<HWND>(winId()), true);
@@ -151,9 +175,34 @@ void PasteWindow::showExisting()
     snipaste::platform::setMacWindowCollectionBehavior(winId(), m_virtualDesktopPinned);
 #endif
     updateDisplaySize();
-    activateWindow();
-    raise();
-    setFocus();
+    if (m_activateOnShow) {
+        activateWindow();
+        raise();
+        setFocus();
+    }
+}
+
+void PasteWindow::flash()
+{
+    if (m_state != State::Active)
+        return;
+    if (!isVisible())
+        showExisting();
+    m_flashStep = 0;
+    m_flashActive = true;
+    m_flashBorder = true;
+    // Keep the synchronous state of a restored pin intact.  The first timer
+    // tick applies the optional transparency pulse after the caller has had a
+    // chance to finish its restore/activation work.
+    m_flashTimer.start(80);
+    update();
+}
+
+void PasteWindow::setFlashTransparency(bool enabled)
+{
+    if (m_flashTransparency == enabled)
+        return;
+    m_flashTransparency = enabled;
 }
 
 void PasteWindow::showAtPosition(const QPoint &globalPosition)
@@ -238,6 +287,34 @@ void PasteWindow::setExchangeNavigationKeys(bool enabled)
 void PasteWindow::setMaxNetworkImageBytes(qint64 bytes)
 {
     m_maxNetworkImageBytes = qBound<qint64>(0, bytes, 1024LL * 1024 * 1024);
+}
+
+void PasteWindow::setMaxSize(int pixels)
+{
+    m_maxSize = qBound(0, pixels, 100000);
+    updateDisplaySize();
+}
+
+void PasteWindow::setThumbnailSize(const QSize &size)
+{
+    m_thumbnailSize = QSize(qBound(1, size.width(), 4096),
+                            qBound(1, size.height(), 4096));
+}
+
+void PasteWindow::setWheelCenter(bool enabled)
+{
+    m_wheelCenter = enabled;
+}
+
+void PasteWindow::setResetTransform(bool enabled)
+{
+    m_resetTransform = enabled;
+}
+
+void PasteWindow::setDisableDpiScaling(bool enabled)
+{
+    m_disableDpiScaling = enabled;
+    updateDisplaySize();
 }
 
 void PasteWindow::setClickThrough(bool enabled)
@@ -431,10 +508,15 @@ void PasteWindow::paintEvent(QPaintEvent *)
     // source pixel.  Disabling interpolation in that case keeps fine text
     // and screenshot edges crisp; interpolation remains enabled for an
     // intentional zoom or a non-native size.
-    const qreal ratio = devicePixelRatioF();
+    const qreal ratio = m_disableDpiScaling ? 1.0 : devicePixelRatioF();
     const bool nativeSize = qAbs(qreal(width()) * ratio - qreal(m_image.width())) < 0.5
         && qAbs(qreal(height()) * ratio - qreal(m_image.height())) < 0.5;
     painter.setRenderHint(QPainter::SmoothPixmapTransform, m_smoothScale && !nativeSize);
+    const qreal flashOpacity = m_flashActive && m_flashTransparency && !m_flashBorder
+        ? 0.45
+        : 1.0;
+    painter.save();
+    painter.setOpacity(flashOpacity);
     if (m_backgroundMode == QStringLiteral("白色"))
         painter.fillRect(rect(), QColor(255, 255, 255, 245));
     else if (m_backgroundMode == QStringLiteral("黑色"))
@@ -444,6 +526,7 @@ void PasteWindow::paintEvent(QPaintEvent *)
     else if (m_backgroundMode != QStringLiteral("透明"))
         painter.fillRect(rect(), QColor(255, 255, 255, 245));
     painter.drawImage(rect(), m_image);
+    painter.restore();
 
     if (m_selectionThumbnailDragging && m_selectionThumbnailMoved) {
         const QRect selection = QRect(m_selectionThumbnailOrigin,
@@ -456,8 +539,8 @@ void PasteWindow::paintEvent(QPaintEvent *)
             painter.drawRect(clipped.adjusted(0, 0, -1, -1));
     }
 
-    if (m_borderEnabled) {
-        QPen border(m_borderColor);
+    if (m_borderEnabled || m_flashBorder) {
+        QPen border(m_flashBorder ? QColor(255, 205, 60, 255) : m_borderColor);
         border.setWidth(m_borderWidth);
         painter.setPen(border);
         painter.drawRect(rect().adjusted(0, 0, -1, -1));
@@ -479,6 +562,17 @@ void PasteWindow::setSourceImage(const QImage &image)
     m_inverted = false;
     m_scale = 1.0;
     rebuildImage();
+}
+
+void PasteWindow::applyDroppedImage(const QImage &image)
+{
+    if (image.isNull())
+        return;
+    if (m_keepOnDrag && m_pasteManager) {
+        m_pasteManager->createPasteAtPosition(image, frameGeometry().topLeft());
+        return;
+    }
+    setSourceImage(image);
 }
 
 void PasteWindow::rebuildImage()
@@ -519,9 +613,17 @@ void PasteWindow::updateDisplaySize()
     // Image dimensions are physical pixels, QWidget geometry is in logical
     // pixels. Clipboard/PNG round trips may discard the image's DPR metadata.
     // 100% always means one image pixel per display pixel on the current screen.
-    const qreal ratio = devicePixelRatioF();
-    resize(qMax(1, qRound(m_image.width() * m_scale / ratio)),
-           qMax(1, qRound(m_image.height() * m_scale / ratio)));
+    const qreal ratio = m_disableDpiScaling ? 1.0 : devicePixelRatioF();
+    qreal scale = m_scale;
+    if (m_maxSize > 0) {
+        const qreal maxPhysical = qMax(m_image.width(), m_image.height()) * scale;
+        if (maxPhysical > m_maxSize)
+            scale = qMax<qreal>(0.1, scale * m_maxSize / maxPhysical);
+    }
+    if (!qFuzzyCompare(scale, m_scale))
+        m_scale = scale;
+    resize(qMax(1, qRound(m_image.width() * scale / ratio)),
+           qMax(1, qRound(m_image.height() * scale / ratio)));
 }
 
 void PasteWindow::hidePaste()
@@ -548,8 +650,16 @@ void PasteWindow::changeScale(qreal factor)
 {
     if (m_thumbnailMode)
         m_thumbnailMode = false;
+    const QPoint cursor = QCursor::pos();
+    const QRect oldGeometry = frameGeometry();
+    const qreal oldWidth = qMax(1, oldGeometry.width());
+    const qreal oldHeight = qMax(1, oldGeometry.height());
+    const qreal relativeX = qBound<qreal>(0.0, (cursor.x() - oldGeometry.left()) / oldWidth, 1.0);
+    const qreal relativeY = qBound<qreal>(0.0, (cursor.y() - oldGeometry.top()) / oldHeight, 1.0);
     m_scale = qBound<qreal>(0.1, m_scale * factor, 5.0);
     rebuildImage();
+    if (m_wheelCenter)
+        move(cursor - QPoint(qRound(relativeX * width()), qRound(relativeY * height())));
 }
 
 void PasteWindow::toggleThumbnailMode()
@@ -561,9 +671,14 @@ void PasteWindow::toggleThumbnailMode()
         m_scale = qBound<qreal>(0.1, m_scaleBeforeThumbnail, 5.0);
     } else {
         m_scaleBeforeThumbnail = m_scale;
-        const qreal longest = qMax(m_image.width(), m_image.height());
-        const qreal target = 240.0 * devicePixelRatioF();
-        m_scale = longest > 0 ? qBound<qreal>(0.1, target / longest, 5.0) : 1.0;
+        const qreal ratio = m_disableDpiScaling ? 1.0 : devicePixelRatioF();
+        const QSize target(qMax(1, qRound(m_thumbnailSize.width() * ratio)),
+                           qMax(1, qRound(m_thumbnailSize.height() * ratio)));
+        const qreal scaleX = m_image.width() > 0 ? qreal(target.width()) / m_image.width() : 1.0;
+        const qreal scaleY = m_image.height() > 0 ? qreal(target.height()) / m_image.height() : 1.0;
+        // Thumbnail dimensions are explicit user preferences and may be
+        // smaller than the normal 10% interactive zoom floor.
+        m_scale = qBound<qreal>(0.01, qMin(scaleX, scaleY), 5.0);
         m_thumbnailMode = true;
     }
     rebuildImage();
@@ -622,7 +737,7 @@ void PasteWindow::applySelectionThumbnail(const QRect &selection)
     if (clipped.width() < 2 || clipped.height() < 2)
         return;
 
-    const qreal ratio = devicePixelRatioF();
+    const qreal ratio = m_disableDpiScaling ? 1.0 : devicePixelRatioF();
     const QRect imageRect(qRound(clipped.left() * ratio),
                           qRound(clipped.top() * ratio),
                           qRound(clipped.width() * ratio),
@@ -645,7 +760,7 @@ void PasteWindow::editSize()
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("输入贴图尺寸 / 缩放"));
     auto *form = new QFormLayout(&dialog);
-    const qreal ratio = devicePixelRatioF();
+    const qreal ratio = m_disableDpiScaling ? 1.0 : devicePixelRatioF();
     auto *width = new QSpinBox(&dialog);
     auto *height = new QSpinBox(&dialog);
     width->setRange(1, 20000);
@@ -735,6 +850,11 @@ void PasteWindow::mousePressEvent(QMouseEvent *event)
                               event->button(), false)) {
         // The default middle-click action resets a pin's transform and
         // opacity while preserving its position and background mode.
+        if (!m_resetTransform) {
+            emit activated(this, event->modifiers());
+            event->accept();
+            return;
+        }
         m_rotationQuarterTurns = 0;
         m_flipHorizontal = false;
         m_flipVertical = false;
@@ -948,7 +1068,7 @@ void PasteWindow::resizeFromPointer(const QPoint &globalPosition)
             geometry.setBottom(geometry.top() + minimum - 1);
     }
 
-    const qreal ratio = devicePixelRatioF();
+    const qreal ratio = m_disableDpiScaling ? 1.0 : devicePixelRatioF();
     const bool horizontal = m_resizeEdges.testFlag(Qt::LeftEdge)
                             || m_resizeEdges.testFlag(Qt::RightEdge);
     const bool vertical = m_resizeEdges.testFlag(Qt::TopEdge)
@@ -995,6 +1115,12 @@ void PasteWindow::keyPressEvent(QKeyEvent *event)
     }
 
     if (modifiers.testFlag(snipaste::platform::primaryModifier())) {
+        if (event->key() == Qt::Key_S && modifiers.testFlag(Qt::AltModifier)
+            && m_copyAsFileShortcutEnabled) {
+            emit copyAsFileRequested(this);
+            event->accept();
+            return;
+        }
         if (event->key() == Qt::Key_A) {
             emit selectAllRequested(this);
             event->accept();
@@ -1219,6 +1345,11 @@ void PasteWindow::contextMenuEvent(QContextMenuEvent *event)
                  [this](const QColor &color) { m_borderColor = color; update(); });
 
     QAction *extractTextAction = menu.addAction(QStringLiteral("\u63d0\u53d6\u6587\u5b57\u5e76\u590d\u5236"));
+    QAction *helpKeysAction = nullptr;
+    if (m_helpKeys) {
+        menu.addSeparator();
+        helpKeysAction = menu.addAction(QStringLiteral("快捷键帮助"));
+    }
     menu.addSeparator();
     QAction *toolbarAction = menu.addAction(QStringLiteral("\u663e\u793a\u5de5\u5177\u6761"));
     toolbarAction->setCheckable(true);
@@ -1333,7 +1464,10 @@ void PasteWindow::contextMenuEvent(QContextMenuEvent *event)
 
     QAction *selected = menu.exec(event->globalPos());
     if (selected == copyAction) {
-        QApplication::clipboard()->setImage(m_image);
+        if (m_pasteManager)
+            emit copyRequested(this);
+        else
+            copyImageToClipboard(m_image, false, ClipboardImageSource::Paste);
     } else if (selected == saveAction) {
         const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("\u56fe\u50cf\u53e6\u5b58\u4e3a"), QString(),
                                                            QStringLiteral("PNG \u56fe\u50cf (*.png);;\u6240\u6709\u6587\u4ef6 (*)"));
@@ -1342,6 +1476,10 @@ void PasteWindow::contextMenuEvent(QContextMenuEvent *event)
     } else if (selected == extractTextAction) {
         if (!m_sourceText.isEmpty())
             QApplication::clipboard()->setText(m_sourceText);
+    } else if (selected == helpKeysAction) {
+        QMessageBox::information(this, QStringLiteral("贴图快捷键"),
+                                 QStringLiteral("Ctrl/Command+C 复制，Ctrl/Command+Alt+S 复制为文件，"
+                                                "滚轮缩放，Esc 执行关闭操作。"));
     } else if (selected == toolbarAction) {
         m_showToolbar = toolbarAction->isChecked();
     } else if (selected == annotationsAction) {
@@ -1422,8 +1560,20 @@ void PasteWindow::contextMenuEvent(QContextMenuEvent *event)
                && selected->data().isValid()) {
         m_pasteManager->moveWindowToGroup(this, selected->data().toInt());
     } else if (selected == closeAction) {
+        if (m_closeConfirm && m_pasteManager && m_pasteManager->selectedCount() > 1
+            && QMessageBox::question(this, QStringLiteral("关闭贴图"),
+                                     QStringLiteral("确认关闭选中的多个贴图吗？"),
+                                     QMessageBox::Yes | QMessageBox::No,
+                                     QMessageBox::No) != QMessageBox::Yes)
+            return;
         hidePaste();
     } else if (selected == destroyAction) {
+        if (m_destroyConfirm && m_pasteManager && m_pasteManager->selectedCount() > 1
+            && QMessageBox::question(this, QStringLiteral("销毁贴图"),
+                                     QStringLiteral("确认销毁选中的多个贴图吗？"),
+                                     QMessageBox::Yes | QMessageBox::No,
+                                     QMessageBox::No) != QMessageBox::Yes)
+            return;
         close();
     }
 }
@@ -1470,7 +1620,7 @@ void PasteWindow::dropEvent(QDropEvent *event)
                     if (m_maxNetworkImageBytes <= 0 || data.size() <= m_maxNetworkImageBytes) {
                         const QImage downloaded = QImage::fromData(data);
                         if (!downloaded.isNull())
-                            setSourceImage(downloaded);
+                            applyDroppedImage(downloaded);
                     }
                     reply->deleteLater();
                     network->deleteLater();
@@ -1499,7 +1649,7 @@ void PasteWindow::dropEvent(QDropEvent *event)
                     if (m_maxNetworkImageBytes <= 0 || data.size() <= m_maxNetworkImageBytes) {
                         const QImage downloaded = QImage::fromData(data);
                         if (!downloaded.isNull())
-                            setSourceImage(downloaded);
+                            applyDroppedImage(downloaded);
                     }
                     reply->deleteLater();
                     network->deleteLater();
@@ -1513,7 +1663,7 @@ void PasteWindow::dropEvent(QDropEvent *event)
         event->ignore();
         return;
     }
-    setSourceImage(image);
+    applyDroppedImage(image);
     event->acceptProposedAction();
 }
 

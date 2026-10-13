@@ -36,6 +36,9 @@ public:
 
     void setTool(Tool tool);
     Tool tool() const { return m_tool; }
+    void setRememberToolColors(bool enabled) { m_rememberToolColors = enabled; }
+    void setFreeSelect(bool enabled) { m_freeSelect = enabled; }
+    void setDisableEraserEditing(bool enabled) { m_disableEraserEditing = enabled; }
     QColor penColor() const { return m_penColor; }
     qreal penWidth() const { return m_penWidth; }
     void setPenColor(const QColor &color);
@@ -226,6 +229,9 @@ private:
     bool m_magnifierCutout = true;
     int m_magnifierConnectorStyle = 0;
     bool m_autoSelectOnCreation = true;
+    bool m_rememberToolColors = true;
+    bool m_freeSelect = true;
+    bool m_disableEraserEditing = true;
 };
 
 class AnnotationDialog final : public QDialog
@@ -235,6 +241,14 @@ class AnnotationDialog final : public QDialog
 public:
     explicit AnnotationDialog(const QImage &image, QWidget *parent = nullptr);
 
+    void setAnnotationOptions(bool rememberColors, bool freeSelect, bool disableEraserEditing)
+    {
+        if (!m_canvas)
+            return;
+        m_canvas->setRememberToolColors(rememberColors);
+        m_canvas->setFreeSelect(freeSelect);
+        m_canvas->setDisableEraserEditing(disableEraserEditing);
+    }
     QImage resultImage() const;
 
 private:

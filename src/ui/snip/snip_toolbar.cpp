@@ -739,6 +739,8 @@ void SnipOverlay::createToolbar()
     connect(button(CaptureIcon::Cancel, QStringLiteral("取消"), QStringLiteral("取消截图 (Esc)")),
             &QToolButton::clicked, this, &SnipOverlay::close);
     auto *share = button(CaptureIcon::Share, QStringLiteral("分享"), QStringLiteral("分享图像"));
+    m_shareButton = share;
+    share->setVisible(m_showShareButton);
     connect(share, &QToolButton::clicked, this, [this, share] {
         showOutputMenu(share->mapToGlobal(QPoint(0, share->height())), true);
     });
@@ -1654,6 +1656,14 @@ void SnipOverlay::setHideOutputOptions(bool enabled)
     updateToolbarGeometry();
 }
 
+void SnipOverlay::setShowShareButton(bool enabled)
+{
+    m_showShareButton = enabled;
+    if (m_shareButton)
+        m_shareButton->setVisible(enabled);
+    updateToolbarGeometry();
+}
+
 void SnipOverlay::confirmSelection()
 {
     if (m_selection.isEmpty() || m_canvas)
@@ -1674,6 +1684,13 @@ void SnipOverlay::confirmSelection()
                              historyOverride ? QSizeF(m_selection.size()) : QSizeF(size()),
                              historyOverride ? QRect() : m_selection);
     m_canvas->setAutoSelectOnCreation(m_autoSelectAnnotations);
+    m_canvas->setRememberToolColors(m_rememberToolColors);
+    m_canvas->setFreeSelect(m_freeSelect);
+    m_canvas->setDisableEraserEditing(m_disableEraserEditing);
+    if (m_defaultAnnotation == QStringLiteral("矩形"))
+        m_canvas->setTool(AnnotationCanvas::Tool::Rectangle);
+    else if (m_defaultAnnotation == QStringLiteral("箭头"))
+        m_canvas->setTool(AnnotationCanvas::Tool::Arrow);
     m_canvas->setObjectName(QStringLiteral("selectionCanvas"));
     m_canvas->installEventFilter(this);
     m_canvas->setMinimumSize(0, 0);

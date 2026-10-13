@@ -1,4 +1,5 @@
 #include "ui/snip/snip_overlay.h"
+#include "ui/clipboard_output.h"
 #include "platform/screen_capture.h"
 #include "ui/snip/capture_icons.h"
 #include "ui/annotation/annotation_dialog.h"
@@ -640,15 +641,12 @@ void SnipOverlay::showOutputMenu(const QPoint &position, bool shareOnly)
         menu->addAction(QStringLiteral("复制图像文件"), this, [this] {
             const QImage image = selectionImage();
             if (image.isNull()) return;
-            const QString path = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
-                .filePath(QStringLiteral("snipaste-%1.png").arg(QUuid::createUuid().toString(QUuid::Id128)));
-            if (!image.save(path, "PNG")) return;
-            auto *mime = new QMimeData;
-            mime->setImageData(image); mime->setUrls({QUrl::fromLocalFile(path)});
+            if (!copyImageToClipboard(image, CopyAsFileMode::Always))
+                return;
             emit selectionCaptured(globalSelection());
             emit screenshotCaptured(image);
             emit screenshotCapturedWithBackground(image, m_cleanBackground);
-            QApplication::clipboard()->setMimeData(mime); close();
+            close();
         });
         menu->addAction(QStringLiteral("保存图像…"), this, [this] { saveSelection(); });
 #ifdef Q_OS_WIN
@@ -657,14 +655,7 @@ void SnipOverlay::showOutputMenu(const QPoint &position, bool shareOnly)
                 const QImage image = selectionImage();
                 if (showNativeShare(this, image))
                     return;
-                const QString path = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
-                    .filePath(QStringLiteral("snipaste-%1.png").arg(QUuid::createUuid().toString(QUuid::Id128)));
-                if (!image.isNull() && image.save(path, "PNG")) {
-                    auto *mime = new QMimeData;
-                    mime->setImageData(image);
-                    mime->setUrls({QUrl::fromLocalFile(path)});
-                    QApplication::clipboard()->setMimeData(mime);
-                }
+                copyImageToClipboard(image, CopyAsFileMode::Always);
             });
         }
 #endif
@@ -749,15 +740,12 @@ void SnipOverlay::showOutputMenu(const QPoint &position, bool shareOnly)
     auto *a2 = menu->addAction(QStringLiteral("复制图像文件"), this, [this] {
         const QImage image = selectionImage();
         if (image.isNull()) return;
-        const QString path = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
-            .filePath(QStringLiteral("snipaste-%1.png").arg(QUuid::createUuid().toString(QUuid::Id128)));
-        if (!image.save(path, "PNG")) return;
-        auto *mime = new QMimeData;
-        mime->setImageData(image); mime->setUrls({QUrl::fromLocalFile(path)});
+        if (!copyImageToClipboard(image, CopyAsFileMode::Always))
+            return;
         emit selectionCaptured(globalSelection());
         emit screenshotCaptured(image);
         emit screenshotCapturedWithBackground(image, m_cleanBackground);
-        QApplication::clipboard()->setMimeData(mime); close();
+        close();
     });
     auto *a3 = menu->addAction(QStringLiteral("保存图像…"), this, [this] { saveSelection(); });
     auto *a4 = menu->addAction(QStringLiteral("快捷保存"), this, [this] { quickSaveSelection(); });

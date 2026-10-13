@@ -27,8 +27,55 @@ namespace snipaste::core {
 
 namespace {
 
+QString normalizedOcrLanguage(const QString &value)
+{
+    const QString language = value.trimmed();
+    if (language.isEmpty())
+        return {};
+    const QString folded = language.toCaseFolded();
+    if (folded == QStringLiteral("system")
+        || folded == QStringLiteral("default")
+        || language.contains(QStringLiteral("默认")))
+        return {};
+    if (folded == QStringLiteral("eng")
+        || folded == QStringLiteral("en")
+        || folded.startsWith(QStringLiteral("en-"))
+        || folded.contains(QStringLiteral("english")))
+        return QStringLiteral("en");
+    if (folded == QStringLiteral("chi_sim")
+        || folded == QStringLiteral("chi-sim")
+        || folded == QStringLiteral("zh")
+        || folded.startsWith(QStringLiteral("zh-"))
+        || language.contains(QStringLiteral("中文")))
+        return QStringLiteral("zh");
+    // The preferences page stores localized labels. Older config files may
+    // contain a GBK-to-UTF-8 display form, so unknown non-ASCII labels map to
+    // the supported Simplified Chinese option.
+    for (const QChar character : language)
+        if (character.unicode() > 0x7f)
+            return QStringLiteral("zh");
+    return language;
+}
+
+bool requestsTesseract(const QString &engine)
+{
+    return engine.trimmed().compare(QStringLiteral("tesseract"), Qt::CaseInsensitive) == 0;
+}
+
+QString tesseractLanguage(const QString &language)
+{
+    const QString normalized = normalizedOcrLanguage(language);
+    if (normalized.isEmpty())
+        return QStringLiteral("eng+chi_sim");
+    if (normalized == QStringLiteral("en"))
+        return QStringLiteral("eng");
+    if (normalized == QStringLiteral("zh"))
+        return QStringLiteral("chi_sim");
+    return normalized;
+}
+
 #ifdef Q_OS_WIN
-OcrResult recognizeWithWindowsOcr(const QImage &image)
+OcrResult recognizeWithWindowsOcr(const QImage &image, const QString &language)
 {
     // QtConcurrent runs this function on a worker thread. That thread does
     // not necessarily have a COM apartment yet, while WinRT requires one.
@@ -72,18 +119,36 @@ OcrResult recognizeWithWindowsOcr(const QImage &image)
                 rgba.height(),
                 winrt::Windows::Graphics::Imaging::BitmapAlphaMode::Ignore);
 
-            auto engine = winrt::Windows::Media::Ocr::OcrEngine::TryCreateFromUserProfileLanguages();
-            if (!engine) {
+            const QString requestedLanguage = normalizedOcrLanguage(language);
+            auto engine = winrt::Windows::Media::Ocr::OcrEngine{nullptr};
+            if (!requestedLanguage.isEmpty()) {
+                const auto available =
+                    winrt::Windows::Media::Ocr::OcrEngine::AvailableRecognizerLanguages();
+                for (const auto &availableLanguage : available) {
+                    const QString tag = QString::fromWCharArray(availableLanguage.LanguageTag().c_str());
+                    if (tag.startsWith(requestedLanguage, Qt::CaseInsensitive)) {
+                        engine = winrt::Windows::Media::Ocr::OcrEngine::TryCreateFromLanguage(
+                            availableLanguage);
+                        if (engine)
+                            break;
+                    }
+                }
+                if (!engine)
+                    result.error = QStringLiteral("Windows OCR 未安装所选语言包");
+            } else {
+                engine = winrt::Windows::Media::Ocr::OcrEngine::TryCreateFromUserProfileLanguages();
+            }
+            if (!engine && result.error.isEmpty()) {
                 // A user may have an OCR language pack installed without it
                 // being the current Windows display language. Prefer Chinese
                 // and English before falling back to the first installed pack.
                 const auto available =
                     winrt::Windows::Media::Ocr::OcrEngine::AvailableRecognizerLanguages();
                 const auto tryLanguage = [&engine, &available](const QString &prefix) {
-                    for (const auto &language : available) {
-                        const QString tag = QString::fromWCharArray(language.LanguageTag().c_str());
+                    for (const auto &availableLanguage : available) {
+                        const QString tag = QString::fromWCharArray(availableLanguage.LanguageTag().c_str());
                         if (tag.startsWith(prefix, Qt::CaseInsensitive)) {
-                            engine = winrt::Windows::Media::Ocr::OcrEngine::TryCreateFromLanguage(language);
+                            engine = winrt::Windows::Media::Ocr::OcrEngine::TryCreateFromLanguage(availableLanguage);
                             if (engine)
                                 return;
                         }
@@ -93,8 +158,9 @@ OcrResult recognizeWithWindowsOcr(const QImage &image)
                 if (!engine)
                     tryLanguage(QStringLiteral("en"));
                 if (!engine) {
-                    for (const auto &language : available) {
-                        engine = winrt::Windows::Media::Ocr::OcrEngine::TryCreateFromLanguage(language);
+                    for (const auto &availableLanguage : available) {
+                        engine = winrt::Windows::Media::Ocr::OcrEngine::TryCreateFromLanguage(
+                            availableLanguage);
                         if (engine)
                             break;
                     }
@@ -129,7 +195,7 @@ OcrResult recognizeWithWindowsOcr(const QImage &image)
 }
 #endif
 
-OcrResult recognizeWithTesseract(const QImage &image)
+OcrResult recognizeWithTesseract(const QImage &image, const QString &language)
 {
     const QString executable = QStandardPaths::findExecutable(QStringLiteral("tesseract"));
     if (executable.isEmpty()) {
@@ -147,7 +213,7 @@ OcrResult recognizeWithTesseract(const QImage &image)
     QProcess process;
     process.setProgram(executable);
     process.setArguments({inputFile.fileName(), QStringLiteral("stdout"),
-                          QStringLiteral("-l"), QStringLiteral("eng+chi_sim")});
+                          QStringLiteral("-l"), tesseractLanguage(language)});
     process.start();
     if (!process.waitForStarted(1000))
         return {false, {}, QStringLiteral("无法启动 Tesseract OCR")};
@@ -170,37 +236,41 @@ OcrResult recognizeWithTesseract(const QImage &image)
 
 } // namespace
 
-OcrResult OcrService::recognize(const QImage &image)
+OcrResult OcrService::recognize(const QImage &image,
+                                const QString &engine,
+                                const QString &language)
 {
     if (image.isNull())
         return {false, {}, QStringLiteral("没有可识别的图像")};
 
+    const bool forceTesseract = requestsTesseract(engine);
+    const QString normalizedLanguage = normalizedOcrLanguage(language);
+    OcrResult nativeResult;
+
 #if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
-    const OcrResult visionResult = platform::recognizeWithMacVision(image);
-    if (visionResult.success)
-        return visionResult;
+    if (!forceTesseract) {
+        nativeResult = platform::recognizeWithMacVision(image, normalizedLanguage);
+        if (nativeResult.success)
+            return nativeResult;
+    }
 #endif
 
 #ifdef Q_OS_WIN
-    const OcrResult windowsResult = recognizeWithWindowsOcr(image);
-    if (windowsResult.success)
-        return windowsResult;
+    if (!forceTesseract) {
+        nativeResult = recognizeWithWindowsOcr(image, normalizedLanguage);
+        if (nativeResult.success)
+            return nativeResult;
+    }
 #endif
 
-    // Keep Tesseract as a portable fallback for systems without a Windows
-    // OCR language pack, and include the native error if both backends fail.
-    const OcrResult tesseractResult = recognizeWithTesseract(image);
+    // Keep Tesseract as a portable fallback for the automatic/native mode,
+    // while an explicit Tesseract selection always uses that engine.
+    const OcrResult tesseractResult = recognizeWithTesseract(image, normalizedLanguage);
     if (tesseractResult.success)
         return tesseractResult;
 
-#ifdef Q_OS_WIN
-    if (!windowsResult.error.isEmpty() && !tesseractResult.error.isEmpty())
-        return {false, {}, windowsResult.error + QStringLiteral("\n") + tesseractResult.error};
-#endif
-#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
-    if (!visionResult.error.isEmpty() && !tesseractResult.error.isEmpty())
-        return {false, {}, visionResult.error + QStringLiteral("\n") + tesseractResult.error};
-#endif
+    if (!nativeResult.error.isEmpty() && !tesseractResult.error.isEmpty())
+        return {false, {}, nativeResult.error + QStringLiteral("\n") + tesseractResult.error};
     return tesseractResult;
 }
 

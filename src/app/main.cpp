@@ -16,6 +16,7 @@
 #endif
 #include "ui/paste/paste_window.h"
 #include "ui/paste/paste_manager.h"
+#include "ui/clipboard_output.h"
 #include "ui/annotation/annotation_dialog.h"
 #include "ui/history/screenshot_history_dialog.h"
 #include "ui/preferences/preferences_dialog.h"
@@ -57,12 +58,14 @@
 #include <QDialogButtonBox>
 #include <QVBoxLayout>
 #include <QPainter>
+#include <QColor>
 #include <QScreen>
 #include <QStandardPaths>
 #include <QStyle>
 #include <QThread>
 #include <QThreadPool>
 #include <QTimer>
+#include <QToolTip>
 #include <QUrl>
 #include <QVector>
 #include <QUuid>
@@ -78,6 +81,7 @@
 
 #ifdef Q_OS_WIN
 #include <windows.h>
+#include <mmsystem.h>
 #include <malloc.h>
 #elif defined(Q_OS_MACOS) || defined(Q_OS_MAC)
 #include <Carbon/Carbon.h>
@@ -273,23 +277,60 @@ QStringList configuredProcessList(const snipaste::core::ConfigStore &config,
     return entries;
 }
 
-QImage clipboardTextImage(const QString &text)
+QImage clipboardTextImage(const QString &text,
+                          const snipaste::core::ConfigStore *config = nullptr)
 {
     const QStringList lines = text.split(QChar::LineFeed);
     QFont font;
     font.setPixelSize(18);
+    int margin = 16;
+    int maxWidth = 0;
+    QColor background = Qt::white;
+    QColor foreground = Qt::black;
+    if (config) {
+        margin = qBound(0, config->value(QStringLiteral("paste/textMargin"), 12).toInt(), 100);
+        maxWidth = qMax(100, config->value(QStringLiteral("paste/textMaxWidth"), 750).toInt());
+        const QString fontSpec = config->value(QStringLiteral("paste/textFont"),
+                                                QStringLiteral("Microsoft YaHei UI, 11")).toString();
+        const QStringList fontParts = fontSpec.split(QChar(','), Qt::SkipEmptyParts);
+        if (!fontParts.isEmpty())
+            font.setFamily(fontParts.first().trimmed());
+        if (fontParts.size() > 1) {
+            bool ok = false;
+            const double pointSize = fontParts.at(1).trimmed().toDouble(&ok);
+            if (ok && pointSize > 0.0)
+                font.setPointSizeF(pointSize);
+        }
+        const QColor configuredBackground = QColor::fromString(
+            config->value(QStringLiteral("paste/textBackgroundColor"),
+                          QStringLiteral("#ffffffff")).toString());
+        const QColor configuredForeground = QColor::fromString(
+            config->value(QStringLiteral("paste/textColor"),
+                          QStringLiteral("#ff111111")).toString());
+        if (configuredBackground.isValid())
+            background = configuredBackground;
+        if (configuredForeground.isValid())
+            foreground = configuredForeground;
+    }
     const QFontMetrics metrics(font);
     int width = 320;
     for (const QString &line : lines)
-        width = qMax(width, metrics.horizontalAdvance(line) + 32);
-    const int height = qMax(64, lines.size() * metrics.lineSpacing() + 32);
+        width = qMax(width, metrics.horizontalAdvance(line) + margin * 2);
+    if (maxWidth > 0)
+        width = qMin(width, maxWidth);
+    const int textWidth = qMax(1, width - margin * 2);
+    const QRect measured = metrics.boundingRect(QRect(0, 0, textWidth, 100000),
+                                                Qt::TextWordWrap, text);
+    const QRect textRect(margin, margin, textWidth,
+                         qMax(1, measured.height()));
+    const int height = qMax(64, textRect.bottom() + margin + 1);
     QImage image(QSize(width, height), QImage::Format_ARGB32_Premultiplied);
-    image.fill(Qt::white);
+    image.fill(background);
     QPainter painter(&image);
     painter.setFont(font);
-    painter.setPen(Qt::black);
-    painter.drawText(QRect(16, 16, width - 32, height - 32),
-                     Qt::AlignLeft | Qt::AlignTop,
+    painter.setPen(foreground);
+    painter.drawText(textRect,
+                     Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
                      text);
     return image;
 }
@@ -623,6 +664,34 @@ bool startExternalCommand(const QStringList &command)
     return !program.isEmpty() && QProcess::startDetached(program, expanded);
 }
 
+void playConfiguredSound(const QString &configuredFile)
+{
+    if (configuredFile.trimmed().isEmpty())
+        return;
+    QFileInfo configured(configuredFile);
+    QString path = configured.isAbsolute()
+        ? configured.absoluteFilePath()
+        : QDir(QCoreApplication::applicationDirPath()).filePath(configuredFile);
+    if (!QFileInfo::exists(path) && configured.isRelative())
+        path = QDir::current().filePath(configuredFile);
+    if (!QFileInfo::exists(path)) {
+        // Keep the default OCR completion feedback useful in installations
+        // that do not ship the optional capture sound asset.
+        QApplication::beep();
+        return;
+    }
+
+#ifdef Q_OS_WIN
+    PlaySoundW(reinterpret_cast<LPCWSTR>(path.utf16()), nullptr,
+               SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
+#elif defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+    QProcess::startDetached(QStringLiteral("afplay"), {path});
+#else
+    if (!QProcess::startDetached(QStringLiteral("paplay"), {path}))
+        QProcess::startDetached(QStringLiteral("aplay"), {path});
+#endif
+}
+
 QColor colorAtCursor()
 {
 #if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
@@ -915,6 +984,12 @@ int main(int argc, char *argv[])
                                          + QStringLiteral("/config.ini");
     snipaste::core::ConfigStore config(configPath);
     config.load();
+    snipaste::app::setLoggingLevel(
+        config.value(QStringLiteral("general/logLevel"), 1).toInt());
+    snipaste::ui::setClipboardOutputOptions(
+        config.value(QStringLiteral("output/clipboardWindowsBitmap"), true).toBool(),
+        config.value(QStringLiteral("output/clipboardScreenshot"), true).toBool(),
+        config.value(QStringLiteral("output/clipboardPaste"), false).toBool());
     applyConfiguredTheme(
         config.value(QStringLiteral("interface/theme"), QStringLiteral("跟随系统")).toString());
     snipaste::ui::applyApplicationAppearance(config);
@@ -971,11 +1046,28 @@ int main(int argc, char *argv[])
     pasteManager.setMaxNetworkImageBytes(maxDownloadMb <= 0.0
                                              ? 0
                                              : qRound64(maxDownloadMb * 1024.0 * 1024.0));
-    pasteManager.setCopyAsFile(config.value(QStringLiteral("output/copyAsFileMode"), 2).toInt() == 0);
+    pasteManager.setMaxSize(config.value(QStringLiteral("paste/maxSize"), 12000).toInt());
+    pasteManager.setThumbnailSize(QSize(
+        config.value(QStringLiteral("paste/thumbWidth"), 62).toInt(),
+        config.value(QStringLiteral("paste/thumbHeight"), 62).toInt()));
+    pasteManager.setWheelCenter(config.value(QStringLiteral("paste/wheelCenter"), false).toBool());
+    pasteManager.setResetTransform(config.value(QStringLiteral("paste/resetTransform"), true).toBool());
+    pasteManager.setHelpKeys(config.value(QStringLiteral("paste/helpKeys"), false).toBool());
+    pasteManager.setDisableDpiScaling(
+        config.value(QStringLiteral("general/disablePasteDpiScaling"), false).toBool());
+    pasteManager.setCloseConfirm(config.value(QStringLiteral("paste/closeConfirm"), true).toBool());
+    pasteManager.setDestroyConfirm(config.value(QStringLiteral("paste/destroyConfirm"), true).toBool());
+    pasteManager.setCopyAsFileMode(config.value(QStringLiteral("output/copyAsFileMode"), 1).toInt());
     pasteManager.setBackgroundMode(
         config.value(QStringLiteral("paste/backgroundMode"), QStringLiteral("伪透明")).toString());
     pasteManager.setSmoothScale(config.value(QStringLiteral("paste/smoothScale"), true).toBool());
     pasteManager.setVirtualDesktopPinned(config.value(QStringLiteral("paste/virtualDesktop"), false).toBool());
+    pasteManager.setFlashNew(config.value(QStringLiteral("paste/flashNew"), true).toBool());
+    pasteManager.setActivateNew(config.value(QStringLiteral("paste/activateNew"), true).toBool());
+    pasteManager.setFlashTransparency(config.value(QStringLiteral("paste/flashTransparency"), true).toBool());
+    pasteManager.setFlashGroupSwitch(config.value(QStringLiteral("paste/flashGroupSwitch"), true).toBool());
+    pasteManager.setHideAllOnPasteKey(config.value(QStringLiteral("paste/hideAllOnPasteKey"), false).toBool());
+    pasteManager.setKeepOnDrag(config.value(QStringLiteral("paste/keepOnDrag"), false).toBool());
     pasteManager.setEscapeActions(
         config.value(QStringLiteral("paste/escapeAction"), QStringLiteral("关闭贴图")).toString(),
         config.value(QStringLiteral("paste/shiftEscapeAction"), QStringLiteral("销毁贴图")).toString());
@@ -988,9 +1080,9 @@ int main(int argc, char *argv[])
     });
     QRect lastSelection = config.value(QStringLiteral("capture/lastRegion")).toRect();
     QList<QRect> recentSelections;
-    const int maxHistoryRegions = qBound(1,
-                                         config.value(QStringLiteral("capture/maxHistoryRegions"), 8).toInt(),
-                                         99);
+    int maxHistoryRegions = qBound(1,
+                                   config.value(QStringLiteral("capture/maxHistoryRegions"), 8).toInt(),
+                                   99);
     for (const QVariant &region : config.value(QStringLiteral("capture/recentRegions")).toList())
         if (region.toRect().isValid()) recentSelections.append(region.toRect());
     if (recentSelections.isEmpty() && lastSelection.isValid()) recentSelections.append(lastSelection);
@@ -1005,7 +1097,15 @@ int main(int argc, char *argv[])
         history.add(image, background);
         saveHistorySnapshotAsync(history, historyPath);
     };
-    const auto autoSaveScreenshot = [&config](const QImage &image) {
+    const auto configuredOutputQuality = [&config] {
+        return qBound(-1, config.value(QStringLiteral("output/imageQuality"), -1).toInt(), 100);
+    };
+    const auto saveConfiguredImage = [](const QImage &image, const QString &path, int quality) {
+        if (image.isNull() || path.isEmpty())
+            return false;
+        return image.save(path, nullptr, quality);
+    };
+    const auto autoSaveScreenshot = [&config, configuredOutputQuality, saveConfiguredImage](const QImage &image) {
         if (!config.value(QStringLiteral("capture/autoSave"), false).toBool()
             || image.isNull())
             return;
@@ -1017,17 +1117,21 @@ int main(int argc, char *argv[])
         const QString pattern = config.value(QStringLiteral("output/fileNamePattern"),
                                               QStringLiteral("Snipaste_$yyyy-MM-dd_HH-mm-ss$.png"))
                                     .toString();
-        const QString fileName = expandOutputFilePattern(pattern, QDateTime::currentDateTime());
+        QString fileName = expandOutputFilePattern(pattern, QDateTime::currentDateTime());
+        if (QFileInfo(fileName).suffix().isEmpty())
+            fileName += QStringLiteral(".png");
+        const int quality = configuredOutputQuality();
         const bool removeAlpha = config.value(QStringLiteral("output/auto_alpha_channel_removal"),
                                               config.value(QStringLiteral("auto_alpha_channel_removal"), true)).toBool();
         const bool softwareMetadata = config.value(QStringLiteral("misc/software_metadata"),
                                                    config.value(QStringLiteral("software_metadata"), true)).toBool();
         const QImage source = image;
-        QThreadPool::globalInstance()->start([source, directory, fileName, removeAlpha, softwareMetadata] {
+        QThreadPool::globalInstance()->start([source, directory, fileName, removeAlpha, softwareMetadata,
+                                              quality, saveConfiguredImage] {
             if (!QDir().mkpath(directory))
                 return;
             QImage output = addSoftwareMetadata(removeRedundantAlpha(source, removeAlpha), softwareMetadata);
-            if (!output.save(QDir(directory).filePath(fileName), "PNG"))
+            if (!saveConfiguredImage(output, QDir(directory).filePath(fileName), quality))
                 qWarning() << "failed to auto-save screenshot" << directory;
         });
     };
@@ -1044,7 +1148,7 @@ int main(int argc, char *argv[])
                 pasteManager.createPaste(copy);
         });
     };
-    const auto outputCapture = [&config, &pasteManager](const QImage &image, const QString &spec) {
+    const auto outputCapture = [&config, &pasteManager, configuredOutputQuality, saveConfiguredImage](const QImage &image, const QString &spec) {
         if (image.isNull())
             return;
         const QStringList outputs = splitOutputSpec(spec);
@@ -1060,12 +1164,22 @@ int main(int argc, char *argv[])
                                                         config.value(QStringLiteral("software_metadata"), true)).toBool());
         const auto runOutput = [&](const QString &output) {
             if (output == QStringLiteral("clipboard")) {
-                QApplication::clipboard()->setImage(outputImage);
+                snipaste::ui::copyImageToClipboard(
+                    outputImage, false, snipaste::ui::ClipboardImageSource::Screenshot);
             } else if (output == QStringLiteral("pin")) {
                 pasteManager.createPaste(outputImage);
             } else if (output == QStringLiteral("ocr_clipboard")) {
-                const auto result = snipaste::core::OcrService::recognize(outputImage);
+                const auto result = snipaste::core::OcrService::recognize(
+                    outputImage,
+                    config.value(QStringLiteral("output/ocrEngine"), QStringLiteral("系统自带")).toString(),
+                    config.value(QStringLiteral("output/ocrLanguage"), QStringLiteral("系统默认")).toString());
                 QApplication::clipboard()->setText(result.success ? result.text : QString());
+                if (result.success
+                    && config.value(QStringLiteral("output/ocrSound"), true).toBool()) {
+                    playConfiguredSound(config.value(QStringLiteral("capture/soundFile"),
+                                                       QStringLiteral("sound/snip.wav"))
+                                            .toString());
+                }
             } else if (output == QStringLiteral("quick-save")) {
                 QString directory = config.value(QStringLiteral("output/saveDirectory"),
                                                   QStandardPaths::writableLocation(QStandardPaths::PicturesLocation)).toString();
@@ -1074,18 +1188,31 @@ int main(int argc, char *argv[])
                 QDir().mkpath(directory);
                 const QString pattern = config.value(QStringLiteral("output/fileNamePattern"),
                                                       QStringLiteral("Snipaste_$yyyy-MM-dd_HH-mm-ss$.png")).toString();
-                outputImage.save(QDir(directory).filePath(expandOutputFilePattern(pattern,
-                                                                                  QDateTime::currentDateTime())), "PNG");
+                QString fileName = expandOutputFilePattern(pattern, QDateTime::currentDateTime());
+                if (QFileInfo(fileName).suffix().isEmpty())
+                    fileName += QStringLiteral(".png");
+                const QString savedPath = QDir(directory).filePath(fileName);
+                if (saveConfiguredImage(outputImage, savedPath, configuredOutputQuality())
+                    && config.value(QStringLiteral("output/quickSaveNotification"), true).toBool())
+                    QToolTip::showText(QCursor::pos(), QStringLiteral("已保存截图：%1").arg(savedPath),
+                                       nullptr, QRect(), 3000);
             } else if (output == QStringLiteral("file-dialog")) {
                 const bool hideForDialog = config.value(QStringLiteral("paste/hideOnFileDialog"), false).toBool();
                 if (hideForDialog)
                     pasteManager.setHiddenForFileDialog(true);
-                const QString path = QFileDialog::getSaveFileName(nullptr,
+                QString path = QFileDialog::getSaveFileName(nullptr,
                                                                     QStringLiteral("保存截图"),
-                                                                    QStringLiteral("snipaste.png"),
+                                                                    expandOutputFilePattern(
+                                                                        config.value(QStringLiteral("output/fileNamePattern"),
+                                                                                     QStringLiteral("Snipaste_$yyyy-MM-dd_HH-mm-ss$.png"))
+                                                                            .toString(),
+                                                                        QDateTime::currentDateTime()),
                                                                     QStringLiteral("PNG 图片 (*.png);;JPEG 图片 (*.jpg *.jpeg);;所有文件 (*.*)"));
-                if (!path.isEmpty())
-                    outputImage.save(path);
+                if (!path.isEmpty()) {
+                    if (QFileInfo(path).suffix().isEmpty())
+                        path += QStringLiteral(".png");
+                    saveConfiguredImage(outputImage, path, configuredOutputQuality());
+                }
                 if (hideForDialog)
                     pasteManager.setHiddenForFileDialog(false);
             } else if (output == QStringLiteral("printer")) {
@@ -1109,7 +1236,10 @@ int main(int argc, char *argv[])
                 const QString path = outputFilePath(output, config);
                 if (!path.isEmpty()) {
                     QDir().mkpath(QFileInfo(path).absolutePath());
-                    outputImage.save(path);
+                    QString outputPath = path;
+                    if (QFileInfo(outputPath).suffix().isEmpty())
+                        outputPath += QStringLiteral(".png");
+                    saveConfiguredImage(outputImage, outputPath, configuredOutputQuality());
                 }
             }
         };
@@ -1151,13 +1281,14 @@ int main(int argc, char *argv[])
                             &recentSelections,
                             &config,
                             &pasteManager,
-                            maxHistoryRegions,
+                            &maxHistoryRegions,
                             recordScreenshot,
                             autoSaveScreenshot,
                             showPaste,
                             outputCapture](bool autoCopy, bool reuseLast, QSize fixedSize = {}, QRect requestedSelection = {},
                                             bool pinAfterCapture = false, QString outputSpec = {}, bool hold = false,
-                                            bool noAutoSave = false, bool keepAspect = false) {
+                                            bool noAutoSave = false, bool keepAspect = false,
+                                            bool superCaptureMode = false) {
         if (activeOverlay) {
             activeOverlay->raise();
             activeOverlay->activateWindow();
@@ -1203,6 +1334,54 @@ int main(int argc, char *argv[])
             !captureDisabled && config.value(QStringLiteral("capture/autoDetectWindow"), true).toBool(),
             !captureDisabled && config.value(QStringLiteral("capture/autoDetectElements"), true).toBool(),
             !captureDisabled && config.value(QStringLiteral("capture/shortcutHints"), true).toBool());
+        activeOverlay->setCopyAsFileMode(
+            config.value(QStringLiteral("output/copyAsFileMode"), 1).toInt());
+        activeOverlay->setOutputFileNamePattern(
+            config.value(QStringLiteral("output/fileNamePattern"),
+                         QStringLiteral("Snipaste_$yyyy-MM-dd_HH-mm-ss$.png"))
+                .toString());
+        activeOverlay->setOutputImageQuality(
+            config.value(QStringLiteral("output/imageQuality"), -1).toInt());
+        activeOverlay->setRememberExtension(
+            config.value(QStringLiteral("output/rememberExtension"), true).toBool());
+        activeOverlay->setRememberedExtension(
+            config.value(QStringLiteral("output/lastExtension")).toString());
+        activeOverlay->setQuickSaveNotification(
+            config.value(QStringLiteral("output/quickSaveNotification"), true).toBool());
+        activeOverlay->setHideOnFileDialog(
+            config.value(QStringLiteral("capture/hideOverlayOnFileDialog"), true).toBool());
+        activeOverlay->setCaptureDisplayOptions(
+            config.value(QStringLiteral("capture/showAnchor"), true).toBool(),
+            QColor::fromString(config.value(QStringLiteral("capture/maskColor"),
+                                             QStringLiteral("#78000000")).toString()),
+            QColor::fromString(config.value(QStringLiteral("capture/anchorColor"),
+                                             QStringLiteral("#ffffffff")).toString()),
+            config.value(QStringLiteral("capture/borderWidth"), 3).toInt(),
+            config.value(QStringLiteral("capture/magnifierMask"), true).toBool(),
+            config.value(QStringLiteral("capture/magnifierBorder"), true).toBool(),
+            config.value(QStringLiteral("capture/magnifierAnchor"), false).toBool(),
+            config.value(QStringLiteral("capture/crosshair"), false).toBool(),
+            config.value(QStringLiteral("capture/disableGuides"), false).toBool(),
+            config.value(QStringLiteral("capture/hideOneByOne"), true).toBool());
+        activeOverlay->setMagnifierOptions(
+            config.value(QStringLiteral("interface/magnifier/automatic"), true).toBool(),
+            config.value(QStringLiteral("interface/magnifier/super"), false).toBool(),
+            config.value(QStringLiteral("interface/magnifier/formats"),
+                         QStringList{QStringLiteral("RGB"), QStringLiteral("HEX")}).toStringList(),
+            config.value(QStringLiteral("interface/magnifier/hideHash"), false).toBool(),
+            config.value(QStringLiteral("interface/magnifier/uppercase"),
+                         config.value(QStringLiteral("misc/uppercase_hex_color"), true)).toBool(),
+            config.value(QStringLiteral("interface/magnifier/grid"), true).toBool(),
+            config.value(QStringLiteral("interface/magnifier/coordinates"), true).toBool(),
+            config.value(QStringLiteral("interface/magnifier/hints"), true).toBool(),
+            config.value(QStringLiteral("interface/magnifier/zoom"), 9).toInt(),
+            superCaptureMode);
+        activeOverlay->setDefaultAnnotation(
+            config.value(QStringLiteral("capture/defaultAnnotation"), QStringLiteral("无")).toString());
+        activeOverlay->setCaptureSound(
+            config.value(QStringLiteral("capture/soundEnabled"), true).toBool(),
+            config.value(QStringLiteral("capture/soundFile"), QStringLiteral("sound/snip.wav")).toString(),
+            config.value(QStringLiteral("capture/soundQuickSave"), false).toBool());
         activeOverlay->setDetectionProcessFilters(
             configuredProcessList(config, QStringLiteral("snip/exclude_from_detection"),
                                   QStringLiteral("exclude_from_detection")),
@@ -1227,12 +1406,30 @@ int main(int argc, char *argv[])
         activeOverlay->setHideOutputOptions(
             config.value(QStringLiteral("interface/hide_output_options"),
                          config.value(QStringLiteral("hide_output_options"), false)).toBool());
+        activeOverlay->setShowShareButton(
+            config.value(QStringLiteral("interface/toolbar/showShare"), true).toBool());
         activeOverlay->setQuickSaveDirectory(
             config.value(QStringLiteral("output/saveDirectory"),
                          QStandardPaths::writableLocation(QStandardPaths::PicturesLocation)).toString());
+        QObject::connect(activeOverlay, &snipaste::ui::SnipOverlay::fileSaved,
+                         [&config](const QString &path) {
+                             const QString extension = QFileInfo(path).suffix().trimmed().toLower();
+                             if (!extension.isEmpty()) {
+                                 config.setValue(QStringLiteral("output/lastExtension"), extension);
+                                 config.save();
+                             }
+                         });
         activeOverlay->setAutoSelectAnnotations(
             config.value(QStringLiteral("annotate/auto_select_on_creation"),
                          config.value(QStringLiteral("auto_select_on_creation"), true)).toBool());
+        activeOverlay->setRememberToolColors(
+            config.value(QStringLiteral("interface/toolbar/rememberColors"), true).toBool());
+        activeOverlay->setFreeSelect(
+            config.value(QStringLiteral("interface/toolbar/freeSelect"), true).toBool());
+        activeOverlay->setDisableEraserEditing(
+            config.value(QStringLiteral("interface/toolbar/disableEraserEditing"), true).toBool());
+        activeOverlay->setQuickResponse(
+            config.value(QStringLiteral("general/quickResponse"), true).toBool());
         activeOverlay->setPenTipCount(
             config.value(QStringLiteral("interface/toolbar/penCount"), 3).toInt());
         const QStringList annotationPalette = config.value(
@@ -1259,7 +1456,7 @@ int main(int argc, char *argv[])
             [&history](int index) { return history.imageAt(index); });
         QObject::connect(activeOverlay,
                          &snipaste::ui::SnipOverlay::selectionCaptured,
-                         [&lastSelection, &recentSelections, &config, maxHistoryRegions](const QRect &globalRect) {
+                         [&lastSelection, &recentSelections, &config, &maxHistoryRegions](const QRect &globalRect) {
                              lastSelection = globalRect;
                              recentSelections.removeAll(globalRect);
                              recentSelections.prepend(globalRect);
@@ -1305,9 +1502,13 @@ int main(int argc, char *argv[])
                          showPaste);
         QObject::connect(activeOverlay,
                          &snipaste::ui::SnipOverlay::annotateRequested,
-                         [&history, &historyPath, &pasteManager, &lastSelection, autoSaveScreenshot](const QImage &image) {
+                         [&config, &history, &historyPath, &pasteManager, &lastSelection, autoSaveScreenshot](const QImage &image) {
                              const QRect captureRegion = lastSelection;
                              snipaste::ui::AnnotationDialog dialog(image);
+                             dialog.setAnnotationOptions(
+                                 config.value(QStringLiteral("interface/toolbar/rememberColors"), true).toBool(),
+                                 config.value(QStringLiteral("interface/toolbar/freeSelect"), true).toBool(),
+                                 config.value(QStringLiteral("interface/toolbar/disableEraserEditing"), true).toBool());
                              if (dialog.exec() != QDialog::Accepted)
                                  return;
                              const QImage annotated = dialog.resultImage();
@@ -1315,21 +1516,33 @@ int main(int argc, char *argv[])
                              saveHistorySnapshotAsync(history, historyPath);
                              autoSaveScreenshot(annotated);
                              pasteManager.rememberCapture(annotated, captureRegion);
-                             QApplication::clipboard()->setImage(annotated);
+                             snipaste::ui::copyImageToClipboard(
+                                 annotated, false, snipaste::ui::ClipboardImageSource::Screenshot);
                              pasteManager.createPaste(annotated);
                          });
         QObject::connect(activeOverlay,
                          &snipaste::ui::SnipOverlay::ocrRequested,
-                         [](const QImage &image) {
+                         [&config](const QImage &image) {
+                             const QString ocrEngine = config.value(
+                                 QStringLiteral("output/ocrEngine"), QStringLiteral("系统自带")).toString();
+                             const QString ocrLanguage = config.value(
+                                 QStringLiteral("output/ocrLanguage"), QStringLiteral("系统默认")).toString();
+                             const bool playSound = config.value(
+                                 QStringLiteral("output/ocrSound"), true).toBool();
+                             const QString soundFile = config.value(
+                                 QStringLiteral("capture/soundFile"), QStringLiteral("sound/snip.wav"))
+                                                            .toString();
                              auto *watcher = new QFutureWatcher<snipaste::core::OcrResult>(qApp);
                              QObject::connect(watcher,
                                               &QFutureWatcher<snipaste::core::OcrResult>::finished,
                                               watcher,
-                                              [watcher] {
+                                              [watcher, playSound, soundFile] {
                                                   const snipaste::core::OcrResult result = watcher->result();
                                                   watcher->deleteLater();
                                                   if (result.success) {
                                                       QApplication::clipboard()->setText(result.text);
+                                                      if (playSound)
+                                                          playConfiguredSound(soundFile);
                                                       QMessageBox::information(nullptr,
                                                                                QStringLiteral("OCR \u7ed3\u679c"),
                                                                                result.text);
@@ -1339,8 +1552,9 @@ int main(int argc, char *argv[])
                                                                             result.error);
                                                   }
                                               });
-                             watcher->setFuture(QtConcurrent::run([image] {
-                                 return snipaste::core::OcrService::recognize(image);
+                             watcher->setFuture(QtConcurrent::run([image, ocrEngine, ocrLanguage] {
+                                 return snipaste::core::OcrService::recognize(
+                                     image, ocrEngine, ocrLanguage);
                              }));
                          });
         QObject::connect(activeOverlay,
@@ -1391,6 +1605,9 @@ int main(int argc, char *argv[])
         superCapture.setMouseButton(mouse.contains(QStringLiteral("right"), Qt::CaseInsensitive)
                                     || mouse == QStringLiteral("2")
                                     ? Qt::RightButton : Qt::LeftButton);
+        superCapture.setBlockWindowsKeys(
+            config.value(QStringLiteral("capture/blockWinLeft"), true).toBool(),
+            config.value(QStringLiteral("capture/blockWinRight"), false).toBool());
         // The reference UI uses “none” as the disabled state. Keep an
         // explicit boolean for users who edit config.ini directly.
         const bool enabled = config.value(QStringLiteral("control/superCaptureEnabled"), false).toBool()
@@ -1399,7 +1616,7 @@ int main(int argc, char *argv[])
     };
     QObject::connect(&superCapture, &snipaste::platform::SuperCapture::rectangleCaptured,
                      &app, [startSnip](const QRect &globalRect) {
-                         startSnip(true, false, {}, globalRect, true);
+                         startSnip(true, false, {}, globalRect, true, {}, false, false, false, true);
                      });
     configureSuperCapture();
 
@@ -1515,7 +1732,8 @@ int main(int argc, char *argv[])
                 return;
             recordScreenshot(image, image);
             autoSaveScreenshot(image);
-            QApplication::clipboard()->setImage(image);
+            snipaste::ui::copyImageToClipboard(
+                image, false, snipaste::ui::ClipboardImageSource::Screenshot);
             pasteManager.createPaste(image);
         },
     });
@@ -1536,7 +1754,8 @@ int main(int argc, char *argv[])
                 return;
             recordScreenshot(image, image);
             autoSaveScreenshot(image);
-            QApplication::clipboard()->setImage(image);
+            snipaste::ui::copyImageToClipboard(
+                image, false, snipaste::ui::ClipboardImageSource::Screenshot);
             pasteManager.createPaste(image);
         },
     });
@@ -1572,7 +1791,8 @@ int main(int argc, char *argv[])
                              if (!noAutoSave)
                                  autoSaveScreenshot(image);
                              if (outputSpec.isEmpty()) {
-                                 QApplication::clipboard()->setImage(image);
+                                 snipaste::ui::copyImageToClipboard(
+                                     image, false, snipaste::ui::ClipboardImageSource::Screenshot);
                              } else {
                                  outputCapture(image, outputSpec);
                              }
@@ -1656,7 +1876,8 @@ int main(int argc, char *argv[])
                 pasteManager.rememberCapture(image, screen->geometry());
                 recordScreenshot(image, image);
                 autoSaveScreenshot(image);
-                QApplication::clipboard()->setImage(image);
+                snipaste::ui::copyImageToClipboard(
+                    image, false, snipaste::ui::ClipboardImageSource::Screenshot);
                 pasteManager.createPaste(image);
             } else if (selected == allScreensAction) {
                 commands.execute(QStringLiteral("snip.fullScreen"));
@@ -1691,12 +1912,14 @@ int main(int argc, char *argv[])
                     for (const QUrl &url : mime->urls())
                         paths.append(url.toLocalFile().isEmpty() ? url.toString()
                                                                 : url.toLocalFile());
-                    for (const QString &path : paths) {
-                        if (QFileInfo::exists(path)) {
-                            QImage candidate(path);
-                            if (!candidate.isNull()) {
-                                image = std::move(candidate);
-                                break;
+                    if (config.value(QStringLiteral("paste/pathToImage"), true).toBool()) {
+                        for (const QString &path : paths) {
+                            if (QFileInfo::exists(path)) {
+                                QImage candidate(path);
+                                if (!candidate.isNull()) {
+                                    image = std::move(candidate);
+                                    break;
+                                }
                             }
                         }
                     }
@@ -1704,14 +1927,16 @@ int main(int argc, char *argv[])
                         const QString joined = paths.join(QChar::LineFeed);
                         if (joined == lastPastedFileClipboard) {
                             sourceText = joined;
-                            image = clipboardTextImage(joined);
+                            if (config.value(QStringLiteral("paste/pathToImage"), true).toBool())
+                                image = clipboardTextImage(joined, &config);
                             lastPastedFileClipboard.clear();
                         } else {
                             lastPastedFileClipboard = joined;
                         }
                     } else if (image.isNull() && !paths.isEmpty()) {
                         sourceText = paths.join(QChar::LineFeed);
-                        image = clipboardTextImage(sourceText);
+                        if (config.value(QStringLiteral("paste/pathToImage"), true).toBool())
+                            image = clipboardTextImage(sourceText, &config);
                     }
                 }
                 if (image.isNull() && mime && mime->hasHtml()
@@ -1723,11 +1948,11 @@ int main(int argc, char *argv[])
                 if (image.isNull() && mime && mime->hasText()) {
                     const QString text = mime->text();
                     const QColor color = parseClipboardColor(text);
-                    if (color.isValid())
+                    if (color.isValid() && config.value(QStringLiteral("paste/textToImage"), true).toBool())
                         image = clipboardColorImage(color);
-                    else {
+                    else if (config.value(QStringLiteral("paste/textToImage"), true).toBool()) {
                         sourceText = text;
-                        image = clipboardTextImage(text);
+                        image = clipboardTextImage(text, &config);
                     }
                 }
             }
@@ -1739,24 +1964,66 @@ int main(int argc, char *argv[])
             }
         },
     });
+    snipaste::ui::TrayController *trayController = nullptr;
     commands.registerCommand({
         QStringLiteral("preferences.open"),
         QStringLiteral("首选项"),
-        [&config, &pasteManager, applyHotkeys, configureSuperCapture, configuredPasteMouseActions] {
+        [&config, &history, &pasteManager, &maxHistoryRegions, &trayController,
+         applyHotkeys, configureSuperCapture, configuredPasteMouseActions] {
             snipaste::ui::PreferencesDialog dialog(config);
             if (dialog.exec() == QDialog::Accepted) {
+                snipaste::app::setLoggingLevel(
+                    config.value(QStringLiteral("general/logLevel"), 1).toInt());
+                snipaste::ui::setClipboardOutputOptions(
+                    config.value(QStringLiteral("output/clipboardWindowsBitmap"), true).toBool(),
+                    config.value(QStringLiteral("output/clipboardScreenshot"), true).toBool(),
+                    config.value(QStringLiteral("output/clipboardPaste"), false).toBool());
+                applyConfiguredTheme(
+                    config.value(QStringLiteral("interface/theme"), QStringLiteral("跟随系统")).toString());
+                snipaste::ui::applyApplicationAppearance(config);
                 applyHotkeys();
                 configureSuperCapture();
+                if (trayController)
+                    trayController->refreshIcon();
+                history.setMaximumCount(qBound(1,
+                                               config.value(QStringLiteral("capture/maxHistory"), 20).toInt(),
+                                               999));
+                maxHistoryRegions = qBound(1,
+                                           config.value(QStringLiteral("capture/maxHistoryRegions"), 8).toInt(),
+                                           99);
                 pasteManager.setRestoreCount(config.value(QStringLiteral("paste/restoreCount"), 1).toInt());
                 pasteManager.setUseCapturePosition(config.value(QStringLiteral("paste/useCapturePosition"), true).toBool());
                 pasteManager.setDefaultOpacity(configuredPasteOpacity(config));
                 pasteManager.setShadowEnabled(config.value(QStringLiteral("paste/shadow"), true).toBool());
                 pasteManager.setResizeEnabled(!config.value(QStringLiteral("paste/disable_frame_resize"), false).toBool());
+                pasteManager.setMaxSize(config.value(QStringLiteral("paste/maxSize"), 12000).toInt());
+                pasteManager.setThumbnailSize(QSize(
+                    config.value(QStringLiteral("paste/thumbWidth"), 62).toInt(),
+                    config.value(QStringLiteral("paste/thumbHeight"), 62).toInt()));
+                pasteManager.setWheelCenter(config.value(QStringLiteral("paste/wheelCenter"), false).toBool());
+                pasteManager.setResetTransform(config.value(QStringLiteral("paste/resetTransform"), true).toBool());
+                pasteManager.setHelpKeys(config.value(QStringLiteral("paste/helpKeys"), false).toBool());
+                pasteManager.setDisableDpiScaling(
+                    config.value(QStringLiteral("general/disablePasteDpiScaling"), false).toBool());
+                pasteManager.setCloseConfirm(config.value(QStringLiteral("paste/closeConfirm"), true).toBool());
+                pasteManager.setDestroyConfirm(config.value(QStringLiteral("paste/destroyConfirm"), true).toBool());
+                pasteManager.setVirtualDesktopPinned(
+                    config.value(QStringLiteral("paste/virtualDesktop"), false).toBool());
+                pasteManager.setFlashNew(config.value(QStringLiteral("paste/flashNew"), true).toBool());
+                pasteManager.setActivateNew(config.value(QStringLiteral("paste/activateNew"), true).toBool());
+                pasteManager.setFlashTransparency(
+                    config.value(QStringLiteral("paste/flashTransparency"), true).toBool());
+                pasteManager.setFlashGroupSwitch(
+                    config.value(QStringLiteral("paste/flashGroupSwitch"), true).toBool());
+                pasteManager.setHideAllOnPasteKey(
+                    config.value(QStringLiteral("paste/hideAllOnPasteKey"), false).toBool());
+                pasteManager.setKeepOnDrag(
+                    config.value(QStringLiteral("paste/keepOnDrag"), false).toBool());
                 pasteManager.setMagneticAttachThreshold(config.value(QStringLiteral("paste/magnetic_attach_threshold"),
                                                                      config.value(QStringLiteral("magnetic_attach_threshold"), 50)).toInt());
                 pasteManager.setExchangeNavigationKeys(
                     config.value(QStringLiteral("hotkeys/exchange_wasd_and_arrow_keys"), false).toBool());
-                pasteManager.setCopyAsFile(config.value(QStringLiteral("output/copyAsFileMode"), 2).toInt() == 0);
+                pasteManager.setCopyAsFileMode(config.value(QStringLiteral("output/copyAsFileMode"), 1).toInt());
                 pasteManager.setBackgroundMode(
                     config.value(QStringLiteral("paste/backgroundMode"), QStringLiteral("伪透明")).toString());
                 pasteManager.setSmoothScale(config.value(QStringLiteral("paste/smoothScale"), true).toBool());
@@ -2004,7 +2271,10 @@ int main(int argc, char *argv[])
             snipaste::ui::ScreenshotHistoryDialog dialog(history);
             QObject::connect(&dialog,
                              &snipaste::ui::ScreenshotHistoryDialog::copyRequested,
-                             [](const QImage &image) { QApplication::clipboard()->setImage(image); });
+                             [](const QImage &image) {
+                                 snipaste::ui::copyImageToClipboard(
+                                     image, false, snipaste::ui::ClipboardImageSource::Screenshot);
+                             });
             QObject::connect(&dialog,
                              &snipaste::ui::ScreenshotHistoryDialog::pasteRequested,
                              [&pasteManager](const QImage &image) { pasteManager.createPaste(image); });
@@ -2160,11 +2430,13 @@ int main(int argc, char *argv[])
     commands.registerCommand({
         QStringLiteral("pasteAsImage"),
         QStringLiteral("将剪贴板转为图像并粘贴"),
-        [] {
+        [&config] {
             const QMimeData *mime = QApplication::clipboard()->mimeData();
             if (!mime || !mime->hasText())
                 return;
-            QApplication::clipboard()->setImage(clipboardTextImage(mime->text()));
+            snipaste::ui::copyImageToClipboard(
+                clipboardTextImage(mime->text(), &config), false,
+                snipaste::ui::ClipboardImageSource::Screenshot);
             pasteClipboardAsKeyboardInput();
         },
     });
@@ -2358,7 +2630,8 @@ int main(int argc, char *argv[])
                     if (!noAutoSave)
                         autoSaveScreenshot(image);
                     if (output.isEmpty())
-                        QApplication::clipboard()->setImage(image);
+                        snipaste::ui::copyImageToClipboard(
+                            image, false, snipaste::ui::ClipboardImageSource::Screenshot);
                     else
                         outputCapture(image, output);
                 }
@@ -2401,7 +2674,7 @@ int main(int argc, char *argv[])
             const QString plain = value(QStringLiteral("--plain"));
             const QString html = value(QStringLiteral("--html"));
             if (!plain.isEmpty()) {
-                const QImage image = clipboardTextImage(plain);
+                const QImage image = clipboardTextImage(plain, &config);
                 if (!position.isNull()) pasteManager.createPasteAtPosition(image, position);
                 else pasteManager.createPaste(image);
             } else if (!html.isEmpty()) {
@@ -2435,6 +2708,7 @@ int main(int argc, char *argv[])
         finishImmediately();
     });
     snipaste::ui::TrayController tray(commands, config);
+    trayController = &tray;
     tray.show();
     if (config.value(QStringLiteral("interface/hideTrayIcon"),
                      config.value(QStringLiteral("hide_tray_icon"), false)).toBool())
@@ -2646,7 +2920,7 @@ int main(int argc, char *argv[])
             if (officialPaste && commandLinePlain) {
                 const QString text = positionalArguments.mid(1).join(QChar(' '));
                 if (!text.isEmpty()) {
-                    const QImage image = clipboardTextImage(text);
+                    const QImage image = clipboardTextImage(text, &config);
                     if (!commandLinePosition.isNull())
                         pasteManager.createPasteAtPosition(image, commandLinePosition);
                     else

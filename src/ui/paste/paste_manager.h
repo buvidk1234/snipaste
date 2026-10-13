@@ -5,6 +5,7 @@
 #include <QPointer>
 #include <QList>
 #include <QRect>
+#include <QSize>
 #include <QString>
 
 namespace snipaste::ui {
@@ -28,7 +29,17 @@ public:
     void setResizeEnabled(bool enabled);
     void setExchangeNavigationKeys(bool enabled);
     void setMaxNetworkImageBytes(qint64 bytes);
+    void setMaxSize(int pixels);
+    void setThumbnailSize(const QSize &size);
+    void setWheelCenter(bool enabled);
+    void setResetTransform(bool enabled);
+    void setDisableDpiScaling(bool enabled);
+    void setHelpKeys(bool enabled);
+    void setCloseConfirm(bool enabled);
+    void setDestroyConfirm(bool enabled);
     void setMagneticAttachThreshold(int pixels);
+    void setCopyAsFileMode(int mode);
+    // Compatibility API for callers that only distinguish file-copy on/off.
     void setCopyAsFile(bool enabled);
     void setBackgroundMode(const QString &mode);
     void setSmoothScale(bool enabled);
@@ -36,6 +47,12 @@ public:
     void setMouseActions(const QStringList &actions);
     void setVirtualDesktopPinned(bool enabled);
     void setHiddenForFileDialog(bool hidden);
+    void setFlashNew(bool enabled);
+    void setActivateNew(bool enabled);
+    void setFlashTransparency(bool enabled);
+    void setFlashGroupSwitch(bool enabled);
+    void setHideAllOnPasteKey(bool enabled);
+    void setKeepOnDrag(bool enabled);
     PasteWindow *createPasteAtPosition(const QImage &image, const QPoint &globalPosition);
     void setRestoreCount(int count);
     void toggleAll();
@@ -107,8 +124,16 @@ private:
     bool m_resizeEnabled = true;
     bool m_exchangeNavigationKeys = false;
     qint64 m_maxNetworkImageBytes = 20LL * 1024 * 1024;
+    int m_maxSize = 12000;
+    QSize m_thumbnailSize = QSize(62, 62);
+    bool m_wheelCenter = false;
+    bool m_resetTransform = true;
+    bool m_disableDpiScaling = false;
+    bool m_helpKeys = false;
+    bool m_closeConfirm = true;
+    bool m_destroyConfirm = true;
     int m_magneticAttachThreshold = 0;
-    bool m_copyAsFile = false;
+    int m_copyAsFileMode = 2;
     QString m_backgroundMode = QStringLiteral("伪透明");
     bool m_smoothScale = true;
     QString m_escapeAction = QStringLiteral("关闭贴图");
@@ -118,6 +143,12 @@ private:
     bool m_soloMode = false;
     bool m_virtualDesktopPinned = false;
     bool m_hiddenForFileDialog = false;
+    bool m_flashNew = true;
+    bool m_activateNew = true;
+    bool m_flashTransparency = true;
+    bool m_flashGroupSwitch = true;
+    bool m_hideAllOnPasteKey = false;
+    bool m_keepOnDrag = false;
     QList<QPointer<PasteWindow>> m_fileDialogVisible;
 };
 

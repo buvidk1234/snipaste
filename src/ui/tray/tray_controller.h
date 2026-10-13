@@ -1,10 +1,12 @@
 #pragma once
 
 #include <QObject>
+#include <QList>
 #include <memory>
 
 class QSystemTrayIcon;
 class QMenu;
+class QAction;
 
 namespace snipaste::core {
 class CommandRegistry;
@@ -22,6 +24,8 @@ public:
     ~TrayController() override;
     void show();
     void hide();
+    void refreshIcon();
+    void setExtendedMenuEnabled(bool enabled);
     QMenu *contextMenu() const;
 
 private:
@@ -29,6 +33,7 @@ private:
     core::ConfigStore &m_config;
     QSystemTrayIcon *m_tray = nullptr;
     std::unique_ptr<QMenu> m_menu;
+    QList<QAction *> m_extendedActions;
 };
 
 } // namespace snipaste::ui

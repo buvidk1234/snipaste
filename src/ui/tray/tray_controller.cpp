@@ -3,10 +3,12 @@
 #include "core/command/command_registry.h"
 #include "core/config/config_store.h"
 #include "platform/keyboard.h"
+#include "ui/preferences/appearance_settings.h"
 
 #include <QAction>
 #include <QApplication>
 #include <QCursor>
+#include <QFileInfo>
 #include <QKeySequence>
 #include <QMenu>
 #include <QMessageBox>
@@ -64,14 +66,25 @@ TrayController::TrayController(core::CommandRegistry &commands, core::ConfigStor
     , m_config(config)
     , m_tray(new QSystemTrayIcon(this))
 {
-    m_tray->setIcon(makeTrayIcon());
+    QIcon trayIcon = makeTrayIcon();
+    const int trayIconMode = m_config.value(QStringLiteral("interface/trayIconMode"), 0).toInt();
+    const QString trayIconPath = m_config.value(QStringLiteral("interface/trayIconPath")).toString().trimmed();
+    if (trayIconMode == 1)
+        trayIcon = applicationIcon();
+    else if (trayIconMode == 2 && !trayIconPath.isEmpty() && QFileInfo::exists(trayIconPath))
+        trayIcon = QIcon(trayIconPath);
+    m_tray->setIcon(trayIcon);
     m_tray->setToolTip(QStringLiteral("snipaste"));
 
     m_menu = std::make_unique<QMenu>();
     auto *menu = m_menu.get();
     menu->setObjectName(QStringLiteral("trayContextMenu"));
     m_commands.registerCommand({QStringLiteral("tray.showMenu"), QStringLiteral("显示托盘菜单"),
-                               [this] { m_menu->popup(QCursor::pos()); }});
+                               [this] {
+                                   setExtendedMenuEnabled(
+                                       m_config.value(QStringLiteral("general/extendedTrayMenu"), true).toBool());
+                                   m_menu->popup(QCursor::pos());
+                               }});
     menu->setStyleSheet(QStringLiteral(
         "QMenu { background: #ffffff; color: #202124; border: 1px solid #aeb8c2; "
         "border-radius: 7px; padding: 2px 0; font-family: 'Segoe UI'; font-size: 9pt; }"
@@ -111,13 +124,14 @@ TrayController::TrayController(core::CommandRegistry &commands, core::ConfigStor
     addCommand(menu, QStringLiteral("切换到另一贴图组"),
                QStringLiteral("paste.switchGroup"),
                snipaste::platform::primaryKeySequence(Qt::Key_F3));
-    addCommand(menu, QStringLiteral("清空截屏历史"), QStringLiteral("history.clear"));
+    m_extendedActions.append(addCommand(menu, QStringLiteral("清空截屏历史"), QStringLiteral("history.clear")));
     menu->addSeparator();
 
-    addCommand(menu, QStringLiteral("禁用快捷键"), QStringLiteral("hotkeys.toggle"));
+    m_extendedActions.append(addCommand(menu, QStringLiteral("禁用快捷键"), QStringLiteral("hotkeys.toggle")));
     menu->addSeparator();
 
     auto *pasteMenu = menu->addMenu(QStringLiteral("贴图"));
+    m_extendedActions.append(pasteMenu->menuAction());
     addCommand(pasteMenu, QStringLiteral("从剪贴板贴图"), QStringLiteral("paste.clipboard"),
                QKeySequence(Qt::Key_F3));
     addCommand(pasteMenu, QStringLiteral("隐藏/显示所有贴图"), QStringLiteral("paste.toggleAll"),
@@ -169,6 +183,19 @@ TrayController::TrayController(core::CommandRegistry &commands, core::ConfigStor
 
     // Handle Context ourselves: Qt's automatic menu would otherwise open
     // even when the user bound the right button to a different command.
+    setExtendedMenuEnabled(m_config.value(QStringLiteral("general/extendedTrayMenu"), true).toBool());
+}
+
+void TrayController::refreshIcon()
+{
+    QIcon trayIcon = makeTrayIcon();
+    const int trayIconMode = m_config.value(QStringLiteral("interface/trayIconMode"), 0).toInt();
+    const QString trayIconPath = m_config.value(QStringLiteral("interface/trayIconPath")).toString().trimmed();
+    if (trayIconMode == 1)
+        trayIcon = applicationIcon();
+    else if (trayIconMode == 2 && !trayIconPath.isEmpty() && QFileInfo::exists(trayIconPath))
+        trayIcon = QIcon(trayIconPath);
+    m_tray->setIcon(trayIcon);
 }
 
 TrayController::~TrayController() = default;
@@ -191,8 +218,17 @@ void TrayController::hide()
     m_tray->hide();
 }
 
+void TrayController::setExtendedMenuEnabled(bool enabled)
+{
+    for (QAction *action : m_extendedActions)
+        if (action)
+            action->setVisible(enabled);
+}
+
 QMenu *TrayController::contextMenu() const
 {
+    const_cast<TrayController *>(this)->setExtendedMenuEnabled(
+        m_config.value(QStringLiteral("general/extendedTrayMenu"), true).toBool());
     return m_menu.get();
 }
 

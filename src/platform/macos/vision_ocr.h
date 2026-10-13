@@ -9,6 +9,7 @@ namespace snipaste::platform {
 // Runs Apple's Vision text recognizer for a still image.  The implementation
 // lives in Objective-C++ so the rest of the application can remain portable
 // C++/Qt code.
-core::OcrResult recognizeWithMacVision(const QImage &image);
+core::OcrResult recognizeWithMacVision(const QImage &image,
+                                       const QString &language = QString());
 
 } // namespace snipaste::platform

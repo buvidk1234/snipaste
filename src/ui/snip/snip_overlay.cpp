@@ -1,30 +1,41 @@
 #include "ui/snip/snip_overlay.h"
+#include "ui/clipboard_output.h"
 #include "ui/annotation/annotation_dialog.h"
+#include "core/command/argument_parser.h"
 #include "platform/keyboard.h"
 #include "platform/screen_capture.h"
 #include "platform/windows/capture_target.h"
 
 #include <QApplication>
+#include <QCoreApplication>
 #include <QClipboard>
 #include <QCursor>
 #include <QDateTime>
 #include <QDir>
 #include <QEventLoop>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFrame>
 #include <QFontMetrics>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QProcess>
 #include <QScreen>
 #include <QStandardPaths>
 #include <QPolygon>
 #include <QPointer>
 #include <QMessageBox>
 #include <QTimer>
+#include <QToolTip>
 #include <algorithm>
 #include <cmath>
+
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <mmsystem.h>
+#endif
 
 namespace snipaste::ui {
 
@@ -123,6 +134,37 @@ SnipOverlay::SnipOverlay(QScreen *screen,
         confirmSelection();
 }
 
+void SnipOverlay::setQuickResponse(bool enabled)
+{
+    m_quickResponse = enabled;
+    if (!enabled && !m_toolbar) {
+        createToolbar();
+        updateToolbarGeometry();
+        update();
+    }
+}
+
+void SnipOverlay::setRememberToolColors(bool enabled)
+{
+    m_rememberToolColors = enabled;
+    if (m_canvas)
+        m_canvas->setRememberToolColors(enabled);
+}
+
+void SnipOverlay::setFreeSelect(bool enabled)
+{
+    m_freeSelect = enabled;
+    if (m_canvas)
+        m_canvas->setFreeSelect(enabled);
+}
+
+void SnipOverlay::setDisableEraserEditing(bool enabled)
+{
+    m_disableEraserEditing = enabled;
+    if (m_canvas)
+        m_canvas->setDisableEraserEditing(enabled);
+}
+
 void SnipOverlay::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
@@ -173,6 +215,95 @@ void SnipOverlay::setDetectionOptions(bool detectWindows, bool detectElements, b
     updateHoverTarget();
 }
 
+void SnipOverlay::setCaptureDisplayOptions(bool showAnchor,
+                                           const QColor &maskColor,
+                                           const QColor &anchorColor,
+                                           int borderWidth,
+                                           bool magnifierMask,
+                                           bool magnifierBorder,
+                                           bool magnifierAnchor,
+                                           bool crosshair,
+                                           bool disableGuides,
+                                           bool hideOneByOne)
+{
+    m_showAnchor = showAnchor;
+    if (maskColor.isValid())
+        m_maskColor = maskColor;
+    if (anchorColor.isValid())
+        m_anchorColor = anchorColor;
+    m_captureBorderWidth = qBound(1, borderWidth, 20);
+    m_magnifierMask = magnifierMask;
+    m_magnifierBorder = magnifierBorder;
+    m_magnifierAnchor = magnifierAnchor;
+    m_showCrosshair = crosshair;
+    m_disableGuides = disableGuides;
+    m_hideOneByOne = hideOneByOne;
+    if (m_disableGuides)
+        m_showMagnifierGuides = false;
+    m_targetPoint = QPoint(-1, -1);
+    m_targetHierarchy.clear();
+    updateHoverTarget();
+    update();
+}
+
+void SnipOverlay::playCaptureSound() const
+{
+    if (!m_captureSoundEnabled || m_captureSoundFile.isEmpty())
+        return;
+
+    QFileInfo configured(m_captureSoundFile);
+    QString path = configured.isAbsolute()
+        ? configured.absoluteFilePath()
+        : QDir(QCoreApplication::applicationDirPath()).filePath(m_captureSoundFile);
+    if (!QFileInfo::exists(path) && configured.isRelative())
+        path = QDir::current().filePath(m_captureSoundFile);
+    if (!QFileInfo::exists(path))
+        return;
+
+#ifdef Q_OS_WIN
+    // PlaySound is asynchronous and replaces a previous capture sound, so a
+    // rapid sequence of copies does not block the capture UI or accumulate
+    // child processes.
+    PlaySoundW(reinterpret_cast<LPCWSTR>(path.utf16()), nullptr,
+               SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
+#elif defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+    QProcess::startDetached(QStringLiteral("afplay"), {path});
+#else
+    if (!QProcess::startDetached(QStringLiteral("paplay"), {path}))
+        QProcess::startDetached(QStringLiteral("aplay"), {path});
+#endif
+}
+
+void SnipOverlay::setMagnifierOptions(bool automatic,
+                                       bool superCapture,
+                                       const QStringList &colorFormats,
+                                       bool hideHexPrefix,
+                                       bool uppercaseHex,
+                                       bool grid,
+                                       bool coordinates,
+                                       bool hints,
+                                       int zoom,
+                                       bool superMode)
+{
+    m_showMagnifier = superMode ? superCapture : automatic;
+    m_magnifierGrid = grid;
+    m_magnifierCoordinates = coordinates;
+    m_magnifierHints = hints;
+    m_magnifierHideHexPrefix = hideHexPrefix;
+    m_magnifierUppercaseHex = uppercaseHex;
+    m_magnifierZoom = qBound(3, zoom, 30);
+    m_magnifierColorFormats.clear();
+    for (const QString &format : colorFormats) {
+        if ((format == QStringLiteral("RGB") || format == QStringLiteral("HEX"))
+            && !m_magnifierColorFormats.contains(format))
+            m_magnifierColorFormats.append(format);
+    }
+    if (m_magnifierColorFormats.isEmpty())
+        m_magnifierColorFormats.append(QStringLiteral("RGB"));
+    m_hexColor = m_magnifierColorFormats.first() == QStringLiteral("HEX");
+    update();
+}
+
 void SnipOverlay::setLastSelection(QRect selection)
 {
     m_lastSelection = selection.intersected(rect());
@@ -208,13 +339,21 @@ void SnipOverlay::updateHoverTarget(bool allowElements)
             const QRect element = detectElements
                 ? m_targetDetector(m_cursorPosition, true).intersected(rect()) : window;
             for (const QRect candidate : {element, window})
-                if (candidate.contains(m_cursorPosition) && !m_targetHierarchy.contains(candidate))
+                if ((!m_hideOneByOne || candidate.width() > 1 || candidate.height() > 1)
+                    && candidate.contains(m_cursorPosition) && !m_targetHierarchy.contains(candidate))
                     m_targetHierarchy.append(candidate);
             if (!m_targetHierarchy.isEmpty() && !m_targetHierarchy.contains(rect()))
                 m_targetHierarchy.append(rect());
             std::sort(m_targetHierarchy.begin(), m_targetHierarchy.end(), [](QRect a, QRect b) {
                 return qint64(a.width()) * a.height() < qint64(b.width()) * b.height();
             });
+        }
+        if (m_hideOneByOne) {
+            m_targetHierarchy.erase(std::remove_if(m_targetHierarchy.begin(), m_targetHierarchy.end(),
+                                                   [](const QRect &candidate) {
+                                                       return candidate.width() <= 1 && candidate.height() <= 1;
+                                                   }),
+                                    m_targetHierarchy.end());
         }
     }
     m_hoverSelection = m_targetHierarchy.isEmpty() ? QRect() : m_targetHierarchy.at(m_targetLevel);
@@ -254,7 +393,7 @@ void SnipOverlay::paintEvent(QPaintEvent *)
             display = annotated;
     }
     painter.drawImage(rect(), display);
-    painter.fillRect(rect(), QColor(0, 0, 0, 120));
+    painter.fillRect(rect(), m_maskColor);
 
     const QRect selection = m_selection.isEmpty() ? m_hoverSelection : m_selection;
     if (selection.isValid() && !selection.isEmpty()) {
@@ -268,7 +407,8 @@ void SnipOverlay::paintEvent(QPaintEvent *)
     }
     if (m_showMagnifier && !m_selectionConfirmed && rect().contains(m_cursorPosition))
         drawMagnifier(painter);
-    if (m_showMagnifierGuides && !m_selectionConfirmed && rect().contains(m_cursorPosition))
+    if ((m_showCrosshair || (m_showMagnifierGuides && !m_disableGuides))
+        && !m_selectionConfirmed && rect().contains(m_cursorPosition))
         drawMagnifierGuides(painter);
     if (m_showShortcutHints && !m_dragging && !m_transformingSelection)
         drawShortcutHints(painter);
@@ -294,7 +434,7 @@ void SnipOverlay::paintSelectionFrame(QPainter &painter)
     }
 
     QPen pen(QColor(QStringLiteral("#2889ed")));
-    pen.setWidth(2);
+    pen.setWidth(m_captureBorderWidth);
     painter.setPen(pen);
     if (m_roundedCorners)
         painter.drawRoundedRect(selection.adjusted(0, 0, -1, -1), m_captureCornerRadius, m_captureCornerRadius);
@@ -303,9 +443,9 @@ void SnipOverlay::paintSelectionFrame(QPainter &painter)
 
     const bool showAnchors = m_anchorThreshold <= 0
         || (selection.width() >= m_anchorThreshold && selection.height() >= m_anchorThreshold);
-    if (showAnchors) {
+    if (m_showAnchor && showAnchors) {
         painter.setRenderHint(QPainter::Antialiasing);
-        painter.setPen(QPen(Qt::white, 1.5));
+        painter.setPen(QPen(m_anchorColor, 1.5));
         painter.setBrush(QColor(QStringLiteral("#2889ed")));
         const QRect r = selection.adjusted(0, 0, -1, -1);
         for (const QPoint &point : {r.topLeft(), QPoint(r.center().x(), r.top()), r.topRight(),
@@ -546,7 +686,8 @@ void SnipOverlay::keyPressEvent(QKeyEvent *event)
         // after the shortcut so a short Alt press never makes the capture
         // preview disappear unexpectedly.
         m_showMagnifier = true;
-        m_showMagnifierGuides = !m_showMagnifierGuides;
+        if (!m_disableGuides)
+            m_showMagnifierGuides = !m_showMagnifierGuides;
         update();
         event->accept();
         return;
@@ -622,6 +763,14 @@ void SnipOverlay::keyPressEvent(QKeyEvent *event)
             m_selection = target;
             confirmSelection();
         }
+        return;
+    }
+
+    if (event->key() == Qt::Key_S
+        && event->modifiers().testFlag(snipaste::platform::primaryModifier())
+        && event->modifiers().testFlag(Qt::AltModifier)
+        && m_copyAsFileMode != static_cast<int>(CopyAsFileMode::Disabled)) {
+        copySelection(true, true);
         return;
     }
 
@@ -727,9 +876,15 @@ QString SnipOverlay::sampledColorText() const
     if (m_background.isNull())
         return {};
     const QColor color = m_background.pixelColor(sampledPixel());
-    const QString hex = color.name(QColor::HexRgb);
-    return m_hexColor ? (m_uppercaseHexColor ? hex.toUpper() : hex)
-        : QStringLiteral("%1, %2, %3").arg(color.red()).arg(color.green()).arg(color.blue());
+    const bool hasRgb = m_magnifierColorFormats.contains(QStringLiteral("RGB"));
+    const bool hasHex = m_magnifierColorFormats.contains(QStringLiteral("HEX"));
+    const bool useHex = hasHex && (!hasRgb || m_hexColor);
+    if (!useHex)
+        return QStringLiteral("%1, %2, %3").arg(color.red()).arg(color.green()).arg(color.blue());
+    QString hex = color.name(QColor::HexRgb);
+    if (m_magnifierHideHexPrefix)
+        hex.remove(QLatin1Char('#'));
+    return m_magnifierUppercaseHex ? hex.toUpper() : hex;
 }
 
 void SnipOverlay::drawMagnifier(QPainter &painter) const
@@ -737,8 +892,9 @@ void SnipOverlay::drawMagnifier(QPainter &painter) const
     if (m_background.isNull() || !rect().contains(m_cursorPosition))
         return;
 
-    constexpr int panelWidth = 168;
-    constexpr int previewHeight = 132;
+    const qreal zoomScale = qreal(m_magnifierZoom) / 9.0;
+    const int panelWidth = qMax(1, qRound(168 * zoomScale));
+    const int previewHeight = qMax(1, qRound(132 * zoomScale));
     constexpr int infoHeight = 92;
     QPoint topLeft = m_cursorPosition + QPoint(10, 20);
     if (topLeft.x() + panelWidth > width())
@@ -763,37 +919,48 @@ void SnipOverlay::drawMagnifier(QPainter &painter) const
     painter.drawImage(target, crop);
     const qreal cellWidth = qreal(target.width()) / 19;
     const qreal cellHeight = qreal(target.height()) / 15;
-    QPen grid(QColor(190, 215, 245, 75)); grid.setCosmetic(true); painter.setPen(grid);
-    for (int x = 1; x < 19; ++x)
-        painter.drawLine(QPointF(target.left() + x * cellWidth, target.top()),
-                         QPointF(target.left() + x * cellWidth, target.bottom()));
-    for (int y = 1; y < 15; ++y)
-        painter.drawLine(QPointF(target.left(), target.top() + y * cellHeight),
-                         QPointF(target.right(), target.top() + y * cellHeight));
-    painter.setPen(QPen(Qt::white, 1));
+    if (m_magnifierGrid) {
+        QPen grid(QColor(190, 215, 245, 75)); grid.setCosmetic(true); painter.setPen(grid);
+        for (int x = 1; x < 19; ++x)
+            painter.drawLine(QPointF(target.left() + x * cellWidth, target.top()),
+                             QPointF(target.left() + x * cellWidth, target.bottom()));
+        for (int y = 1; y < 15; ++y)
+            painter.drawLine(QPointF(target.left(), target.top() + y * cellHeight),
+                             QPointF(target.right(), target.top() + y * cellHeight));
+    }
     painter.setBrush(Qt::NoBrush);
-    painter.drawRect(target.adjusted(0, 0, -1, -1));
-    painter.drawRect(QRectF(target.left() + 9 * cellWidth, target.top() + 7 * cellHeight,
-                           cellWidth, cellHeight));
+    if (m_magnifierBorder) {
+        painter.setPen(QPen(Qt::white, 1));
+        painter.drawRect(target.adjusted(0, 0, -1, -1));
+    }
+    if (m_magnifierAnchor) {
+        painter.setPen(QPen(Qt::white, 1));
+        painter.drawRect(QRectF(target.left() + 9 * cellWidth, target.top() + 7 * cellHeight,
+                               cellWidth, cellHeight));
+    }
 
     const QRect info(target.left(), target.bottom() + 1, panelWidth, infoHeight);
-    painter.fillRect(info, QColor(0, 0, 0, 210));
+    if (m_magnifierMask)
+        painter.fillRect(info, QColor(0, 0, 0, 210));
     QFont font = painter.font();
     font.setPixelSize(13);
     painter.setFont(font);
     painter.setPen(Qt::white);
     const QPoint coordinates = m_screenGeometry.topLeft() + pixel;
-    painter.drawText(info.adjusted(0, 3, 0, -infoHeight + 24), Qt::AlignCenter,
-        QStringLiteral("(%1, %2)").arg(coordinates.x()).arg(coordinates.y()));
+    if (m_magnifierCoordinates)
+        painter.drawText(info.adjusted(0, 3, 0, -infoHeight + 24), Qt::AlignCenter,
+            QStringLiteral("(%1, %2)").arg(coordinates.x()).arg(coordinates.y()));
     const QRect swatch(info.left() + 28, info.top() + 30, 13, 13);
     painter.fillRect(swatch, m_background.pixelColor(pixel));
     painter.drawRect(swatch);
     painter.drawText(QRect(info.left() + 49, info.top() + 24, 130, 26), Qt::AlignVCenter | Qt::AlignLeft,
                      sampledColorText());
+    if (m_magnifierHints) {
     painter.drawText(QRect(info.left(), info.top() + 52, panelWidth, 20), Qt::AlignCenter,
                      QStringLiteral("按 C 复制颜色值"));
     painter.drawText(QRect(info.left(), info.top() + 71, panelWidth, 20), Qt::AlignCenter,
                      QStringLiteral("按 Shift 切换 RGB/HEX"));
+    }
     painter.restore();
 }
 
@@ -1073,7 +1240,7 @@ void SnipOverlay::drawCapturedCursor(const QScreen *screen)
                        scaledCursor);
 }
 
-void SnipOverlay::copySelection(bool closeAfter)
+void SnipOverlay::copySelection(bool closeAfter, bool copyAsFileShortcut)
 {
     if (!m_selectionConfirmed && !m_dragging && m_selection.isEmpty())
         m_selection = m_hoverSelection;
@@ -1085,7 +1252,8 @@ void SnipOverlay::copySelection(bool closeAfter)
     emit screenshotCaptured(image);
     emit screenshotCapturedWithBackground(image, m_cleanBackground);
     m_outputEmitted = true;
-    QApplication::clipboard()->setImage(image);
+    copyImageToClipboard(image, m_copyAsFileMode, copyAsFileShortcut);
+    playCaptureSound();
     if (closeAfter) {
         close();
     }
@@ -1101,13 +1269,59 @@ void SnipOverlay::saveSelection(bool closeAfter)
     emit screenshotCaptured(image);
     emit screenshotCapturedWithBackground(image, m_cleanBackground);
     m_outputEmitted = true;
-    const QString path = QFileDialog::getSaveFileName(
+    QString defaultName = snipaste::core::expandOutputFilePattern(
+        m_outputFileNamePattern.trimmed().isEmpty()
+            ? QStringLiteral("Snipaste_$yyyy-MM-dd_HH-mm-ss$.png")
+            : m_outputFileNamePattern,
+        QDateTime::currentDateTime());
+    if (defaultName.trimmed().isEmpty())
+        defaultName = QStringLiteral("snipaste.png");
+    if (m_rememberExtension && !m_lastSavedExtension.isEmpty()) {
+        QFileInfo rememberedInfo(defaultName);
+        const QString baseName = rememberedInfo.completeBaseName();
+        if (!baseName.isEmpty())
+            defaultName = rememberedInfo.path() == QStringLiteral(".")
+                ? baseName + QChar('.') + m_lastSavedExtension
+                : QDir(rememberedInfo.path()).filePath(baseName + QChar('.') + m_lastSavedExtension);
+    }
+    const bool hiddenForDialog = m_hideOnFileDialog && isVisible();
+    if (hiddenForDialog)
+        hide();
+    QString path = QFileDialog::getSaveFileName(
         this,
         QStringLiteral("保存截图"),
-        QStringLiteral("snipaste.png"),
+        defaultName,
         QStringLiteral("PNG 图片 (*.png);;JPEG 图片 (*.jpg *.jpeg);;所有文件 (*.*)"));
-    if (closeAfter && !path.isEmpty() && image.save(path))
+    if (path.isEmpty()) {
+        if (hiddenForDialog)
+            show();
+        return;
+    }
+
+    // QFileDialog does not append a suffix when the user types a bare name
+    // and chooses the catch-all filter.  Keep the output deterministic and
+    // remember the extension only when that preference is enabled.
+    QFileInfo selectedInfo(path);
+    QString extension = selectedInfo.suffix().trimmed().toLower();
+    if (extension.isEmpty()) {
+        extension = m_rememberExtension && !m_lastSavedExtension.isEmpty()
+            ? m_lastSavedExtension
+            : QStringLiteral("png");
+        path += QChar('.') + extension;
+    }
+    if (!image.save(path, nullptr, m_outputImageQuality)) {
+        if (hiddenForDialog)
+            show();
+        return;
+    }
+    if (m_rememberExtension) {
+        m_lastSavedExtension = extension;
+        emit fileSaved(path);
+    }
+    if (closeAfter)
         close();
+    else if (hiddenForDialog)
+        show();
 }
 
 void SnipOverlay::quickSaveSelection(bool closeAfter)
@@ -1120,15 +1334,30 @@ void SnipOverlay::quickSaveSelection(bool closeAfter)
         : m_quickSaveDirectory;
     if (!QDir().mkpath(directory))
         return;
-    const QString path = QDir(directory).filePath(
-        QStringLiteral("snipaste-%1.png").arg(QDateTime::currentDateTime().toString(
-            QStringLiteral("yyyyMMdd-HHmmss-zzz"))));
-    if (!image.save(path, "PNG"))
+    QString fileName = snipaste::core::expandOutputFilePattern(
+        m_outputFileNamePattern.trimmed().isEmpty()
+            ? QStringLiteral("Snipaste_$yyyy-MM-dd_HH-mm-ss$.png")
+            : m_outputFileNamePattern,
+        QDateTime::currentDateTime());
+    if (fileName.trimmed().isEmpty())
+        fileName = QStringLiteral("snipaste.png");
+    if (QFileInfo(fileName).suffix().trimmed().isEmpty())
+        fileName += QStringLiteral(".png");
+    const QString path = QFileInfo(fileName).isAbsolute()
+        ? QDir::cleanPath(fileName)
+        : QDir(directory).filePath(fileName);
+    if (!image.save(path, nullptr, m_outputImageQuality))
         return;
     emit selectionCaptured(globalSelection());
     emit screenshotCaptured(image);
     emit screenshotCapturedWithBackground(image, m_cleanBackground);
     m_outputEmitted = true;
+    if (m_captureSoundQuickSave)
+        playCaptureSound();
+    emit quickSaveCompleted(path);
+    if (m_quickSaveNotification)
+        QToolTip::showText(QCursor::pos(), QStringLiteral("已保存截图：%1").arg(path), nullptr,
+                           QRect(), 3000);
     if (closeAfter)
         close();
 }
