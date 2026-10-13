@@ -194,6 +194,7 @@ void AnnotationCanvas::setCornerRadius(qreal radius)
     m_cornerRadius = qBound<qreal>(0.0, radius, 100.0);
     if (m_selectedShape >= 0 && m_selectedShape < m_shapes.size())
         m_shapes[m_selectedShape].cornerRadius = m_cornerRadius;
+    invalidateRenderCache();
     update();
 }
 
@@ -202,6 +203,7 @@ void AnnotationCanvas::setMagnification(qreal factor)
     m_magnification = qBound<qreal>(1.1, factor, 8.0);
     if (m_selectedShape >= 0 && m_selectedShape < m_shapes.size())
         m_shapes[m_selectedShape].magnification = m_magnification;
+    invalidateRenderCache();
     update();
 }
 
@@ -210,6 +212,7 @@ void AnnotationCanvas::setNumberStyle(int style)
     m_numberStyle = qBound(0, style, 2);
     if (m_selectedShape >= 0 && m_selectedShape < m_shapes.size())
         m_shapes[m_selectedShape].numberStyle = m_numberStyle;
+    invalidateRenderCache();
     updateToolCursor();
     update();
 }
@@ -219,6 +222,7 @@ void AnnotationCanvas::setNumberSize(qreal size)
     m_numberSize = qBound<qreal>(12.0, size, 96.0);
     if (m_selectedShape >= 0 && m_selectedShape < m_shapes.size())
         m_shapes[m_selectedShape].numberSize = m_numberSize;
+    invalidateRenderCache();
     updateToolCursor();
     update();
 }
@@ -228,6 +232,7 @@ void AnnotationCanvas::setShapeFilled(bool enabled)
     m_shapeFilled = enabled;
     if (m_selectedShape >= 0 && m_selectedShape < m_shapes.size())
         m_shapes[m_selectedShape].filled = enabled;
+    invalidateRenderCache();
     update();
 }
 
@@ -301,6 +306,7 @@ void AnnotationCanvas::setCaptureImage(QImage image, QPointF annotationOffset, Q
     for (auto &point : m_currentPoints) point += annotationOffset;
     image.setDevicePixelRatio(1);
     m_image = std::move(image);
+    invalidateRenderCache();
     if (logicalSize.isValid() && logicalSize.width() > 0.0 && logicalSize.height() > 0.0) {
         m_logicalImageSize = logicalSize;
         m_hasFixedLogicalSize = true;
@@ -519,6 +525,7 @@ void AnnotationCanvas::applyEraserSegment(const QPointF &from, const QPointF &to
     if (!changed)
         return;
     m_shapes = std::move(next);
+    invalidateRenderCache();
     m_redoShapes.clear();
     emit historyChanged();
     update();
@@ -558,6 +565,7 @@ void AnnotationCanvas::rotateSelected(qreal degrees)
     shape.rotation = std::fmod(shape.rotation + degrees + 360.0, 360.0);
     if (shape.rotation > 180.0)
         shape.rotation -= 360.0;
+    invalidateRenderCache();
     m_redoShapes.clear();
     emit historyChanged();
     update();
@@ -1117,54 +1125,31 @@ void AnnotationCanvas::drawEffect(QPainter &painter,
         QPainter mosaicPainter(&filtered);
         mosaicPainter.setRenderHint(QPainter::Antialiasing, false);
 
-        // Build summed-area tables once.  A block average then needs only
-        // four table reads per channel instead of walking every source pixel
-        // for every block, which keeps click/drag rendering responsive.
+        // Blocks do not overlap: each source pixel contributes exactly once.
+        // Direct sums therefore remain O(width * height) while avoiding four
+        // 64-bit integral tables (over 250 MiB for a full 4K selection).
         const int sourceWidth = source.width();
         const int sourceHeight = source.height();
-        const int stride = sourceWidth + 1;
-        const qsizetype integralSize = qsizetype(stride) * (sourceHeight + 1);
-        QVector<quint64> sumRed(integralSize, 0);
-        QVector<quint64> sumGreen(integralSize, 0);
-        QVector<quint64> sumBlue(integralSize, 0);
-        QVector<quint64> sumAlpha(integralSize, 0);
-        for (int y = 0; y < sourceHeight; ++y) {
-            quint64 rowRed = 0;
-            quint64 rowGreen = 0;
-            quint64 rowBlue = 0;
-            quint64 rowAlpha = 0;
-            const auto *scanLine = reinterpret_cast<const QRgb *>(source.constScanLine(y));
-            for (int x = 0; x < sourceWidth; ++x) {
-                const QRgb pixel = scanLine[x];
-                rowRed += qRed(pixel);
-                rowGreen += qGreen(pixel);
-                rowBlue += qBlue(pixel);
-                rowAlpha += qAlpha(pixel);
-                const qsizetype index = qsizetype(y + 1) * stride + x + 1;
-                const qsizetype previousRow = qsizetype(y) * stride + x + 1;
-                sumRed[index] = sumRed[previousRow] + rowRed;
-                sumGreen[index] = sumGreen[previousRow] + rowGreen;
-                sumBlue[index] = sumBlue[previousRow] + rowBlue;
-                sumAlpha[index] = sumAlpha[previousRow] + rowAlpha;
-            }
-        }
-        const auto blockSum = [stride](const QVector<quint64> &table,
-                                       int left, int top, int right, int bottom) {
-            const qsizetype br = qsizetype(bottom) * stride + right;
-            const qsizetype tr = qsizetype(top) * stride + right;
-            const qsizetype bl = qsizetype(bottom) * stride + left;
-            const qsizetype tl = qsizetype(top) * stride + left;
-            return table[br] - table[tr] - table[bl] + table[tl];
-        };
         for (int y = 0; y < source.height(); y += blockSize) {
             for (int x = 0; x < source.width(); x += blockSize) {
                 const int right = qMin(x + blockSize, sourceWidth);
                 const int bottom = qMin(y + blockSize, sourceHeight);
-                const quint64 count = quint64(right - x) * quint64(bottom - y);
-                const int red = int(blockSum(sumRed, x, y, right, bottom) / count);
-                const int green = int(blockSum(sumGreen, x, y, right, bottom) / count);
-                const int blue = int(blockSum(sumBlue, x, y, right, bottom) / count);
-                const int alpha = int(blockSum(sumAlpha, x, y, right, bottom) / count);
+                quint32 sumRed = 0, sumGreen = 0, sumBlue = 0, sumAlpha = 0;
+                for (int row = y; row < bottom; ++row) {
+                    const auto *pixels = reinterpret_cast<const QRgb *>(source.constScanLine(row));
+                    for (int column = x; column < right; ++column) {
+                        const QRgb pixel = pixels[column];
+                        sumRed += qRed(pixel);
+                        sumGreen += qGreen(pixel);
+                        sumBlue += qBlue(pixel);
+                        sumAlpha += qAlpha(pixel);
+                    }
+                }
+                const quint32 count = quint32(right - x) * quint32(bottom - y);
+                const int red = int(sumRed / count);
+                const int green = int(sumGreen / count);
+                const int blue = int(sumBlue / count);
+                const int alpha = int(sumAlpha / count);
                 const QRect cell(x, y, right - x, bottom - y);
                 mosaicPainter.fillRect(cell,
                                        QColor(red, green, blue, alpha));
@@ -1189,15 +1174,7 @@ void AnnotationCanvas::drawEffect(QPainter &painter,
 
 void AnnotationCanvas::paintEvent(QPaintEvent *)
 {
-    QImage display = fullRenderedImage(false);
-    if (m_dragging && (m_tool == Tool::Mosaic || m_tool == Tool::Blur)) {
-        // Effects are rasterized on every move so the screenshot shows the
-        // same result the user will commit on release.
-        QPainter effectPainter(&display);
-        const Shape preview = currentShape();
-        drawEffect(effectPainter, display, preview);
-        effectPainter.end();
-    }
+    const QImage display = fullRenderedImage(false);
 
     QPainter painter(this);
     if (!testAttribute(Qt::WA_TranslucentBackground)) {
@@ -1212,6 +1189,10 @@ void AnnotationCanvas::paintEvent(QPaintEvent *)
     painter.scale(scale, scale);
     if (m_dragging) {
         Shape preview = currentShape();
+        // Only the filtered crop is transient.  Drawing it on the widget
+        // avoids detaching/copying the complete cached desktop every frame.
+        if (m_tool == Tool::Mosaic || m_tool == Tool::Blur)
+            drawEffect(painter, display, preview);
         // During the first magnifier gesture the UI is a plain rectangular
         // selection of the source pixels.  The larger target frame and
         // enlarged pixels appear after the drag is committed.
@@ -1340,6 +1321,7 @@ void AnnotationCanvas::mousePressEvent(QMouseEvent *event)
         const Tool duplicatedTool = duplicate.tool;
         translateShape(duplicate, QPointF(12.0, 12.0));
         m_shapes.append(std::move(duplicate));
+        invalidateRenderCache();
         invalidateEraserHistory();
         m_selectedShape = m_shapes.size() - 1;
         m_editingShape = true;
@@ -1401,6 +1383,7 @@ void AnnotationCanvas::mousePressEvent(QMouseEvent *event)
         Shape shape = currentShape();
         shape.text = QString::number(m_nextNumber++);
         m_shapes.append(shape);
+        invalidateRenderCache();
         if (m_autoSelectOnCreation)
             m_selectedShape = m_shapes.size() - 1;
         m_redoShapes.clear();
@@ -1485,6 +1468,7 @@ void AnnotationCanvas::finishTextInput(bool commit)
     if (commit && !m_textShape.text.isEmpty()) {
         invalidateEraserHistory();
         m_shapes.append(m_textShape);
+        invalidateRenderCache();
         if (m_autoSelectOnCreation)
             m_selectedShape = m_shapes.size() - 1;
         m_redoShapes.clear();
@@ -1549,6 +1533,7 @@ void AnnotationCanvas::mouseMoveEvent(QMouseEvent *event)
             shape.end.rx() += delta.x();
         if (m_resizingHandle == 4 || m_resizingHandle == 5 || m_resizingHandle == 6)
             shape.end.ry() += delta.y();
+        invalidateRenderCache();
         m_start = point;
         emit historyChanged();
         update();
@@ -1566,6 +1551,7 @@ void AnnotationCanvas::mouseMoveEvent(QMouseEvent *event)
                                         delta);
             else
                 translateShape(m_shapes[m_selectedShape], delta);
+            invalidateRenderCache();
             m_start = point;
             emit historyChanged();
             update();
@@ -1685,6 +1671,8 @@ void AnnotationCanvas::mouseReleaseEvent(QMouseEvent *event)
     } else if (QLineF(m_start, m_current).length() > 2.0) {
         m_shapes.append(currentShape());
     }
+    if (m_shapes.size() > shapeCountBefore)
+        invalidateRenderCache();
     if (m_autoSelectOnCreation && !isNonMovableBrush(m_tool)
         && m_shapes.size() > shapeCountBefore)
         m_selectedShape = m_shapes.size() - 1;
@@ -1779,6 +1767,7 @@ void AnnotationCanvas::keyPressEvent(QKeyEvent *event)
         if (m_selectedShape >= 0 && m_selectedShape < m_shapes.size()) {
             invalidateEraserHistory();
             m_shapes.removeAt(m_selectedShape);
+            invalidateRenderCache();
             m_selectedShape = -1;
             m_redoShapes.clear();
             emit historyChanged();
@@ -1806,6 +1795,7 @@ void AnnotationCanvas::pasteShape()
     invalidateEraserHistory();
     translateShape(pasted, QPointF(12.0, 12.0));
     m_shapes.append(std::move(pasted));
+    invalidateRenderCache();
     m_selectedShape = m_shapes.size() - 1;
     m_redoShapes.clear();
     emit historyChanged();
@@ -1814,6 +1804,14 @@ void AnnotationCanvas::pasteShape()
 
 QImage AnnotationCanvas::fullRenderedImage(bool includePendingText) const
 {
+    // A freshly confirmed selection has no annotation layer yet.  Returning
+    // the shared source image avoids converting the whole desktop into a
+    // second full-size ARGB buffer just to paint an unchanged frame.
+    if (m_shapes.isEmpty() && (!includePendingText || !m_textEditing))
+        return m_image;
+    if (!includePendingText && m_renderCacheValid)
+        return m_renderCache;
+
     QImage result = m_image.convertToFormat(QImage::Format_ARGB32_Premultiplied);
     QPainter painter(&result);
     painter.setRenderHint(QPainter::Antialiasing, true);
@@ -1876,7 +1874,16 @@ QImage AnnotationCanvas::fullRenderedImage(bool includePendingText) const
         pending.text = m_textEditor->toPlainText();
         drawShape(painter, pending, 1.0);
     }
+    if (!includePendingText) {
+        m_renderCache = result;
+        m_renderCacheValid = true;
+    }
     return result;
+}
+
+void AnnotationCanvas::invalidateRenderCache()
+{
+    m_renderCacheValid = false;
 }
 
 QImage AnnotationCanvas::renderedImage(bool includePendingText) const
@@ -1895,6 +1902,7 @@ void AnnotationCanvas::undo()
         m_eraserRedoAvailable = true;
         m_eraserUndoAvailable = false;
         m_lastOperationWasEraser = false;
+        invalidateRenderCache();
         emit historyChanged();
         update();
         return;
@@ -1902,6 +1910,7 @@ void AnnotationCanvas::undo()
     if (m_shapes.isEmpty())
         return;
     m_redoShapes.append(m_shapes.takeLast());
+    invalidateRenderCache();
     emit historyChanged();
     update();
 }
@@ -1915,6 +1924,7 @@ void AnnotationCanvas::redo()
         m_eraserUndoAvailable = true;
         m_eraserRedoAvailable = false;
         m_lastOperationWasEraser = true;
+        invalidateRenderCache();
         emit historyChanged();
         update();
         return;
@@ -1922,6 +1932,7 @@ void AnnotationCanvas::redo()
     if (m_redoShapes.isEmpty())
         return;
     m_shapes.append(m_redoShapes.takeLast());
+    invalidateRenderCache();
     emit historyChanged();
     update();
 }
@@ -1934,6 +1945,7 @@ void AnnotationCanvas::clearAnnotations()
     invalidateEraserHistory();
     m_redoShapes += m_shapes;
     m_shapes.clear();
+    invalidateRenderCache();
     emit historyChanged();
     update();
 }

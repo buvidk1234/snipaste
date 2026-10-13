@@ -17,6 +17,36 @@
 
 namespace snipaste::ui {
 
+namespace {
+
+quint64 imageFingerprint(const QImage &image)
+{
+    if (image.isNull())
+        return 0;
+    // FNV-1a keeps only a 64-bit signature instead of retaining the entire
+    // captured image solely to recognize the next paste.  Hash rows directly
+    // so the comparison does not allocate another image-sized QByteArray.
+    quint64 hash = 1469598103934665603ULL;
+    const auto mix = [&hash](quint64 value) {
+        hash ^= value;
+        hash *= 1099511628211ULL;
+    };
+    mix(static_cast<quint64>(image.width()));
+    mix(static_cast<quint64>(image.height()));
+    // QClipboard may hand the same pixels back in a different QImage format
+    // (for example RGB32 instead of ARGB32_Premultiplied).  Hash the logical
+    // QRgb value returned by QImage::pixel(), rather than the storage bytes,
+    // so capture-position detection survives that conversion without keeping
+    // a second, canonical full-size image resident.
+    for (int y = 0; y < image.height(); ++y) {
+        for (int x = 0; x < image.width(); ++x)
+            mix(static_cast<quint64>(image.pixel(x, y)));
+    }
+    return hash;
+}
+
+} // namespace
+
 PasteManager::PasteManager(QObject *parent)
     : QObject(parent)
 {
@@ -61,11 +91,17 @@ PasteWindow *PasteManager::createPaste(const QImage &image)
     connectWindow(window);
     QImage pixels = image;
     pixels.setDevicePixelRatio(1);
-    const bool fromCapture = m_captureRegion.isValid() && pixels == m_captureImage;
-    if (fromCapture)
+    // Keep the last capture region available for direct createPaste() calls;
+    // the awaiting flag only controls clipboard-priority handling below.
+    const bool fromCapture = m_captureRegion.isValid()
+        && pixels.size() == m_captureSize
+        && imageFingerprint(pixels) == m_captureFingerprint;
+    const QPoint capturePosition = m_captureRegion.topLeft();
+    if (fromCapture) {
         m_captureAwaitingPaste = false;
+    }
     if (fromCapture && m_useCapturePosition)
-        window->showAtPosition(m_captureRegion.topLeft());
+        window->showAtPosition(capturePosition);
     else
         window->showAtCursor();
     return window;
@@ -81,8 +117,10 @@ PasteWindow *PasteManager::createPasteAtPosition(const QImage &image, const QPoi
 
 void PasteManager::rememberCapture(const QImage &image, const QRect &globalRegion)
 {
-    m_captureImage = image;
-    m_captureImage.setDevicePixelRatio(1);
+    QImage pixels = image;
+    pixels.setDevicePixelRatio(1);
+    m_captureFingerprint = imageFingerprint(pixels);
+    m_captureSize = pixels.size();
     m_captureRegion = globalRegion;
     m_captureAwaitingPaste = !image.isNull() && globalRegion.isValid();
 }
@@ -310,16 +348,25 @@ PasteWindow *PasteManager::pasteClipboard(const QImage &image)
     prune();
     QImage pixels = image;
     pixels.setDevicePixelRatio(1);
+    const quint64 fingerprint = imageFingerprint(pixels);
     // A new capture is a new paste even if its pixels happen to equal an older
     // closed pin (for example, two identical icons at different positions).
-    if (m_captureAwaitingPaste && pixels == m_captureImage) {
-        m_lastClipboardImage = pixels;
+    if (m_captureAwaitingPaste && m_captureRegion.isValid()
+        && pixels.size() == m_captureSize
+        && fingerprint == m_captureFingerprint) {
+        m_lastClipboardFingerprint = fingerprint;
+        m_lastClipboardSize = pixels.size();
         return createPaste(image);
     }
-    if (!pixels.isNull() && pixels != m_lastClipboardImage) {
-        m_lastClipboardImage = pixels;
-        // A freshly captured/copied image takes precedence over older closed
-        // pins. If it is itself a closed pin, recover that same window.
+    if (!pixels.isNull()) {
+        const bool repeated = fingerprint == m_lastClipboardFingerprint
+            && pixels.size() == m_lastClipboardSize;
+        if (!repeated) {
+            m_lastClipboardFingerprint = fingerprint;
+            m_lastClipboardSize = pixels.size();
+        } else if (!m_closed.isEmpty()) {
+            return restoreClosedAt(m_closed.size() - 1);
+        }
         for (qsizetype index = m_closed.size() - 1; index >= 0; --index) {
             QImage source = m_closed.at(index)->sourceImage();
             source.setDevicePixelRatio(1);

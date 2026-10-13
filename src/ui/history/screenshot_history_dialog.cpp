@@ -96,9 +96,8 @@ void ScreenshotHistoryDialog::refresh()
 {
     const int previousRow = m_list->currentRow();
     m_list->clear();
-    const auto &images = m_history.images();
-    for (int index = 0; index < images.size(); ++index) {
-        const QImage &image = images.at(index);
+    for (int index = 0; index < m_history.size(); ++index) {
+        const QImage image = m_history.imageAt(index);
         auto *item = new QListWidgetItem(QIcon(QPixmap::fromImage(image).scaled(
                                                   128,
                                                   96,
@@ -121,9 +120,9 @@ QImage ScreenshotHistoryDialog::selectedImage() const
     if (!item)
         return {};
     const int index = item->data(Qt::UserRole).toInt();
-    if (index < 0 || index >= m_history.images().size())
+    if (index < 0 || index >= m_history.size())
         return {};
-    return m_history.images().at(index);
+    return m_history.imageAt(index);
 }
 
 void ScreenshotHistoryDialog::updatePreview()

@@ -168,6 +168,7 @@ private:
                                     const QPointF &from,
                                     const QPointF &to) const;
     void invalidateEraserHistory();
+    void invalidateRenderCache();
 
     QImage m_image;
     QSizeF m_logicalImageSize;
@@ -182,6 +183,11 @@ private:
     bool m_eraserRedoAvailable = false;
     bool m_lastOperationWasEraser = false;
     QVector<Shape> m_shapeClipboard;
+    // The committed annotation layer is independent from the in-progress
+    // preview.  Keep one rasterized copy so pointer moves do not redraw every
+    // existing shape (effects can be particularly expensive).
+    mutable QImage m_renderCache;
+    mutable bool m_renderCacheValid = false;
     Tool m_tool = Tool::Rectangle;
     QHash<int, ToolStyle> m_toolStyles;
     QPointF m_start;

@@ -47,7 +47,9 @@ public:
     void setSelectionHistory(const QList<QRect> &regions);
     void setCaptureHistory(const QList<QImage> &images,
                            const QList<QRect> &regions = {},
-                           const QList<QImage> &backgrounds = {});
+                           const QList<QImage> &backgrounds = {},
+                           std::function<QImage(int)> backgroundLoader = {},
+                           std::function<QImage(int)> imageLoader = {});
     void setBackgroundProvider(std::function<QImage()> provider);
     void setHoldAfterCapture(bool enabled) { m_holdAfterCapture = enabled; }
     void setKeepAspectRatio(bool enabled) { m_keepAspectRatio = enabled; }
@@ -128,6 +130,10 @@ private:
     void drawMagnifier(QPainter &painter) const;
     void drawMagnifierGuides(QPainter &painter) const;
     void drawShortcutHints(QPainter &painter) const;
+    // Release the full-screen capture as soon as the capture session ends.
+    // WA_DeleteOnClose is asynchronous, and the image can otherwise remain
+    // resident while a popup or a nested event loop is finishing.
+    void releaseCaptureResources();
     void updateHoverTarget();
     void updateDragSelection(QPoint position, Qt::KeyboardModifiers modifiers);
     QPoint sampledPixel() const;
@@ -154,6 +160,8 @@ private:
     QList<QImage> m_captureHistory;
     QList<QImage> m_captureHistoryBackgrounds;
     QList<QRect> m_captureHistoryRegions;
+    std::function<QImage(int)> m_captureHistoryBackgroundLoader;
+    std::function<QImage(int)> m_captureHistoryImageLoader;
     int m_historyIndex = -1;
     QRect m_liveSelection;
     std::function<QImage()> m_backgroundProvider;

@@ -1,5 +1,6 @@
 #include "app/logging.h"
 #include "core/command/command_registry.h"
+#include "core/command/argument_parser.h"
 #include "core/config/config_store.h"
 #include "core/control/hot_corner_state.h"
 #include "platform/keyboard.h"
@@ -80,6 +81,13 @@
 #endif
 
 namespace {
+
+using snipaste::core::expandOutputFilePattern;
+using snipaste::core::normalizeMultiValueOptions;
+using snipaste::core::parsePointSpec;
+using snipaste::core::parseRectSpec;
+using snipaste::core::parseSizeSpec;
+using snipaste::core::splitOutputSpec;
 
 struct HotkeySpec {
     unsigned int modifiers = 0;
@@ -634,19 +642,6 @@ QColor colorAtCursor()
     return image.pixelColor(pixel);
 }
 
-QString expandOutputFilePattern(const QString &pattern, const QDateTime &dateTime)
-{
-    QString expanded = pattern;
-    QRegularExpression token(QStringLiteral("\\$([^$]+)\\$"));
-    QRegularExpressionMatch match = token.match(expanded);
-    while (match.hasMatch()) {
-        expanded.replace(match.capturedStart(), match.capturedLength(),
-                         dateTime.toString(match.captured(1)));
-        match = token.match(expanded);
-    }
-    return expanded;
-}
-
 qreal configuredPasteOpacity(const snipaste::core::ConfigStore &config)
 {
     // Older development builds wrote the value as a normalized fraction
@@ -658,13 +653,16 @@ qreal configuredPasteOpacity(const snipaste::core::ConfigStore &config)
     return qBound<qreal>(0.1, qreal(normalized), 1.0);
 }
 
-void saveHistorySnapshotAsync(const snipaste::core::ScreenshotHistory &history,
+void trimIdleProcessMemory();
+
+void saveHistorySnapshotAsync(snipaste::core::ScreenshotHistory &history,
                               const QString &directory)
 {
     // ScreenshotHistory is updated only on the GUI thread.  Copy its
     // implicitly-shared image lists before dispatching so the disk writer
     // never reads a live QList while a subsequent capture is being added.
     const snipaste::core::ScreenshotHistory snapshot = history;
+    const quint64 snapshotRevision = history.revision();
     static QMutex generationMutex;
     static QMutex saveMutex;
     static quint64 latestGeneration = 0;
@@ -674,7 +672,7 @@ void saveHistorySnapshotAsync(const snipaste::core::ScreenshotHistory &history,
         generation = ++latestGeneration;
     }
 
-    QtConcurrent::run([snapshot, directory, generation] {
+    QtConcurrent::run([snapshot, directory, generation, snapshotRevision, historyPtr = &history] {
         QMutexLocker saveLocker(&saveMutex);
         {
             QMutexLocker generationLocker(&generationMutex);
@@ -682,89 +680,23 @@ void saveHistorySnapshotAsync(const snipaste::core::ScreenshotHistory &history,
                 return;
         }
         snapshot.saveToDirectory(directory);
+        // Rebase only after the write that owns this generation completed.
+        // A newer capture may have prepended an item while the worker was
+        // writing; the revision check prevents its paths from being changed
+        // to filenames belonging to the older snapshot.
+        QMetaObject::invokeMethod(QCoreApplication::instance(),
+                                  [historyPtr, directory, generation, snapshotRevision] {
+                                      QMutexLocker generationLocker(&generationMutex);
+                                      if (generation == latestGeneration
+                                          && historyPtr->revision() == snapshotRevision) {
+                                          historyPtr->rebaseBackgroundPaths(directory);
+                                          historyPtr->releaseDecodedImages();
+                                          historyPtr->releaseDecodedBackgrounds();
+                                          trimIdleProcessMemory();
+                                      }
+                                  },
+                                  Qt::QueuedConnection);
     });
-}
-
-QList<int> parseIntegerList(QString value)
-{
-    value.replace(QChar(';'), QChar(','));
-    value.replace(QChar('x'), QChar(','));
-    value.replace(QChar('X'), QChar(','));
-    const QStringList parts = value.split(QRegularExpression(QStringLiteral("[, \\t]+")), Qt::SkipEmptyParts);
-    QList<int> result;
-    for (const QString &part : parts) {
-        bool ok = false;
-        const int number = part.toInt(&ok);
-        if (!ok)
-            return {};
-        result.append(number);
-    }
-    return result;
-}
-
-QRect parseRectSpec(const QString &value)
-{
-    const QList<int> numbers = parseIntegerList(value);
-    return numbers.size() == 4 ? QRect(numbers.at(0), numbers.at(1), numbers.at(2), numbers.at(3)) : QRect();
-}
-
-QSize parseSizeSpec(const QString &value)
-{
-    const QList<int> numbers = parseIntegerList(value);
-    return numbers.size() == 2 ? QSize(numbers.at(0), numbers.at(1)) : QSize();
-}
-
-QPoint parsePointSpec(const QString &value)
-{
-    const QList<int> numbers = parseIntegerList(value);
-    return numbers.size() == 2 ? QPoint(numbers.at(0), numbers.at(1)) : QPoint();
-}
-
-QStringList normalizeMultiValueOptions(QStringList arguments)
-{
-    const auto numeric = [](const QString &value) {
-        bool ok = false;
-        value.toInt(&ok);
-        return ok;
-    };
-    const auto joinValues = [&arguments, &numeric](const QString &option, int count) {
-        for (int index = 1; index < arguments.size(); ++index) {
-            if (arguments.at(index) != option)
-                continue;
-            if (index + count >= arguments.size())
-                continue;
-            bool valid = true;
-            QStringList values;
-            for (int offset = 1; offset <= count; ++offset) {
-                const QString value = arguments.at(index + offset);
-                if (value.startsWith('-') && !numeric(value)) {
-                    valid = false;
-                    break;
-                }
-                values.append(value);
-            }
-            if (!valid)
-                continue;
-            arguments[index] = option + QStringLiteral("=") + values.join(QChar(','));
-            arguments.erase(arguments.begin() + index + 1,
-                            arguments.begin() + index + 1 + count);
-            --index;
-        }
-    };
-    joinValues(QStringLiteral("--area"), 4);
-    joinValues(QStringLiteral("--size"), 2);
-    joinValues(QStringLiteral("--pos"), 2);
-    for (int index = 1; index < arguments.size(); ++index) {
-        if (arguments.at(index) == QStringLiteral("--block")
-            && (index + 1 >= arguments.size() || arguments.at(index + 1).startsWith('-')))
-            arguments[index] = QStringLiteral("--block=");
-    }
-    return arguments;
-}
-
-QStringList splitOutputSpec(const QString &spec)
-{
-    return spec.split(QChar(';'), Qt::SkipEmptyParts);
 }
 
 QString outputFilePath(const QString &value, const snipaste::core::ConfigStore &config)
@@ -780,6 +712,17 @@ QString outputFilePath(const QString &value, const snipaste::core::ConfigStore &
         path = QDir(directory).filePath(path);
     }
     return QDir::cleanPath(path);
+}
+
+void trimIdleProcessMemory()
+{
+#ifdef Q_OS_WIN
+    // Qt has already released the screenshot/overlay objects at this point.
+    // Ask Windows to evict those now-unused pages so the idle Working Set
+    // reflects the release instead of waiting for system memory pressure.
+    SetProcessWorkingSetSize(GetCurrentProcess(), static_cast<SIZE_T>(-1),
+                             static_cast<SIZE_T>(-1));
+#endif
 }
 
 } // namespace
@@ -987,7 +930,17 @@ int main(int argc, char *argv[])
         historyPath = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
                       + QStringLiteral("/history");
     }
-    history.loadFromDirectory(historyPath);
+    // Loading every historical screenshot at startup keeps up to hundreds of
+    // megabytes of decoded pixels resident even though the tray is idle.  The
+    // history is populated on first use instead (startSnip/history.open or a
+    // direct screenshot command).
+    bool historyLoaded = false;
+    const auto ensureHistoryLoaded = [&history, &historyPath, &historyLoaded] {
+        if (historyLoaded)
+            return;
+        history.loadFromDirectory(historyPath);
+        historyLoaded = true;
+    };
     snipaste::ui::PasteManager pasteManager;
     const auto configuredPasteMouseActions = [&config] {
         QStringList actions;
@@ -1033,8 +986,10 @@ int main(int argc, char *argv[])
     for (const QVariant &region : config.value(QStringLiteral("capture/recentRegions")).toList())
         if (region.toRect().isValid()) recentSelections.append(region.toRect());
     if (recentSelections.isEmpty() && lastSelection.isValid()) recentSelections.append(lastSelection);
-    const auto recordScreenshot = [&history, &historyPath](const QImage &image,
-                                                            const QImage &background = {}) {
+    const auto recordScreenshot = [&history, &historyPath, &ensureHistoryLoaded](
+                                      const QImage &image,
+                                      const QImage &background = {}) {
+        ensureHistoryLoaded();
         history.add(image, background);
         saveHistorySnapshotAsync(history, historyPath);
     };
@@ -1175,9 +1130,11 @@ int main(int argc, char *argv[])
             if (isExec(raw.trimmed()))
                 runOutput(raw.trimmed());
     };
-    const auto startSnip = [&activeOverlay,
+    const auto startSnip = [&app,
+                            &activeOverlay,
                             &history,
                             &historyPath,
+                            ensureHistoryLoaded,
                             &lastSelection,
                             &recentSelections,
                             &config,
@@ -1194,6 +1151,7 @@ int main(int argc, char *argv[])
             activeOverlay->activateWindow();
             return;
         }
+        ensureHistoryLoaded();
 #if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
         if (!ensureMacScreenCaptureAccess(QStringLiteral("截图")))
             return;
@@ -1222,6 +1180,9 @@ int main(int argc, char *argv[])
                                                                   false)
                                                          .toBool(),
                                                      initialSelection);
+        QObject::connect(activeOverlay, &QObject::destroyed, &app, [] {
+            QTimer::singleShot(250, qApp, [] { trimIdleProcessMemory(); });
+        });
         activeOverlay->setFixedSelectionSize(fixedSize);
         activeOverlay->setHoldAfterCapture(hold);
         activeOverlay->setKeepAspectRatio(keepAspect);
@@ -1280,7 +1241,10 @@ int main(int argc, char *argv[])
         for (const QRect &region : recentSelections)
             localRegions.append(region.translated(-screen->geometry().topLeft()));
         activeOverlay->setSelectionHistory(localRegions);
-        activeOverlay->setCaptureHistory(history.images(), localRegions, history.backgrounds());
+        activeOverlay->setCaptureHistory(
+            history.images(), localRegions, history.backgrounds(),
+            [&history](int index) { return history.backgroundAt(index); },
+            [&history](int index) { return history.imageAt(index); });
         QObject::connect(activeOverlay,
                          &snipaste::ui::SnipOverlay::selectionCaptured,
                          [&lastSelection, &recentSelections, &config, maxHistoryRegions](const QRect &globalRect) {
@@ -1564,7 +1528,8 @@ int main(int argc, char *argv[])
             pasteManager.createPaste(image);
         },
     });
-    const auto startWindowCapture = [&activeWindowOverlay,
+    const auto startWindowCapture = [&app,
+                                     &activeWindowOverlay,
                                      &recordScreenshot,
                                      &autoSaveScreenshot,
                                      &outputCapture](bool elementMode, QString outputSpec = {},
@@ -1584,6 +1549,9 @@ int main(int argc, char *argv[])
             return;
 #endif
         activeWindowOverlay = new snipaste::ui::WindowCaptureOverlay(screen, elementMode);
+        QObject::connect(activeWindowOverlay, &QObject::destroyed, &app, [] {
+            QTimer::singleShot(250, qApp, [] { trimIdleProcessMemory(); });
+        });
         QObject::connect(activeWindowOverlay,
                          &snipaste::ui::WindowCaptureOverlay::screenshotCaptured,
                          [recordScreenshot, autoSaveScreenshot, outputCapture,
@@ -1622,6 +1590,7 @@ int main(int argc, char *argv[])
          &history,
          &historyPath,
          &pasteManager,
+         recordScreenshot,
          autoSaveScreenshot] {
             QMenu menu;
             QAction *regionAction = menu.addAction(QStringLiteral("当前屏幕区域"));
@@ -1673,8 +1642,7 @@ int main(int argc, char *argv[])
                 QImage image = screen->grabWindow(0).toImage();
                 image.setDevicePixelRatio(1.0);
                 pasteManager.rememberCapture(image, screen->geometry());
-                history.add(image, image);
-                saveHistorySnapshotAsync(history, historyPath);
+                recordScreenshot(image, image);
                 autoSaveScreenshot(image);
                 QApplication::clipboard()->setImage(image);
                 pasteManager.createPaste(image);
@@ -2012,7 +1980,8 @@ int main(int argc, char *argv[])
     commands.registerCommand({
         QStringLiteral("history.open"),
         QStringLiteral("打开截屏历史"),
-        [&history, &historyPath, &pasteManager] {
+        [&history, &historyPath, &pasteManager, ensureHistoryLoaded] {
+            ensureHistoryLoaded();
             snipaste::ui::ScreenshotHistoryDialog dialog(history);
             QObject::connect(&dialog,
                              &snipaste::ui::ScreenshotHistoryDialog::copyRequested,

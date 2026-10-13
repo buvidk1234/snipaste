@@ -437,11 +437,15 @@ void SnipOverlay::toggleCapturedCursor()
 
 void SnipOverlay::setCaptureHistory(const QList<QImage> &images,
                                     const QList<QRect> &regions,
-                                    const QList<QImage> &backgrounds)
+                                    const QList<QImage> &backgrounds,
+                                    std::function<QImage(int)> backgroundLoader,
+                                    std::function<QImage(int)> imageLoader)
 {
     m_captureHistory = images;
     m_captureHistoryRegions = regions;
     m_captureHistoryBackgrounds = backgrounds;
+    m_captureHistoryBackgroundLoader = std::move(backgroundLoader);
+    m_captureHistoryImageLoader = std::move(imageLoader);
 }
 
 void SnipOverlay::navigateHistory(int direction)
@@ -468,14 +472,34 @@ void SnipOverlay::navigateHistory(int direction)
     if (next == -1) {
         m_selection = m_liveSelection;
     } else {
-        if (next < m_captureHistoryBackgrounds.size()
-            && !m_captureHistoryBackgrounds.at(next).isNull()) {
-            QImage historicalBackground = m_captureHistoryBackgrounds.at(next);
+        QImage historicalBackground;
+        if (next < m_captureHistoryBackgrounds.size())
+            historicalBackground = m_captureHistoryBackgrounds.at(next);
+        if (historicalBackground.isNull() && m_captureHistoryBackgroundLoader)
+            historicalBackground = m_captureHistoryBackgroundLoader(next);
+        if (!historicalBackground.isNull()) {
             historicalBackground.setDevicePixelRatio(1);
             if (historicalBackground.size() == m_liveBackground.size())
                 m_background = std::move(historicalBackground);
         }
-        QImage image = m_captureHistory.at(next); image.setDevicePixelRatio(1);
+        QImage image = m_captureHistory.at(next);
+        if (image.isNull() && m_captureHistoryImageLoader)
+            image = m_captureHistoryImageLoader(next);
+        if (image.isNull()) {
+            m_historyIndex = -1;
+            m_selectionImageOverride = {};
+            m_background = m_liveBackground;
+            m_cleanBackground = m_background;
+            m_selection = m_liveSelection;
+            if (!m_selection.isEmpty())
+                confirmSelection();
+            else
+                updateHoverTarget();
+            updateToolbarGeometry();
+            update();
+            return;
+        }
+        image.setDevicePixelRatio(1);
         m_selectionImageOverride = image;
         QRect restored;
         if (next < m_captureHistoryRegions.size())

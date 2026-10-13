@@ -92,9 +92,14 @@ private:
     int m_activeGroup = 0;
     QList<QPointer<PasteWindow>> m_selected;
     QList<QPointer<PasteWindow>> m_closed;
-    QImage m_lastClipboardImage;
-    QImage m_captureImage;
+    // Keep only a signature of the last clipboard image.  The full image is
+    // already owned by the active/closed pin and need not stay resident in
+    // the manager just to detect a repeated paste.
+    quint64 m_lastClipboardFingerprint = 0;
+    QSize m_lastClipboardSize;
     QRect m_captureRegion;
+    quint64 m_captureFingerprint = 0;
+    QSize m_captureSize;
     bool m_captureAwaitingPaste = false;
     bool m_useCapturePosition = true;
     qreal m_defaultOpacity = 1.0;

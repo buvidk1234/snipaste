@@ -228,7 +228,10 @@ void SnipOverlay::paintEvent(QPaintEvent *)
     painter.setRenderHint(QPainter::Antialiasing, false);
     QImage display = m_background;
     if (m_canvas) {
-        const QImage annotated = m_canvas->fullRenderedImage();
+        // The canvas paints the transient text editor/brush preview itself.
+        // The overlay only needs the committed layer here, which is cached by
+        // AnnotationCanvas between pointer moves.
+        const QImage annotated = m_canvas->fullRenderedImage(false);
         if (annotated.size() == m_background.size())
             display = annotated;
     }
@@ -840,6 +843,10 @@ void SnipOverlay::closeEvent(QCloseEvent *event)
     if (m_toolbar)
         m_toolbar->hide();
     if (m_sizeToolbar) m_sizeToolbar->hide();
+    // The capture result has already been delivered synchronously above.
+    // Drop the desktop-sized images before QWidget's deferred destruction so
+    // a finished screenshot does not keep the entire monitor resident.
+    releaseCaptureResources();
     QWidget::closeEvent(event);
     // Keep destruction deterministic for callers that close the overlay from
     // a toolbar action while an editor or popup still owns focus.  Qt's
@@ -849,6 +856,29 @@ void SnipOverlay::closeEvent(QCloseEvent *event)
     if (event->isAccepted()) {
         deleteLater();
     }
+}
+
+void SnipOverlay::releaseCaptureResources()
+{
+    // Delete the annotation canvas first: it owns the converted render cache
+    // and may share the original full-screen image with this overlay.
+    delete m_canvas;
+    m_canvas = nullptr;
+    m_selectionBorder = nullptr;
+
+    m_background = {};
+    m_cleanBackground = {};
+    m_selectionImageOverride = {};
+    m_liveBackground = {};
+    m_singleScreenBackground = {};
+    m_captureHistory.clear();
+    m_captureHistoryBackgrounds.clear();
+    m_captureHistoryRegions.clear();
+    m_captureHistoryBackgroundLoader = {};
+    m_captureHistoryImageLoader = {};
+    m_backgroundProvider = {};
+    m_singleScreenBackgroundProvider = {};
+    m_targetHierarchy.clear();
 }
 
 void SnipOverlay::updateToolbarGeometry()

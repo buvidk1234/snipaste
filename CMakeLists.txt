@@ -11,19 +11,17 @@ if(APPLE)
     # through Objective-C APIs. Keep those bridges isolated in .mm files so
     # the Windows target remains ordinary C++/Win32.
     enable_language(OBJCXX)
-    set(SNIPASTE_PLATFORM_SOURCES
+    set(SNIPASTE_NATIVE_PLATFORM_SOURCES
         src/platform/macos/global_hotkey_macos.mm
         src/platform/macos/super_capture_macos.mm
         src/platform/macos/capture_target_macos.mm
     )
-    set(SNIPASTE_CAPTURE_TARGET_SOURCE src/platform/macos/capture_target_macos.mm)
 else()
-    set(SNIPASTE_PLATFORM_SOURCES
+    set(SNIPASTE_NATIVE_PLATFORM_SOURCES
         src/platform/windows/global_hotkey.cpp
         src/platform/windows/super_capture.cpp
         src/platform/windows/capture_target.cpp
     )
-    set(SNIPASTE_CAPTURE_TARGET_SOURCE src/platform/windows/capture_target.cpp)
 endif()
 
 set(CMAKE_CXX_STANDARD 20)
@@ -36,16 +34,21 @@ set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Widgets Network Concurrent PrintSupport)
 
-set(SNIPASTE_SOURCES
-    src/app/main.cpp
-    src/app/logging.cpp
+set(SNIPASTE_CORE_SOURCES
+    src/core/command/argument_parser.cpp
     src/core/command/command_registry.cpp
     src/core/config/config_store.cpp
     src/core/history/screenshot_history.cpp
     src/core/recognition/ocr_service.cpp
     src/core/recognition/barcode_service.cpp
-    ${SNIPASTE_PLATFORM_SOURCES}
+)
+
+set(SNIPASTE_PLATFORM_SOURCES
+    ${SNIPASTE_NATIVE_PLATFORM_SOURCES}
     src/platform/windows/single_instance.cpp
+)
+
+set(SNIPASTE_UI_SOURCES
     src/ui/paste/paste_window.cpp
     src/ui/paste/paste_manager.cpp
     src/ui/annotation/annotation_dialog.cpp
@@ -64,7 +67,7 @@ set(SNIPASTE_SOURCES
 )
 
 if(APPLE)
-    list(APPEND SNIPASTE_SOURCES
+    list(APPEND SNIPASTE_PLATFORM_SOURCES
         src/platform/macos/vision_ocr.mm
         src/platform/macos/system.mm
     )
@@ -72,6 +75,7 @@ endif()
 
 set(SNIPASTE_HEADERS
     src/app/logging.h
+    src/core/command/argument_parser.h
     src/core/command/command_registry.h
     src/core/config/config_store.h
     src/core/control/hot_corner_state.h
@@ -103,51 +107,12 @@ if(APPLE)
     )
 endif()
 
-qt_add_executable(snipaste ${SNIPASTE_SOURCES} ${SNIPASTE_HEADERS})
-
-if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja")
-    # Localized /showIncludes output can disagree with Ninja's detected prefix.
-    # Keep explicit project-header dependencies so an incremental build never
-    # mixes object files compiled against different class layouts.
-    set(snipaste_header_dependencies)
-    foreach(header IN LISTS SNIPASTE_HEADERS)
-        list(APPEND snipaste_header_dependencies "${CMAKE_CURRENT_SOURCE_DIR}/${header}")
-    endforeach()
-    set_property(SOURCE ${SNIPASTE_SOURCES} tests/ui_regression_test.cpp
-        APPEND PROPERTY OBJECT_DEPENDS "${snipaste_header_dependencies}")
-endif()
-
-if(WIN32)
-    # This is a tray application. Do not create a console window when launched
-    # by double-clicking the executable in Explorer.
-    set_target_properties(snipaste PROPERTIES WIN32_EXECUTABLE TRUE)
-endif()
-
-target_include_directories(snipaste PRIVATE src)
-
-target_link_libraries(snipaste
-    PRIVATE
-        Qt6::Core
-        Qt6::Gui
-        Qt6::Widgets
-        Qt6::Network
-        Qt6::Concurrent
-        Qt6::PrintSupport
+set(SNIPASTE_APP_SOURCES
+    src/app/main.cpp
+    src/app/logging.cpp
 )
 
-if(WIN32)
-    # Windows.Media.Ocr is a WinRT API. The Windows SDK ships the C++/WinRT
-    # headers and Windows App library; using it keeps OCR available without a
-    # separate Tesseract installation on normal Windows systems.
-    file(GLOB SNIPASTE_CPPWINRT_DIRS "$ENV{WindowsSdkDir}/Include/*/cppwinrt")
-    if(SNIPASTE_CPPWINRT_DIRS)
-        list(SORT SNIPASTE_CPPWINRT_DIRS)
-        list(GET SNIPASTE_CPPWINRT_DIRS -1 SNIPASTE_CPPWINRT_DIR)
-        target_include_directories(snipaste SYSTEM PRIVATE "${SNIPASTE_CPPWINRT_DIR}")
-    endif()
-    target_link_libraries(snipaste PRIVATE user32 oleacc ole32 dwmapi uiautomationcore windowsapp)
-endif()
-
+set(SNIPASTE_MAC_FRAMEWORKS)
 if(APPLE)
     set(SNIPASTE_MAC_FRAMEWORKS
         "-framework Carbon"
@@ -158,7 +123,102 @@ if(APPLE)
         "-framework ImageIO"
         "-framework Foundation"
     )
-    target_link_libraries(snipaste PRIVATE ${SNIPASTE_MAC_FRAMEWORKS})
+endif()
+
+# Keep the build graph aligned with the source boundaries.  The old target
+# compiled every source file directly into the executable, which made an
+# unrelated UI change rebuild the whole application and hid dependencies.
+qt_add_library(snipaste_core STATIC
+    ${SNIPASTE_CORE_SOURCES}
+    src/core/command/argument_parser.h
+    src/core/command/command_registry.h
+    src/core/config/config_store.h
+    src/core/history/screenshot_history.h
+    src/core/recognition/ocr_service.h
+    src/core/recognition/barcode_service.h
+)
+target_include_directories(snipaste_core PUBLIC src)
+target_link_libraries(snipaste_core PUBLIC Qt6::Core Qt6::Gui)
+
+qt_add_library(snipaste_platform STATIC
+    ${SNIPASTE_PLATFORM_SOURCES}
+    src/platform/keyboard.h
+    src/platform/windows/global_hotkey.h
+    src/platform/windows/super_capture.h
+    src/platform/windows/capture_target.h
+    src/platform/windows/single_instance.h
+)
+target_include_directories(snipaste_platform PUBLIC src)
+target_link_libraries(snipaste_platform PUBLIC Qt6::Core Qt6::Gui Qt6::Network)
+if(WIN32)
+    target_link_libraries(snipaste_platform PUBLIC
+        user32 oleacc ole32 dwmapi uiautomationcore windowsapp)
+endif()
+if(APPLE)
+    target_link_libraries(snipaste_platform PUBLIC ${SNIPASTE_MAC_FRAMEWORKS})
+endif()
+
+qt_add_library(snipaste_ui STATIC
+    ${SNIPASTE_UI_SOURCES}
+    src/ui/paste/paste_window.h
+    src/ui/paste/paste_manager.h
+    src/ui/annotation/annotation_dialog.h
+    src/ui/history/screenshot_history_dialog.h
+    src/ui/preferences/preferences_dialog.h
+    src/ui/preferences/appearance_settings.h
+    src/ui/snip/snip_overlay.h
+    src/ui/snip/capture_icons.h
+    src/ui/snip/window_capture_overlay.h
+    src/ui/tray/tray_controller.h
+)
+target_include_directories(snipaste_ui PUBLIC src)
+target_link_libraries(snipaste_ui
+    PUBLIC
+        snipaste_core
+        snipaste_platform
+        Qt6::Widgets
+        Qt6::Network
+        Qt6::Concurrent
+        Qt6::PrintSupport
+)
+
+qt_add_executable(snipaste ${SNIPASTE_APP_SOURCES})
+
+if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja")
+    # Localized /showIncludes output can disagree with Ninja's detected prefix.
+    # Keep explicit project-header dependencies so an incremental build never
+    # mixes object files compiled against different class layouts.
+    set(snipaste_header_dependencies)
+    foreach(header IN LISTS SNIPASTE_HEADERS)
+        list(APPEND snipaste_header_dependencies "${CMAKE_CURRENT_SOURCE_DIR}/${header}")
+    endforeach()
+    set_property(SOURCE ${SNIPASTE_APP_SOURCES} ${SNIPASTE_CORE_SOURCES}
+        ${SNIPASTE_PLATFORM_SOURCES} ${SNIPASTE_UI_SOURCES} tests/ui_regression_test.cpp
+        APPEND PROPERTY OBJECT_DEPENDS "${snipaste_header_dependencies}")
+endif()
+
+if(WIN32)
+    # This is a tray application. Do not create a console window when launched
+    # by double-clicking the executable in Explorer.
+    set_target_properties(snipaste PROPERTIES WIN32_EXECUTABLE TRUE)
+endif()
+
+target_include_directories(snipaste PRIVATE src)
+target_link_libraries(snipaste PRIVATE snipaste_ui)
+
+if(WIN32)
+    # Windows.Media.Ocr is a WinRT API. The Windows SDK ships the C++/WinRT
+    # headers and Windows App library; using it keeps OCR available without a
+    # separate Tesseract installation on normal Windows systems.
+    file(GLOB SNIPASTE_CPPWINRT_DIRS "$ENV{WindowsSdkDir}/Include/*/cppwinrt")
+    if(SNIPASTE_CPPWINRT_DIRS)
+        list(SORT SNIPASTE_CPPWINRT_DIRS)
+        list(GET SNIPASTE_CPPWINRT_DIRS -1 SNIPASTE_CPPWINRT_DIR)
+        target_include_directories(snipaste_core SYSTEM PRIVATE "${SNIPASTE_CPPWINRT_DIR}")
+    endif()
+endif()
+
+if(APPLE)
     configure_file(
         "${CMAKE_CURRENT_SOURCE_DIR}/resources/macos/Info.plist.in"
         "${CMAKE_CURRENT_BINARY_DIR}/snipaste-info.plist"
@@ -180,13 +240,20 @@ target_compile_definitions(snipaste
         $<$<PLATFORM_ID:Windows>:SNIPASTE_PLATFORM_WINDOWS=1>
 )
 
-if(MSVC)
-    # UI strings are UTF-8 source text. Keep MSVC from decoding them with
-    # the machine's active code page and producing mojibake at runtime.
-    target_compile_options(snipaste PRIVATE /W4 /permissive- /utf-8)
-else()
-    target_compile_options(snipaste PRIVATE -Wall -Wextra -Wpedantic)
-endif()
+function(snipaste_apply_compile_options target)
+    if(MSVC)
+        # UI strings are UTF-8 source text. Keep MSVC from decoding them with
+        # the machine's active code page and producing mojibake at runtime.
+        target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8)
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+endfunction()
+
+snipaste_apply_compile_options(snipaste_core)
+snipaste_apply_compile_options(snipaste_platform)
+snipaste_apply_compile_options(snipaste_ui)
+snipaste_apply_compile_options(snipaste)
 
 install(TARGETS snipaste
     RUNTIME DESTINATION bin
@@ -197,42 +264,26 @@ option(SNIPASTE_BUILD_TESTS "Build UI regression tests" OFF)
 if(SNIPASTE_BUILD_TESTS)
     enable_testing()
     find_package(Qt6 REQUIRED COMPONENTS Test)
-    set(SNIPASTE_TEST_PLATFORM_SOURCES ${SNIPASTE_CAPTURE_TARGET_SOURCE})
-    if(APPLE)
-        list(APPEND SNIPASTE_TEST_PLATFORM_SOURCES src/platform/macos/system.mm)
-    endif()
+
+    qt_add_executable(snipaste_core_tests tests/core_unit_test.cpp)
+    target_include_directories(snipaste_core_tests PRIVATE src)
+    target_link_libraries(snipaste_core_tests PRIVATE snipaste_core Qt6::Test)
+    snipaste_apply_compile_options(snipaste_core_tests)
+    add_test(NAME core_unit COMMAND snipaste_core_tests)
+    set_tests_properties(core_unit PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+
     qt_add_executable(snipaste_ui_tests
         tests/ui_regression_test.cpp
-        src/core/command/command_registry.cpp
-        src/core/config/config_store.cpp
-        ${SNIPASTE_TEST_PLATFORM_SOURCES}
-        src/ui/preferences/preferences_dialog_rich.cpp
-        src/ui/preferences/preferences_appearance.cpp
-        src/ui/preferences/appearance_settings.cpp
-        src/ui/preferences/preferences_capture.cpp
-        src/ui/annotation/annotation_dialog.cpp
-        src/ui/paste/paste_window.cpp
-        src/ui/paste/paste_manager.cpp
-        src/ui/snip/snip_overlay.cpp
-        src/ui/snip/snip_toolbar.cpp
-        src/ui/snip/snip_controls.cpp
-        src/ui/snip/snip_selection.cpp
-        src/ui/snip/capture_icons.cpp
-        src/ui/tray/tray_controller.cpp
     )
     target_include_directories(snipaste_ui_tests PRIVATE src)
-    target_link_libraries(snipaste_ui_tests PRIVATE Qt6::Widgets Qt6::Network Qt6::Test)
-    if(APPLE)
-        target_link_libraries(snipaste_ui_tests PRIVATE ${SNIPASTE_MAC_FRAMEWORKS})
-    endif()
+    target_link_libraries(snipaste_ui_tests PRIVATE snipaste_ui Qt6::Test)
     if(WIN32)
-        target_link_libraries(snipaste_ui_tests PRIVATE user32 oleacc ole32 dwmapi uiautomationcore windowsapp)
-        add_executable(snipaste_capture_probe tests/capture_target_probe.cpp
-            src/platform/windows/capture_target.cpp)
+        add_executable(snipaste_capture_probe tests/capture_target_probe.cpp)
         target_include_directories(snipaste_capture_probe PRIVATE src)
-        target_link_libraries(snipaste_capture_probe PRIVATE Qt6::Gui user32 oleacc ole32 dwmapi uiautomationcore)
+        target_link_libraries(snipaste_capture_probe PRIVATE snipaste_platform)
         if(MSVC)
-            target_compile_options(snipaste_capture_probe PRIVATE /utf-8 /W4 /permissive-)
+            snipaste_apply_compile_options(snipaste_capture_probe)
             # The probe calls the public capture-target API directly.  Keep
             # its object file tied to the same project headers as the main
             # targets so removed/changed overloads cannot leave a stale
