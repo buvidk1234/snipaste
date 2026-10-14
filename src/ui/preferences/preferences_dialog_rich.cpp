@@ -1556,6 +1556,21 @@ PreferencesDialog::PreferencesDialog(core::ConfigStore &config, QWidget *parent)
     refreshProxyState();
     updateLayout->addWidget(proxyGroup);
 
+    const auto saveUpdateSettings = [this, includeBeta, checkAtStartup, periodicCheck, periodicHours,
+                                    proxyType, proxyServer, proxyPort, proxyAuth, proxyUsername, proxyPassword] {
+        m_config.setValue(QStringLiteral("update/includeBeta"), includeBeta->isChecked());
+        m_config.setValue(QStringLiteral("update/checkAtStartup"), checkAtStartup->isChecked());
+        m_config.setValue(QStringLiteral("update/checkIntervalEnabled"), periodicCheck->isChecked());
+        m_config.setValue(QStringLiteral("update/checkIntervalHours"), periodicHours->value());
+        m_config.setValue(QStringLiteral("update/proxyType"), proxyType->currentText());
+        m_config.setValue(QStringLiteral("update/proxyServer"), proxyServer->text());
+        m_config.setValue(QStringLiteral("update/proxyPort"), proxyPort->value());
+        m_config.setValue(QStringLiteral("update/proxyRequiresAuth"), proxyAuth->isChecked());
+        m_config.setValue(QStringLiteral("update/proxyUsername"), proxyUsername->text());
+        m_config.setValue(QStringLiteral("update/proxyPassword"), proxyPassword->text());
+        m_config.setValue(QStringLiteral("general/autoUpdate"), checkAtStartup->isChecked());
+    };
+
     auto *updateButtons = new QHBoxLayout;
     auto *checkNow = new QPushButton(QStringLiteral("检查更新"), updatePage);
     checkNow->setObjectName(QStringLiteral("updateCheckNow"));
@@ -1565,9 +1580,11 @@ PreferencesDialog::PreferencesDialog(core::ConfigStore &config, QWidget *parent)
     updateButtons->addStretch();
     updateButtons->addWidget(updateRestore);
     updateLayout->addLayout(updateButtons);
-    QObject::connect(checkNow, &QPushButton::clicked, this, [this] {
-        QMessageBox::information(this, QStringLiteral("检查更新"),
-                                 QStringLiteral("当前已是最新版本。"));
+    QObject::connect(checkNow, &QPushButton::clicked, this, [this, saveUpdateSettings] {
+        saveUpdateSettings();
+        m_config.save();
+        if (m_updateCheckHandler)
+            m_updateCheckHandler(this);
     });
     QObject::connect(updateRestore, &QPushButton::clicked, this,
                      [includeBeta, checkAtStartup, periodicCheck, periodicHours, proxyType,
@@ -1585,21 +1602,7 @@ PreferencesDialog::PreferencesDialog(core::ConfigStore &config, QWidget *parent)
         refreshProxyState();
     });
     tabs->addTab(updatePage, QStringLiteral("更新"));
-    m_pageSavers.append([this, includeBeta, checkAtStartup, periodicCheck, periodicHours,
-                         proxyType, proxyServer, proxyPort, proxyAuth, proxyUsername, proxyPassword] {
-        m_config.setValue(QStringLiteral("update/includeBeta"), includeBeta->isChecked());
-        m_config.setValue(QStringLiteral("update/checkAtStartup"), checkAtStartup->isChecked());
-        m_config.setValue(QStringLiteral("update/checkIntervalEnabled"), periodicCheck->isChecked());
-        m_config.setValue(QStringLiteral("update/checkIntervalHours"), periodicHours->value());
-        m_config.setValue(QStringLiteral("update/proxyType"), proxyType->currentText());
-        m_config.setValue(QStringLiteral("update/proxyServer"), proxyServer->text());
-        m_config.setValue(QStringLiteral("update/proxyPort"), proxyPort->value());
-        m_config.setValue(QStringLiteral("update/proxyRequiresAuth"), proxyAuth->isChecked());
-        m_config.setValue(QStringLiteral("update/proxyUsername"), proxyUsername->text());
-        m_config.setValue(QStringLiteral("update/proxyPassword"), proxyPassword->text());
-        // Compatibility with the first implementation and existing configs.
-        m_config.setValue(QStringLiteral("general/autoUpdate"), checkAtStartup->isChecked());
-    });
+    m_pageSavers.append(saveUpdateSettings);
 
     auto *aboutPage = new QWidget(tabs);
     aboutPage->setProperty("referenceHeight", 500);

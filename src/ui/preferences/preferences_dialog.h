@@ -21,6 +21,10 @@ class PreferencesDialog final : public QDialog
 {
 public:
     explicit PreferencesDialog(core::ConfigStore &config, QWidget *parent = nullptr);
+    void setUpdateCheckHandler(std::function<void(QWidget *)> handler)
+    {
+        m_updateCheckHandler = handler;
+    }
 
 protected:
     void accept() override;
@@ -32,6 +36,7 @@ private:
     QWidget *createCapturePage(QWidget *parent);
     int px(int physicalPixels) const;
     QVector<std::function<void()>> m_pageSavers;
+    std::function<void(QWidget *)> m_updateCheckHandler;
     core::ConfigStore &m_config;
     QString m_quickSaveDirectory;
     QString m_autoSaveDirectory;

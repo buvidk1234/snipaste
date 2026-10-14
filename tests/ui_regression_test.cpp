@@ -57,6 +57,7 @@ class UiRegressionTest : public QObject
 {
     Q_OBJECT
 private slots:
+    void preferencesUpdateCheckUsesCurrentSettings();
     void preferencesCloseSavesWithoutQuitting();
     void preferencesPendingCallbacksAreCancelled();
     void preferencesProfessionalReferencePages();
@@ -113,6 +114,32 @@ private slots:
     void pastePersistence();
     void independentWidthPresetsAndCornerRadius();
 };
+
+void UiRegressionTest::preferencesUpdateCheckUsesCurrentSettings()
+{
+    QTemporaryDir directory;
+    core::ConfigStore config(directory.filePath(QStringLiteral("config.ini")));
+    QVERIFY(config.load());
+    ui::PreferencesDialog dialog(config);
+    int requests = 0;
+    dialog.setUpdateCheckHandler([&](QWidget *parent) {
+        QCOMPARE(parent, &dialog);
+        QVERIFY(config.value(QStringLiteral("update/includeBeta")).toBool());
+        QCOMPARE(config.value(QStringLiteral("update/proxyServer")).toString(), QStringLiteral("127.0.0.1"));
+        QCOMPARE(config.value(QStringLiteral("update/proxyPort")).toInt(), 8080);
+        ++requests;
+    });
+    auto *beta = dialog.findChild<QCheckBox *>(QStringLiteral("updateIncludeBeta"));
+    auto *server = dialog.findChild<QLineEdit *>(QStringLiteral("updateProxyServer"));
+    auto *port = dialog.findChild<QSpinBox *>(QStringLiteral("updateProxyPort"));
+    auto *check = dialog.findChild<QPushButton *>(QStringLiteral("updateCheckNow"));
+    QVERIFY(beta && server && port && check);
+    beta->setChecked(true);
+    server->setText(QStringLiteral("127.0.0.1"));
+    port->setValue(8080);
+    check->click();
+    QCOMPARE(requests, 1);
+}
 
 void UiRegressionTest::copyAsFileModesProduceExpectedClipboardFormats()
 {

@@ -1,0 +1,133 @@
+name: Release
+
+# By default, releases are published in this repository. To keep source private
+# and publish binaries elsewhere, set the SNIPASTE_RELEASE_REPOSITORY repository
+# variable and a RELEASE_TOKEN secret with contents write access to that target.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag matching CMakeLists.txt, for example v0.1.1'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      repository: ${{ steps.version.outputs.repository }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - id: version
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          RELEASE_REPOSITORY: ${{ vars.SNIPASTE_RELEASE_REPOSITORY || github.repository }}
+        run: |
+          version="$(python scripts/release/version.py "$RELEASE_TAG")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "repository=$RELEASE_REPOSITORY" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            qt-arch: win64_msvc2022_64
+            artifact: windows-x64
+          - os: macos-26
+            qt-arch: clang_64
+            artifact: macos-universal
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: jurplel/install-qt-action@v4.4.1
+        with:
+          version: '6.12.0'
+          # aqtinstall 3.3.0 cannot read the Windows Qt 6.11+ repository layout.
+          # Pin the upstream fix so dependency installation is reproducible.
+          aqtsource: https://github.com/miurahr/aqtinstall/archive/076e1659807d0b362a3ed684d54c2e9c775eb9c7.tar.gz
+          arch: ${{ matrix.qt-arch }}
+          cache: true
+      - name: Build Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+          UPDATE_REPOSITORY: ${{ needs.version.outputs.repository }}
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $vsInstall = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsInstall) { throw 'Visual Studio with the x64 C++ toolset was not found.' }
+          $devShell = Join-Path $vsInstall 'Common7/Tools/Launch-VsDevShell.ps1'
+          & $devShell -Arch amd64 -HostArch amd64 -SkipAutomaticLocation -NoLogo
+          if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) { throw 'The MSVC developer environment could not be initialized.' }
+          cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR" -DSNIPASTE_BUILD_TESTS=ON -DSNIPASTE_RELEASE_VERSION="$env:RELEASE_VERSION" -DSNIPASTE_UPDATE_REPOSITORY="$env:UPDATE_REPOSITORY"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --build build/release --parallel 4
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ctest --test-dir build/release --output-on-failure
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ./scripts/windows/package.ps1 -BuildDirectory build/release -QtRoot $env:QT_ROOT_DIR -Version $env:RELEASE_VERSION
+      - name: Build macOS
+        if: runner.os == 'macOS'
+        env:
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+          UPDATE_REPOSITORY: ${{ needs.version.outputs.repository }}
+        run: |
+          cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" '-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64' -DCMAKE_OSX_DEPLOYMENT_TARGET=14.4 -DSNIPASTE_BUILD_TESTS=ON -DSNIPASTE_RELEASE_VERSION="$RELEASE_VERSION" -DSNIPASTE_UPDATE_REPOSITORY="$UPDATE_REPOSITORY"
+          cmake --build build/release --parallel 3
+          ctest --test-dir build/release --output-on-failure
+          bash scripts/macos/package.sh build/release "$QT_ROOT_DIR" "$RELEASE_VERSION"
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/*.zip
+            dist/*.zip.sha256
+          if-no-files-found: error
+
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v3.0.3
+        with:
+          repository: ${{ needs.version.outputs.repository }}
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: snipaste ${{ needs.version.outputs.version }}
+          prerelease: ${{ contains(needs.version.outputs.version, '-') }}
+          generate_release_notes: ${{ needs.version.outputs.repository == github.repository }}
+          body: |
+            Windows: unzip the windows-x64 package and run snipaste.exe.
+            macOS: unzip the macos-universal package and move snipaste.app to Applications.
+            Both packages include the Qt runtime and SHA-256 checksums.
+          files: |
+            dist/*.zip
+            dist/*.zip.sha256
+          fail_on_unmatched_files: true
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}

@@ -17,6 +17,7 @@
 #include "ui/paste/paste_window.h"
 #include "ui/paste/paste_manager.h"
 #include "ui/clipboard_output.h"
+#include "ui/update/update_controller.h"
 #include "ui/annotation/annotation_dialog.h"
 #include "ui/history/screenshot_history_dialog.h"
 #include "ui/preferences/preferences_dialog.h"
@@ -1000,6 +1001,7 @@ int main(int argc, char *argv[])
                                                  2000));
 
     snipaste::core::CommandRegistry commands;
+    snipaste::ui::UpdateController updates(config, &app);
     snipaste::core::ScreenshotHistory history(
         qBound(1, config.value(QStringLiteral("capture/maxHistory"), 20).toInt(), 999));
     QString historyPath = config.value(QStringLiteral("general/history_dir"),
@@ -1968,9 +1970,10 @@ int main(int argc, char *argv[])
     commands.registerCommand({
         QStringLiteral("preferences.open"),
         QStringLiteral("首选项"),
-        [&config, &history, &pasteManager, &maxHistoryRegions, &trayController,
+        [&config, &history, &pasteManager, &maxHistoryRegions, &trayController, &updates,
          applyHotkeys, configureSuperCapture, configuredPasteMouseActions] {
             snipaste::ui::PreferencesDialog dialog(config);
+            dialog.setUpdateCheckHandler([&updates](QWidget *parent) { updates.checkNow(parent); });
             if (dialog.exec() == QDialog::Accepted) {
                 snipaste::app::setLoggingLevel(
                     config.value(QStringLiteral("general/logLevel"), 1).toInt());
@@ -2354,11 +2357,7 @@ int main(int argc, char *argv[])
     commands.registerCommand({
         QStringLiteral("update.checkNow"),
         QStringLiteral("检查更新"),
-        [] {
-            QMessageBox::information(nullptr,
-                                      QStringLiteral("检查更新"),
-                                      QStringLiteral("当前已是最新版本。"));
-        },
+        [&updates] { updates.checkNow(); },
     });
     commands.registerCommand({
         QStringLiteral("app.purchase"),
@@ -3109,6 +3108,7 @@ int main(int argc, char *argv[])
         });
     }
 
+    updates.start();
     qInfo() << "snipaste started" << QCoreApplication::applicationVersion();
     return app.exec();
 }

@@ -99,6 +99,12 @@ void SuperCapture::setMouseButton(Qt::MouseButton button)
         m_button = button;
 }
 
+void SuperCapture::setBlockWindowsKeys(bool left, bool right)
+{
+    m_blockWinLeft = left;
+    m_blockWinRight = right;
+}
+
 void SuperCapture::installMonitor()
 {
     if (m_globalMonitor || m_localMonitor)

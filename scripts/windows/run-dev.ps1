@@ -82,74 +82,7 @@ if (-not (Test-Path -LiteralPath $executable)) {
 }
 
 if ($Package) {
-    $windeployqt = Join-Path $qtRoot 'bin/windeployqt.exe'
-    if (-not (Test-Path -LiteralPath $windeployqt)) {
-        throw "Qt deployment tool was not found at $windeployqt."
-    }
-
-    $cmakeText = Get-Content -LiteralPath (Join-Path $repoRoot 'CMakeLists.txt') -Raw
-    $versionMatch = [regex]::Match(
-        $cmakeText,
-        'project\(snipaste\s+VERSION\s+([0-9]+(?:\.[0-9]+)*)',
-        [Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    $version = if ($versionMatch.Success) { $versionMatch.Groups[1].Value } else { '0.0.0' }
-    $packageName = "snipaste-$version-windows-x64"
-    $distDirectory = Join-Path $repoRoot 'dist'
-    $stageDirectory = Join-Path $distDirectory $packageName
-    $archivePath = Join-Path $distDirectory "$packageName.zip"
-
-    New-Item -ItemType Directory -Force -Path $distDirectory | Out-Null
-    if (Test-Path -LiteralPath $stageDirectory) {
-        Remove-Item -LiteralPath $stageDirectory -Recurse -Force
-    }
-    if (Test-Path -LiteralPath $archivePath) {
-        Remove-Item -LiteralPath $archivePath -Force
-    }
-    New-Item -ItemType Directory -Force -Path $stageDirectory | Out-Null
-
-    $stagedExecutable = Join-Path $stageDirectory 'snipaste.exe'
-    Copy-Item -LiteralPath $executable -Destination $stagedExecutable
-
-    $deployVariant = if ($Configuration -eq 'Debug') { '--debug' } else { '--release' }
-    # Keep the Windows Widgets stack and local MSVC CRT DLLs while omitting
-    # optional software OpenGL/D3D compiler fallbacks.
-    $deployOptions = "$deployVariant --no-translations --no-opengl-sw --no-system-d3d-compiler --no-system-dxc-compiler --no-compiler-runtime"
-    Invoke-VsCommand "`"$windeployqt`" $deployOptions --dir `"$stageDirectory`" `"$stagedExecutable`""
-
-    $vsRoot = Split-Path (Split-Path (Split-Path $vsDevCmd -Parent) -Parent) -Parent
-    $redistRoot = Join-Path $vsRoot 'VC/Redist/MSVC'
-    $runtimeVersion = Get-ChildItem -LiteralPath $redistRoot -Directory |
-        Where-Object { $_.Name -match '^\d+\.' } |
-        Sort-Object Name |
-        Select-Object -Last 1
-    if (-not $runtimeVersion) {
-        throw "MSVC runtime redist directory was not found under $redistRoot."
-    }
-    $runtimeDirectory = Get-ChildItem -LiteralPath (Join-Path $runtimeVersion.FullName 'x64') -Directory |
-        Where-Object { $_.Name -like 'Microsoft.VC*.CRT' } |
-        Select-Object -First 1
-    if (-not $runtimeDirectory) {
-        throw "x64 MSVC runtime directory was not found under $runtimeVersion."
-    }
-    Get-ChildItem -LiteralPath $runtimeDirectory.FullName -File -Filter '*.dll' |
-        Copy-Item -Destination $stageDirectory
-
-    @"
-Snipaste $version for Windows x64
-
-Run snipaste.exe to start the tray application.
-Press F1 to open the screenshot overlay.
-
-This package includes the Qt runtime required by Snipaste.
-"@ | Set-Content -LiteralPath (Join-Path $stageDirectory 'README.txt') -Encoding utf8
-
-    Compress-Archive -Path (Join-Path $stageDirectory '*') -DestinationPath $archivePath -CompressionLevel Optimal
-    $archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
-    $archiveSizeMb = [math]::Round((Get-Item -LiteralPath $archivePath).Length / 1MB, 2)
-    $expandedSizeMb = [math]::Round((Get-ChildItem -LiteralPath $stageDirectory -Recurse -File | Measure-Object Length -Sum).Sum / 1MB, 2)
-    Write-Host "Package complete: $archivePath" -ForegroundColor Green
-    Write-Host "ZIP size: $archiveSizeMb MB; extracted size: $expandedSizeMb MB" -ForegroundColor DarkGray
-    Write-Host "SHA256: $archiveHash" -ForegroundColor DarkGray
+    & (Join-Path $PSScriptRoot 'package.ps1') -BuildDirectory $buildDirectory -QtRoot $qtRoot
     exit 0
 }
 

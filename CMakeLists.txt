@@ -1,10 +1,16 @@
 cmake_minimum_required(VERSION 3.28)
 
 project(snipaste
-    VERSION 0.1.0
+    VERSION 0.1.1
     DESCRIPTION "Open source screenshot, pin and annotation tool"
     LANGUAGES CXX
 )
+
+set(SNIPASTE_RELEASE_VERSION "" CACHE STRING "Release version, including an optional prerelease suffix")
+if(SNIPASTE_RELEASE_VERSION STREQUAL "")
+    set(SNIPASTE_RELEASE_VERSION "${PROJECT_VERSION}")
+endif()
+set(SNIPASTE_UPDATE_REPOSITORY "buvidk1234/snipaste" CACHE STRING "GitHub repository hosting update releases")
 
 if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja")
     # CMake can misdecode the localized MSVC /showIncludes prefix when the
@@ -40,7 +46,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Widgets Network Concurrent PrintSupport)
+find_package(Qt6 6.12 REQUIRED COMPONENTS Core Gui Widgets Network Concurrent PrintSupport)
 
 set(SNIPASTE_CORE_SOURCES
     src/core/command/argument_parser.cpp
@@ -50,6 +56,8 @@ set(SNIPASTE_CORE_SOURCES
     src/core/scroll_stitcher.cpp
     src/core/recognition/ocr_service.cpp
     src/core/recognition/barcode_service.cpp
+    src/core/update/release_info.cpp
+    src/core/update/github_update_client.cpp
 )
 
 set(SNIPASTE_PLATFORM_SOURCES
@@ -77,6 +85,8 @@ set(SNIPASTE_UI_SOURCES
     src/ui/snip/scroll_capture_preview.cpp
     src/ui/snip/snip_scroll_capture.cpp
     src/ui/tray/tray_controller.cpp
+    src/ui/update/update_controller.cpp
+    src/ui/update/update_installer.cpp
 )
 
 if(APPLE)
@@ -96,6 +106,8 @@ set(SNIPASTE_HEADERS
     src/core/scroll_stitcher.h
     src/core/recognition/ocr_service.h
     src/core/recognition/barcode_service.h
+    src/core/update/release_info.h
+    src/core/update/github_update_client.h
     src/platform/windows/global_hotkey.h
     src/platform/windows/super_capture.h
     src/platform/windows/capture_target.h
@@ -114,6 +126,8 @@ set(SNIPASTE_HEADERS
     src/ui/snip/scroll_capture_panel.h
     src/ui/snip/scroll_capture_preview.h
     src/ui/tray/tray_controller.h
+    src/ui/update/update_controller.h
+    src/ui/update/update_installer.h
 )
 
 if(APPLE)
@@ -154,9 +168,11 @@ qt_add_library(snipaste_core STATIC
     src/core/scroll_stitcher.h
     src/core/recognition/ocr_service.h
     src/core/recognition/barcode_service.h
+    src/core/update/release_info.h
+    src/core/update/github_update_client.h
 )
 target_include_directories(snipaste_core PUBLIC src)
-target_link_libraries(snipaste_core PUBLIC Qt6::Core Qt6::Gui)
+target_link_libraries(snipaste_core PUBLIC Qt6::Core Qt6::Gui Qt6::Network)
 
 qt_add_library(snipaste_platform STATIC
     ${SNIPASTE_PLATFORM_SOURCES}
@@ -191,7 +207,17 @@ qt_add_library(snipaste_ui STATIC
     src/ui/snip/window_capture_overlay.h
     src/ui/snip/scroll_capture_panel.h
     src/ui/tray/tray_controller.h
+    src/ui/update/update_controller.h
+    src/ui/update/update_installer.h
 )
+
+qt_add_resources(snipaste_ui "update_scripts"
+    PREFIX "/update"
+    BASE "${CMAKE_CURRENT_SOURCE_DIR}/scripts/updates"
+    FILES scripts/updates/install-windows.ps1 scripts/updates/install-macos.sh
+)
+target_compile_definitions(snipaste_ui PRIVATE
+    SNIPASTE_UPDATE_REPOSITORY=\"${SNIPASTE_UPDATE_REPOSITORY}\")
 target_include_directories(snipaste_ui PUBLIC src)
 target_link_libraries(snipaste_ui
     PUBLIC
@@ -260,7 +286,7 @@ endif()
 
 target_compile_definitions(snipaste
     PRIVATE
-        SNIPASTE_VERSION=\"${PROJECT_VERSION}\"
+        SNIPASTE_VERSION=\"${SNIPASTE_RELEASE_VERSION}\"
         $<$<PLATFORM_ID:Windows>:SNIPASTE_PLATFORM_WINDOWS=1>
 )
 
@@ -296,6 +322,22 @@ if(SNIPASTE_BUILD_TESTS)
     add_test(NAME core_unit COMMAND snipaste_core_tests)
     set_tests_properties(core_unit PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
+
+    qt_add_executable(snipaste_update_tests tests/update_test.cpp)
+    target_link_libraries(snipaste_update_tests PRIVATE snipaste_core Qt6::Test)
+    snipaste_apply_compile_options(snipaste_update_tests)
+    add_test(NAME updates COMMAND snipaste_update_tests)
+    set_tests_properties(updates PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
+        TIMEOUT 30)
+    if(WIN32)
+        find_package(Python3 QUIET COMPONENTS Interpreter)
+        if(Python3_FOUND)
+            add_test(NAME update_installer COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/update_installer_test.py")
+            set_tests_properties(update_installer PROPERTIES TIMEOUT 90)
+        endif()
+    endif()
 
     qt_add_executable(snipaste_ui_tests
         tests/ui_regression_test.cpp
