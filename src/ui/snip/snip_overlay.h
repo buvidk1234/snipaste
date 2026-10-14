@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/scroll_stitcher.h"
+
 #include <QImage>
 #include <QColor>
 #include <QList>
@@ -14,6 +16,7 @@ class QScreen;
 class QFrame;
 class QPainter;
 class QMouseEvent;
+class QTimer;
 class QToolButton;
 class QStackedLayout;
 
@@ -21,6 +24,8 @@ namespace snipaste::ui {
 
 class AnnotationCanvas;
 class SnipBorderOverlay;
+class ScrollCapturePanel;
+class ScrollCapturePreview;
 
 class SnipOverlay final : public QWidget
 {
@@ -181,6 +186,26 @@ private:
     void annotateSelection();
     void ocrSelection();
     void barcodeSelection();
+    void startScrollCapture();
+    void captureScrollFrame();
+    // A manual wheel/scrollbar gesture in the target application is observed
+    // outside Qt's event loop.  Debounce it before sampling the viewport so a
+    // single gesture contributes one settled frame to the stitcher.
+    Q_INVOKABLE void scheduleManualScrollCapture();
+    void stopScrollInputMonitoring();
+    void requestAutoScroll(bool enabled);
+    void autoScrollStep();
+    void finishScrollCapture();
+    void cancelScrollCapture();
+    void editScrollCapture();
+    void saveScrollCapture();
+    void cleanupScrollCapture();
+    void updateScrollCaptureLayout();
+    void applyScrollCaptureWindowRegion();
+    void restoreWindowRegion();
+    QImage captureScrollViewport() const;
+    bool sendScrollStep() const;
+    void restoreScrollCaptureCursor();
     QRect globalSelection() const;
     void drawCapturedCursor(const QScreen *screen);
     void drawMagnifier(QPainter &painter) const;
@@ -350,6 +375,18 @@ private:
     bool m_doubleClickExit = true;
     bool m_middleClickExit = true;
     bool m_enterExit = true;
+    QPointer<ScrollCapturePanel> m_scrollPanel;
+    QPointer<ScrollCapturePreview> m_scrollPreview;
+    snipaste::core::VerticalScrollStitcher m_scrollStitcher;
+    QPointer<QScreen> m_scrollScreen;
+    QRect m_scrollGlobalSelection;
+    quintptr m_scrollWindow = 0;
+    QPoint m_scrollOriginalCursor;
+    bool m_scrollCaptureActive = false;
+    bool m_scrollAutoRunning = false;
+    bool m_scrollCaptureBusy = false;
+    int m_scrollCaptureCount = 0;
+    QTimer *m_scrollManualTimer = nullptr;
 };
 
 } // namespace snipaste::ui

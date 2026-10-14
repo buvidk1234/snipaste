@@ -582,7 +582,12 @@ void SnipOverlay::createToolbar()
     m_toolOptionsStack = optionsStack;
     stack->addWidget(m_toolOptions, 0, Qt::AlignLeft);
 
-    const qreal compact = qMin<qreal>(1, (width() - 20) / 572.0);
+    // Keep the action row inside the overlay at fractional DPI.  The row has
+    // eighteen regular buttons, one narrower "more" button, two separators,
+    // and the action frame border.  The previous estimate was based on the
+    // pre-scroll-capture button count, so the extra action made the toolbar
+    // extend past narrow logical screens at 150% and 200% scaling.
+    const qreal compact = qMin<qreal>(1, qMax<qreal>(0, (width() - 40) / 576.0));
     const auto button = [row, actions, compact](CaptureIcon icon, const QString &name, const QString &tip) {
         auto *b = new QToolButton(actions);
         b->setObjectName(name);
@@ -727,6 +732,13 @@ void SnipOverlay::createToolbar()
     separator();
     connect(button(CaptureIcon::Ocr, QStringLiteral("文字识别"), QStringLiteral("识别选区文字")),
             &QToolButton::clicked, this, &SnipOverlay::ocrSelection);
+    auto *scrollCapture = button(CaptureIcon::Scroll, QStringLiteral("滚动截图"),
+                                 QStringLiteral("滚动截图：手动滚动后采集当前视口"));
+    connect(scrollCapture, &QToolButton::clicked, this, &SnipOverlay::startScrollCapture);
+#ifndef Q_OS_WIN
+    scrollCapture->setEnabled(false);
+    scrollCapture->setToolTip(QStringLiteral("滚动截图目前仅支持 Windows"));
+#endif
     auto *undo = button(CaptureIcon::Undo, QStringLiteral("撤销"),
                         QStringLiteral("撤销 (%1)").arg(snipaste::platform::primaryShortcutText(QStringLiteral("Z"))));
     auto *redo = button(CaptureIcon::Redo, QStringLiteral("重做"),

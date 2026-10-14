@@ -1,5 +1,6 @@
 #include "core/command/argument_parser.h"
 #include "core/history/screenshot_history.h"
+#include "core/scroll_stitcher.h"
 
 #include <QDir>
 #include <QTemporaryDir>
@@ -17,6 +18,7 @@ private slots:
     void normalizesMultiValueOptions();
     void expandsOutputPatterns();
     void persistsHistoryWithoutRenamingExistingFiles();
+    void stitchesVerticalScrollFrames();
 };
 
 void CoreUnitTest::parsesGeometrySeparators()
@@ -97,6 +99,23 @@ void CoreUnitTest::persistsHistoryWithoutRenamingExistingFiles()
     QCOMPARE(loaded.imageAt(1).pixelColor(0, 0), QColor(Qt::red));
     QCOMPARE(loaded.backgroundAt(0).pixelColor(0, 0), QColor(Qt::black));
     QCOMPARE(loaded.backgroundAt(1).pixelColor(0, 0), QColor(Qt::black));
+}
+
+void CoreUnitTest::stitchesVerticalScrollFrames()
+{
+    QImage source(QSize(12, 32), QImage::Format_RGB32);
+    for (int y = 0; y < source.height(); ++y)
+        for (int x = 0; x < source.width(); ++x)
+            source.setPixelColor(x, y, QColor::fromHsv((y * 17) % 360, 220, 220));
+
+    const QImage first = source.copy(0, 0, source.width(), 16);
+    const QImage second = source.copy(0, 8, source.width(), 16);
+    VerticalScrollStitcher stitcher(200);
+    QVERIFY(stitcher.append(first));
+    QVERIFY(stitcher.append(second));
+    QCOMPARE(stitcher.image().size(), QSize(12, 24));
+    QCOMPARE(stitcher.image().pixelColor(0, 23), source.pixelColor(0, 23));
+    QVERIFY(!stitcher.append(second));
 }
 
 QTEST_MAIN(CoreUnitTest)

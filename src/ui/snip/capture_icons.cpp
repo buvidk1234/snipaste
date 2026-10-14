@@ -83,6 +83,12 @@ QIcon captureIcon(CaptureIcon kind, bool light)
             p.drawPolygon(QPolygonF{QPointF(17, 1), QPointF(18, 7), QPointF(12, 6)});
             p.drawPolygon(QPolygonF{QPointF(3, 19), QPointF(2, 13), QPointF(8, 14)});
             break;
+        case CaptureIcon::Scroll:
+            p.drawLine(QPointF(10, 2), QPointF(10, 18));
+            p.drawPolyline(QPolygonF{QPointF(6, 6), QPointF(10, 2), QPointF(14, 6)});
+            p.drawPolyline(QPolygonF{QPointF(6, 14), QPointF(10, 18), QPointF(14, 14)});
+            p.drawRect(QRectF(4, 7, 12, 6));
+            break;
         case CaptureIcon::Rectangle: {
             p.drawRect(QRectF(2.5, 4.0, 14, 10.5));
             p.setBrush(ink);

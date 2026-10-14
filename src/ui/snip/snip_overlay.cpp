@@ -5,6 +5,7 @@
 #include "platform/keyboard.h"
 #include "platform/screen_capture.h"
 #include "platform/windows/capture_target.h"
+#include "ui/snip/scroll_capture_panel.h"
 
 #include <QApplication>
 #include <QCoreApplication>
@@ -382,6 +383,36 @@ void SnipOverlay::forwardCanvasMouseEvent(QMouseEvent *event)
 void SnipOverlay::paintEvent(QPaintEvent *)
 {
     QPainter painter(this);
+    if (m_scrollCaptureActive && !m_selection.isEmpty()) {
+        painter.drawImage(rect(), m_background);
+        painter.fillRect(rect(), m_maskColor);
+
+        painter.save();
+        painter.setClipRect(m_selection);
+        painter.drawImage(rect(), m_background);
+        painter.restore();
+
+        painter.setPen(QPen(QColor(255, 255, 255, 160), 1));
+        painter.drawRect(m_selection.adjusted(0, 0, -1, -1));
+
+        const QString prompt = QStringLiteral("滚动页面截取更多内容");
+        QFont font = painter.font();
+        font.setPointSize(14);
+        font.setBold(true);
+        painter.setFont(font);
+        const QFontMetrics fm(font);
+        const int textH = fm.height();
+        int textX = m_selection.left();
+        int textY = m_selection.top() - 10;
+        if (textY - textH < 10)
+            textY = m_selection.top() + textH + 8;
+
+        painter.setPen(QColor(0, 0, 0, 180));
+        painter.drawText(textX + 1, textY + 1, prompt);
+        painter.setPen(QColor(255, 255, 255, 245));
+        painter.drawText(textX, textY, prompt);
+        return;
+    }
     painter.setRenderHint(QPainter::Antialiasing, false);
     QImage display = m_background;
     if (m_canvas) {
@@ -636,6 +667,28 @@ void SnipOverlay::mouseDoubleClickEvent(QMouseEvent *event)
 
 void SnipOverlay::keyPressEvent(QKeyEvent *event)
 {
+    if (m_scrollCaptureActive) {
+        if (event->key() == Qt::Key_Escape) {
+            cancelScrollCapture();
+            event->accept();
+            return;
+        }
+        if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+            finishScrollCapture();
+            event->accept();
+            return;
+        }
+        if (event->key() == Qt::Key_S && event->modifiers().testFlag(Qt::ControlModifier)) {
+            saveScrollCapture();
+            event->accept();
+            return;
+        }
+        if (event->key() == Qt::Key_E) {
+            editScrollCapture();
+            event->accept();
+            return;
+        }
+    }
     if (event->key() == Qt::Key_Space && m_transformingSelection) {
         m_movingSelection = true;
         updateSelectionCursor(m_cursorPosition);
@@ -1035,6 +1088,21 @@ void SnipOverlay::drawShortcutHints(QPainter &painter) const
 
 void SnipOverlay::closeEvent(QCloseEvent *event)
 {
+    if (m_scrollCaptureActive) {
+        m_scrollCaptureActive = false;
+        m_scrollAutoRunning = false;
+        m_scrollCaptureBusy = false;
+        // The low-level hook is process-wide; always remove it before the
+        // overlay is destroyed, including Esc/window-manager close paths.
+        stopScrollInputMonitoring();
+        if (m_scrollPanel) {
+            m_scrollPanel->hide();
+            m_scrollPanel->deleteLater();
+            m_scrollPanel = nullptr;
+        }
+        restoreScrollCaptureCursor();
+        m_scrollWindow = 0;
+    }
     if (m_includeUnsavedHistory && !m_outputEmitted && m_selectionConfirmed) {
         const QImage image = selectionImage();
         if (!image.isNull())

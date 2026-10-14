@@ -5,6 +5,8 @@
 #include "ui/paste/paste_manager.h"
 #include "ui/paste/paste_window.h"
 #include "ui/snip/snip_overlay.h"
+#include "ui/snip/scroll_capture_panel.h"
+#include "ui/snip/scroll_capture_preview.h"
 #include "ui/clipboard_output.h"
 #include "ui/tray/tray_controller.h"
 #include "core/command/command_registry.h"
@@ -59,6 +61,9 @@ private slots:
     void preferencesPendingCallbacksAreCancelled();
     void preferencesProfessionalReferencePages();
     void copyAsFileModesProduceExpectedClipboardFormats();
+    void overlayCopyButtonHonorsCopyAsFileMode();
+    void scrollCapturePanelUsesFloatingToolbar();
+    void scrollCapturePreviewShowsStitchedImage();
     void trayContextMenuMatchesReference();
     void hotCornerDwellState();
     void toolbarOnlyAfterSelection();
@@ -137,6 +142,105 @@ void UiRegressionTest::copyAsFileModesProduceExpectedClipboardFormats()
     verify(ui::CopyAsFileMode::Shortcut, true, true);
     verify(ui::CopyAsFileMode::Always, false, true);
     clipboard->clear();
+}
+
+void UiRegressionTest::overlayCopyButtonHonorsCopyAsFileMode()
+{
+    auto *clipboard = QApplication::clipboard();
+    QVERIFY(clipboard);
+    QScreen *screen = QGuiApplication::primaryScreen();
+    QVERIFY(screen);
+
+    const QList<QPair<ui::CopyAsFileMode, bool>> cases{
+        {ui::CopyAsFileMode::Disabled, false},
+        {ui::CopyAsFileMode::Shortcut, false},
+        {ui::CopyAsFileMode::Always, true},
+    };
+    for (const auto &[mode, expectFile] : cases) {
+        clipboard->clear();
+        QPointer<ui::SnipOverlay> overlay = new ui::SnipOverlay(
+            screen, false, false, QRect(20, 20, 120, 80));
+        overlay->setCopyAsFileMode(static_cast<int>(mode));
+        overlay->show();
+        auto *canvas = overlay->findChild<ui::AnnotationCanvas *>();
+        auto *copy = overlay->findChild<QToolButton *>(QStringLiteral("完成"));
+        QVERIFY(canvas && copy);
+        QTRY_VERIFY(copy->isVisible());
+        QVERIFY(!canvas->renderedImage().isNull());
+
+        QTest::mouseClick(copy, Qt::LeftButton);
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        const QMimeData *mime = clipboard->mimeData();
+        QVERIFY(mime);
+        QVERIFY(mime->hasImage());
+        QCOMPARE(mime->hasUrls(), expectFile);
+        if (expectFile) {
+            QCOMPARE(mime->urls().size(), 1);
+            const QString path = mime->urls().first().toLocalFile();
+            QVERIFY(QFileInfo::exists(path));
+            QVERIFY(QFile(path).remove());
+        }
+        QVERIFY(overlay.isNull());
+    }
+    clipboard->clear();
+}
+
+void UiRegressionTest::scrollCapturePanelUsesFloatingToolbar()
+{
+    ui::ScrollCapturePanel panel;
+    panel.show();
+    QTRY_VERIFY(panel.isVisible());
+    QCOMPARE(panel.height(), 72);
+    QVERIFY(panel.width() >= 320);
+    QVERIFY(panel.findChild<QToolButton *>(QStringLiteral("scrollCaptureEdit")));
+    QVERIFY(panel.findChild<QToolButton *>(QStringLiteral("scrollCaptureSave")));
+    QVERIFY(panel.findChild<QToolButton *>(QStringLiteral("scrollCaptureFinish")));
+    QVERIFY(panel.findChild<QToolButton *>(QStringLiteral("scrollCaptureCancel")));
+    QVERIFY(panel.findChild<QToolButton *>(QStringLiteral("scrollCaptureCurrent")));
+    QVERIFY(panel.findChild<QToolButton *>(QStringLiteral("scrollCaptureAuto")));
+    auto *preview = panel.findChild<QLabel *>(QStringLiteral("scrollCapturePreview"));
+    QVERIFY(preview);
+    QVERIFY(!preview->isVisible());
+
+    const QString artifactDir = qEnvironmentVariable("SNIPASTE_TEST_ARTIFACTS");
+    if (!artifactDir.isEmpty()) {
+        QDir().mkpath(artifactDir);
+        QVERIFY(panel.grab().save(QDir(artifactDir).filePath(QStringLiteral("scroll-capture-toolbar.png"))));
+    }
+    panel.close();
+}
+
+void UiRegressionTest::scrollCapturePreviewShowsStitchedImage()
+{
+    ui::ScrollCapturePreview preview;
+    preview.show();
+    QTRY_VERIFY(preview.isVisible());
+    QCOMPARE(preview.width(), 260);
+    QVERIFY(preview.height() >= 240);
+
+    QImage testFrame(300, 600, QImage::Format_ARGB32_Premultiplied);
+    testFrame.fill(QColor(240, 242, 245));
+    QPainter p(&testFrame);
+    p.setPen(Qt::black);
+    p.drawText(20, 50, QStringLiteral("Preview Item 1"));
+    p.drawText(20, 550, QStringLiteral("Preview Item 2"));
+    p.end();
+
+    preview.setImage(testFrame);
+    QCOMPARE(preview.image().size(), testFrame.size());
+
+    auto *scrollArea = preview.findChild<QScrollArea *>(QStringLiteral("scrollCaptureScrollArea"));
+    QVERIFY(scrollArea);
+    auto *label = preview.findChild<QLabel *>(QStringLiteral("scrollCapturePreviewImage"));
+    QVERIFY(label);
+    QVERIFY(!label->pixmap().isNull());
+
+    const QString artifactDir = qEnvironmentVariable("SNIPASTE_TEST_ARTIFACTS");
+    if (!artifactDir.isEmpty()) {
+        QDir().mkpath(artifactDir);
+        QVERIFY(preview.grab().save(QDir(artifactDir).filePath(QStringLiteral("scroll-capture-preview.png"))));
+    }
+    preview.close();
 }
 
 void UiRegressionTest::preferencesCloseSavesWithoutQuitting()

@@ -47,6 +47,7 @@ set(SNIPASTE_CORE_SOURCES
     src/core/command/command_registry.cpp
     src/core/config/config_store.cpp
     src/core/history/screenshot_history.cpp
+    src/core/scroll_stitcher.cpp
     src/core/recognition/ocr_service.cpp
     src/core/recognition/barcode_service.cpp
 )
@@ -72,6 +73,9 @@ set(SNIPASTE_UI_SOURCES
     src/ui/snip/snip_controls.cpp
     src/ui/snip/snip_selection.cpp
     src/ui/snip/window_capture_overlay.cpp
+    src/ui/snip/scroll_capture_panel.cpp
+    src/ui/snip/scroll_capture_preview.cpp
+    src/ui/snip/snip_scroll_capture.cpp
     src/ui/tray/tray_controller.cpp
 )
 
@@ -89,6 +93,7 @@ set(SNIPASTE_HEADERS
     src/core/config/config_store.h
     src/core/control/hot_corner_state.h
     src/core/history/screenshot_history.h
+    src/core/scroll_stitcher.h
     src/core/recognition/ocr_service.h
     src/core/recognition/barcode_service.h
     src/platform/windows/global_hotkey.h
@@ -106,6 +111,8 @@ set(SNIPASTE_HEADERS
     src/ui/snip/snip_overlay.h
     src/ui/snip/capture_icons.h
     src/ui/snip/window_capture_overlay.h
+    src/ui/snip/scroll_capture_panel.h
+    src/ui/snip/scroll_capture_preview.h
     src/ui/tray/tray_controller.h
 )
 
@@ -144,6 +151,7 @@ qt_add_library(snipaste_core STATIC
     src/core/command/command_registry.h
     src/core/config/config_store.h
     src/core/history/screenshot_history.h
+    src/core/scroll_stitcher.h
     src/core/recognition/ocr_service.h
     src/core/recognition/barcode_service.h
 )
@@ -181,6 +189,7 @@ qt_add_library(snipaste_ui STATIC
     src/ui/snip/snip_overlay.h
     src/ui/snip/capture_icons.h
     src/ui/snip/window_capture_overlay.h
+    src/ui/snip/scroll_capture_panel.h
     src/ui/tray/tray_controller.h
 )
 target_include_directories(snipaste_ui PUBLIC src)
