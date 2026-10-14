@@ -36,7 +36,8 @@ if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force 
 New-Item -ItemType Directory -Path $stage | Out-Null
 Copy-Item -LiteralPath $executable -Destination (Join-Path $stage 'snipaste.exe')
 $env:Path = (Join-Path $QtRoot 'bin') + ';' + $env:Path
-& $deploy --release --no-translations --no-opengl-sw --no-compiler-runtime --dir $stage (Join-Path $stage 'snipaste.exe')
+# Qt 6.12 targets Windows 10+, which provides D3DCompiler_47 as an OS component.
+& $deploy --release --no-translations --no-opengl-sw --no-system-d3d-compiler --no-compiler-runtime --dir $stage (Join-Path $stage 'snipaste.exe')
 if ($LASTEXITCODE -ne 0) { throw 'Qt runtime deployment failed.' }
 
 $redistCandidates = @(

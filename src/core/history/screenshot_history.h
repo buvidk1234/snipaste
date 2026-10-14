@@ -64,6 +64,8 @@ public:
     // Historical selection images use the same on-demand policy.  New images
     // remain resident until their first asynchronous save completes.
     QImage imageAt(int index) const;
+    QSize imageSizeAt(int index) const;
+    QImage thumbnailAt(int index) const;
     int size() const;
     // Entries loaded from disk may be null placeholders; call imageAt() to
     // obtain one historical image without materializing the whole list.

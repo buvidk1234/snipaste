@@ -6,6 +6,7 @@
 class QListWidget;
 class QLabel;
 class QPushButton;
+template <typename T> class QFutureWatcher;
 
 namespace snipaste::core {
 class ScreenshotHistory;
@@ -29,6 +30,7 @@ signals:
 
 private:
     void updatePreview();
+    void startPreviewLoad();
     QImage selectedImage() const;
 
     core::ScreenshotHistory &m_history;
@@ -38,6 +40,10 @@ private:
     QPushButton *m_pasteButton = nullptr;
     QPushButton *m_saveButton = nullptr;
     QPushButton *m_clearButton = nullptr;
+    quint64 m_refreshGeneration = 0;
+    quint64 m_previewGeneration = 0;
+    QFutureWatcher<QImage> *m_previewWatcher = nullptr;
+    bool m_previewPending = false;
 };
 
 } // namespace snipaste::ui

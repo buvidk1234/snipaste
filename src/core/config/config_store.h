@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QSettings>
+#include <QHash>
 #include <QString>
 #include <memory>
 
@@ -21,6 +22,8 @@ public:
 private:
     QString m_filePath;
     std::unique_ptr<QSettings> m_settings;
+    mutable QHash<QString, QString> m_foldedKeys;
+    mutable bool m_foldedKeysValid = false;
 };
 
 } // namespace snipaste::core

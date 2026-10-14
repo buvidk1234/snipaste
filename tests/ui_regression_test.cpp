@@ -1,6 +1,7 @@
 #include "core/config/config_store.h"
 #include "core/control/hot_corner_state.h"
 #include "ui/annotation/annotation_dialog.h"
+#include "ui/annotation/image_region.h"
 #include "ui/preferences/preferences_dialog.h"
 #include "ui/paste/paste_manager.h"
 #include "ui/paste/paste_window.h"
@@ -9,6 +10,7 @@
 #include "ui/snip/scroll_capture_preview.h"
 #include "ui/clipboard_output.h"
 #include "ui/tray/tray_controller.h"
+#include "ui/history/screenshot_history_dialog.h"
 #include "core/command/command_registry.h"
 #include "platform/keyboard.h"
 
@@ -31,6 +33,8 @@
 #include <QKeySequenceEdit>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
+#include <QDateTime>
 #include <QMenu>
 #include <QMimeData>
 #include <QMouseEvent>
@@ -51,6 +55,7 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QUrl>
+#include <QWheelEvent>
 #include <memory>
 
 using namespace snipaste;
@@ -72,6 +77,9 @@ private slots:
     void toolbarOnlyAfterSelection();
     void preparedOverlayReusesControlsAndReleasesPixels();
     void annotationExportSharesCommittedCache();
+    void annotationInvalidationReleasesPixels();
+    void magnifierRegionPreservesFullFramePixels();
+    void historyDialogLoadsPreviewsAsynchronously();
     void proGroupedToolsAndStyles();
     void proSizeRefreshAndOutput();
     void proHistoryAndSelectionShortcuts();
@@ -91,6 +99,11 @@ private slots:
     void eraserRemovesOnlyCoveredStrokeRegion();
     void eraserRemovesOnlyCoveredShapeRegion();
     void eraserRemovesMagnifierInteriorLocally();
+    void annotationHistoryMixedOperations();
+    void annotationHistoryShapeEdits();
+    void annotationHistoryClearAndBranch();
+    void annotationHistoryCaptureOffset();
+    void annotationHistoryNumberSequence();
     void inlineTextInputAndCancel();
     void inlineTextOutput_data();
     void inlineTextOutput();
@@ -118,6 +131,7 @@ private slots:
     void pasteNewClipboardTakesPriority();
     void pasteGroupOrdering();
     void pastePersistence();
+    void pastePersistenceReusesPixelsAndHandlesFailure();
     void independentWidthPresetsAndCornerRadius();
 };
 
@@ -904,6 +918,107 @@ void UiRegressionTest::toolbarOnlyAfterSelection()
     QVERIFY(overlay.isNull());
 }
 
+void UiRegressionTest::annotationInvalidationReleasesPixels()
+{
+    QImage source(640, 420, QImage::Format_RGB32);
+    source.fill(Qt::white);
+    ui::AnnotationCanvas canvas(source);
+    canvas.resize(source.size());
+    QTest::mousePress(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(40, 40));
+    QTest::mouseRelease(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(300, 240));
+    QImage cached = canvas.fullRenderedImage(false);
+    QVERIFY(cached != source);
+    QVERIFY(!cached.isDetached());
+    canvas.undo();
+    QVERIFY(cached.isDetached());
+    QCOMPARE(canvas.fullRenderedImage(false), source);
+    canvas.redo();
+    QCOMPARE(canvas.fullRenderedImage(false), cached);
+    cached = canvas.fullRenderedImage(false);
+    canvas.clearAnnotations();
+    QVERIFY(cached.isDetached());
+    QCOMPARE(canvas.fullRenderedImage(false), source);
+}
+
+void UiRegressionTest::magnifierRegionPreservesFullFramePixels()
+{
+    QImage source(640, 420, QImage::Format_ARGB32_Premultiplied);
+    for (int y = 0; y < source.height(); ++y) {
+        auto *row = reinterpret_cast<QRgb *>(source.scanLine(y));
+        for (int x = 0; x < source.width(); ++x)
+            row[x] = qPremultiply(qRgba((x * 7 + y) % 256, (y * 13 + x) % 256,
+                                      (x + y * 3) % 256, 80 + (x + y) % 176));
+    }
+    const QList<QRectF> samples{
+        QRectF(120.25, 70.75, 83.5, 65.25), QRectF(-10.5, -5.25, 80.75, 60.5),
+        QRectF(600.75, 385.5, 65.25, 55.5), QRectF(0, 0, 640, 420)};
+    for (const QRectF &sample : samples) {
+        for (const qreal zoom : {1.1, 1.75, 2.0, 7.9}) {
+            const QRectF target(QPointF(210.5, 120.25), sample.size() * zoom);
+            for (const bool ellipse : {false, true}) {
+                QImage expected = source.copy();
+                QImage actual = source.copy();
+                const auto clip = [&](QPainter &painter) {
+                    QPainterPath path;
+                    if (ellipse) path.addEllipse(target);
+                    else path.addRoundedRect(target, 12.5, 12.5);
+                    painter.setClipPath(path);
+                };
+                {
+                    QPainter painter(&expected);
+                    clip(painter);
+                    const QImage fullSnapshot = expected;
+                    QTransform transform;
+                    transform.translate(target.center().x(), target.center().y());
+                    transform.scale(target.width() / sample.width(), target.height() / sample.height());
+                    transform.translate(-sample.center().x(), -sample.center().y());
+                    painter.setWorldTransform(transform, true);
+                    painter.setRenderHint(QPainter::SmoothPixmapTransform);
+                    painter.drawImage(QPointF(), fullSnapshot);
+                }
+                {
+                    QPainter painter(&actual);
+                    clip(painter);
+                    ui::annotation::paintMagnifiedRegion(painter, actual, sample, target);
+                }
+                QVERIFY2(actual == expected, qPrintable(QStringLiteral("source=%1,%2 zoom=%3 ellipse=%4")
+                    .arg(sample.x()).arg(sample.y()).arg(zoom).arg(ellipse)));
+            }
+        }
+    }
+}
+
+void UiRegressionTest::historyDialogLoadsPreviewsAsynchronously()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    core::ScreenshotHistory history;
+    const QList<QColor> colors{Qt::red, Qt::green, Qt::blue};
+    for (const QColor &color : colors) {
+        QImage image(1280, 960, QImage::Format_RGB32);
+        image.fill(color);
+        history.add(image);
+    }
+    QVERIFY(history.saveToDirectory(directory.path()));
+    history.loadFromDirectory(directory.path());
+    ui::ScreenshotHistoryDialog dialog(history);
+    dialog.show();
+    auto *list = dialog.findChild<QListWidget *>();
+    auto *preview = dialog.findChild<QLabel *>();
+    QVERIFY(list && preview);
+    QCOMPARE(list->count(), 3);
+    QTRY_VERIFY(!list->item(0)->icon().isNull());
+    QTRY_VERIFY(!preview->pixmap().isNull());
+    list->setCurrentRow(2);
+    list->setCurrentRow(1);
+    QTRY_COMPARE(preview->pixmap().toImage().pixelColor(0, 0), QColor(Qt::green));
+    history.clear();
+    dialog.refresh();
+    QCOMPARE(list->count(), 0);
+    QCOMPARE(preview->text(), QStringLiteral("暂无截屏历史"));
+    dialog.close();
+}
+
 void UiRegressionTest::proGroupedToolsAndStyles()
 {
     using Tool = ui::AnnotationCanvas::Tool;
@@ -1048,6 +1163,7 @@ void UiRegressionTest::proSizeRefreshAndOutput()
 void UiRegressionTest::proHistoryAndSelectionShortcuts()
 {
     QPointer<ui::SnipOverlay> overlay = overlayForTest();
+    overlay->resize(800, 600);
     const QRect element(60, 60, 100, 80), window(30, 40, 240, 220);
     overlay->setTargetDetector([=](QPoint, bool elements) { return elements ? element : window; });
     // QTest::mouseMove uses QCursor::setPos; offscreen can suppress it after popup tests.
@@ -1856,6 +1972,193 @@ void UiRegressionTest::eraserRemovesMagnifierInteriorLocally()
     QCOMPARE(canvas.renderedImage(false), after);
 }
 
+void UiRegressionTest::annotationHistoryMixedOperations()
+{
+    QImage source(640, 420, QImage::Format_ARGB32_Premultiplied);
+    source.fill(Qt::white);
+    ui::AnnotationCanvas canvas(source);
+    canvas.resize(source.size());
+    canvas.show();
+    QVector<QImage> states{source};
+    const auto save = [&] { states.append(canvas.renderedImage(false)); };
+    canvas.setTool(ui::AnnotationCanvas::Tool::Pen);
+    canvas.setPenWidth(8);
+    QTest::mousePress(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(50, 210));
+    QMouseEvent strokeMove(QEvent::MouseMove, QPoint(590, 210), canvas.mapToGlobal(QPoint(590, 210)),
+                           Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(&canvas, &strokeMove);
+    QTest::mouseRelease(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(590, 210));
+    save();
+    canvas.setTool(ui::AnnotationCanvas::Tool::Eraser);
+    canvas.setPenWidth(24);
+    QTest::mouseClick(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(200, 210));
+    save();
+    QTest::mousePress(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(360, 210));
+    for (const QPoint point : {QPoint(380, 210), QPoint(400, 210)}) {
+        QMouseEvent move(QEvent::MouseMove, point, canvas.mapToGlobal(point),
+                         Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(&canvas, &move);
+    }
+    QTest::mouseRelease(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(420, 210));
+    save();
+    canvas.setTool(ui::AnnotationCanvas::Tool::Rectangle);
+    QTest::mousePress(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(80, 80));
+    QTest::mouseRelease(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(180, 140));
+    save();
+    QTest::keyClick(&canvas, Qt::Key_Delete);
+    save();
+    for (int index = states.size() - 2; index >= 0; --index) {
+        QVERIFY(canvas.canUndo());
+        QTest::keyClick(&canvas, Qt::Key_Z, platform::primaryModifier());
+        QCOMPARE(canvas.renderedImage(false), states.at(index));
+    }
+    QVERIFY(!canvas.canUndo());
+    for (int index = 1; index < states.size(); ++index) {
+        QVERIFY(canvas.canRedo());
+        QTest::keyClick(&canvas, Qt::Key_Y, platform::primaryModifier());
+        QCOMPARE(canvas.renderedImage(false), states.at(index));
+    }
+    QVERIFY(!canvas.canRedo());
+}
+
+void UiRegressionTest::annotationHistoryShapeEdits()
+{
+    QImage source(640, 420, QImage::Format_ARGB32_Premultiplied);
+    source.fill(Qt::white);
+    ui::AnnotationCanvas canvas(source);
+    canvas.resize(source.size());
+    canvas.show();
+    canvas.setPenWidth(4);
+    QTest::mousePress(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(100, 100));
+    QTest::mouseRelease(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(240, 200));
+    QVector<QImage> states{source, canvas.renderedImage(false)};
+    const auto drag = [&](QPoint from, QPoint middle, QPoint to) {
+        QTest::mousePress(&canvas, Qt::LeftButton, Qt::NoModifier, from);
+        for (const QPoint point : {middle, to}) {
+            QMouseEvent move(QEvent::MouseMove, point, canvas.mapToGlobal(point),
+                             Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(&canvas, &move);
+        }
+        QTest::mouseRelease(&canvas, Qt::LeftButton, Qt::NoModifier, to);
+        states.append(canvas.renderedImage(false));
+        QVERIFY(states.constLast() != states.at(states.size() - 2));
+    };
+    drag(QPoint(170, 150), QPoint(190, 160), QPoint(210, 180));
+    drag(QPoint(286, 236), QPoint(306, 246), QPoint(326, 266));
+    drag(QPoint(230, 104), QPoint(275, 140), QPoint(321, 195));
+    canvas.setShapeFilled(true);
+    states.append(canvas.renderedImage(false));
+    QTest::keyClick(&canvas, Qt::Key_Right, Qt::AltModifier);
+    states.append(canvas.renderedImage(false));
+    QTest::keyClick(&canvas, Qt::Key_C, platform::primaryModifier() | Qt::ShiftModifier);
+    QTest::keyClick(&canvas, Qt::Key_V, platform::primaryModifier() | Qt::ShiftModifier);
+    states.append(canvas.renderedImage(false));
+    for (int index = states.size() - 2; index >= 0; --index) {
+        canvas.undo();
+        QCOMPARE(canvas.renderedImage(false), states.at(index));
+    }
+    QVERIFY(!canvas.canUndo());
+    for (int index = 1; index < states.size(); ++index) {
+        canvas.redo();
+        QCOMPARE(canvas.renderedImage(false), states.at(index));
+    }
+    QVERIFY(!canvas.canRedo());
+}
+
+void UiRegressionTest::annotationHistoryClearAndBranch()
+{
+    QImage source(640, 420, QImage::Format_ARGB32_Premultiplied);
+    source.fill(Qt::white);
+    ui::AnnotationCanvas canvas(source);
+    canvas.resize(source.size());
+    canvas.show();
+    canvas.setTool(ui::AnnotationCanvas::Tool::Pen);
+    QTest::mouseClick(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(80, 80));
+    const QImage first = canvas.renderedImage(false);
+    QTest::mouseClick(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(200, 200));
+    const QImage second = canvas.renderedImage(false);
+    canvas.clearAnnotations();
+    QCOMPARE(canvas.renderedImage(false), source);
+    QVERIFY(canvas.canUndo());
+    canvas.undo();
+    QCOMPARE(canvas.renderedImage(false), second);
+    canvas.redo();
+    QCOMPARE(canvas.renderedImage(false), source);
+    canvas.undo();
+    canvas.undo();
+    QCOMPARE(canvas.renderedImage(false), first);
+    canvas.setTool(ui::AnnotationCanvas::Tool::Eraser);
+    QTest::mouseClick(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(500, 350));
+    QVERIFY(canvas.canRedo()); // Erasing blank space must preserve the redo branch.
+    canvas.setTool(ui::AnnotationCanvas::Tool::Rectangle);
+    QTest::mouseClick(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(400, 300));
+    QVERIFY(canvas.canRedo()); // A cancelled/zero-size shape is not an edit.
+    canvas.setTool(ui::AnnotationCanvas::Tool::Pen);
+    QTest::mouseClick(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(300, 300));
+    QVERIFY(!canvas.canRedo());
+    canvas.undo();
+    QCOMPARE(canvas.renderedImage(false), first);
+    canvas.resetCapture();
+    QVERIFY(!canvas.canUndo() && !canvas.canRedo());
+}
+
+void UiRegressionTest::annotationHistoryCaptureOffset()
+{
+    QImage source(640, 420, QImage::Format_ARGB32_Premultiplied);
+    source.fill(Qt::white);
+    ui::AnnotationCanvas canvas(source);
+    canvas.resize(source.size());
+    canvas.show();
+    canvas.setTool(ui::AnnotationCanvas::Tool::Pen);
+    canvas.setPenWidth(8);
+    QTest::mousePress(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(50, 210));
+    QMouseEvent strokeMove(QEvent::MouseMove, QPoint(590, 210), canvas.mapToGlobal(QPoint(590, 210)),
+                           Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(&canvas, &strokeMove);
+    QTest::mouseRelease(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(590, 210));
+    canvas.setTool(ui::AnnotationCanvas::Tool::Eraser);
+    QTest::mouseClick(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(200, 210));
+    const QImage erased = canvas.renderedImage(false);
+    canvas.undo();
+    const QImage drawn = canvas.renderedImage(false);
+    QVERIFY(erased != drawn);
+    canvas.setCaptureImage(source, QPointF(0, 20));
+    const auto translated = [&](const QImage &image) {
+        QImage result = source;
+        QPainter painter(&result);
+        painter.drawImage(QPoint(0, 20), image);
+        painter.end();
+        return result;
+    };
+    QCOMPARE(canvas.renderedImage(false), translated(drawn));
+    canvas.redo();
+    QCOMPARE(canvas.renderedImage(false), translated(erased));
+    canvas.undo();
+    QCOMPARE(canvas.renderedImage(false), translated(drawn));
+    canvas.undo();
+    QCOMPARE(canvas.renderedImage(false), source);
+}
+
+void UiRegressionTest::annotationHistoryNumberSequence()
+{
+    QImage source(640, 420, QImage::Format_ARGB32_Premultiplied);
+    source.fill(Qt::white);
+    ui::AnnotationCanvas canvas(source);
+    canvas.resize(source.size());
+    canvas.show();
+    canvas.setAutoSelectOnCreation(false);
+    canvas.setTool(ui::AnnotationCanvas::Tool::Number);
+    QTest::mouseClick(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(100, 100));
+    QTest::mouseClick(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(200, 200));
+    const QImage second = canvas.renderedImage(false);
+    canvas.undo();
+    canvas.redo();
+    QCOMPARE(canvas.renderedImage(false), second);
+    canvas.undo();
+    QTest::mouseClick(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(200, 200));
+    QCOMPARE(canvas.renderedImage(false), second); // A new branch reuses number 2.
+}
+
 void UiRegressionTest::magnifierFramesMoveIndependently()
 {
     QImage image(640, 420, QImage::Format_ARGB32_Premultiplied);
@@ -2458,6 +2761,58 @@ void UiRegressionTest::pastePersistence()
     QCOMPARE(pin->size(), QSize(qRound(600 / pin->devicePixelRatioF()), qRound(900 / pin->devicePixelRatioF())));
     QTest::mouseDClick(pin, Qt::LeftButton);
     QCOMPARE(restored.pasteClipboard({}), pin); // Loaded pins must be connected too.
+}
+
+void UiRegressionTest::pastePersistenceReusesPixelsAndHandlesFailure()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QDir dir(directory.path());
+    const QString statePath = dir.filePath(QStringLiteral("state.json"));
+    QImage source(320, 240, QImage::Format_RGB32);
+    source.fill(Qt::magenta);
+    ui::PasteManager manager;
+    auto *first = manager.createPaste(source);
+    auto *second = manager.createPaste(source);
+    manager.hideAll();
+    manager.saveState(directory.path());
+    QStringList images = dir.entryList({QStringLiteral("paste-*.png")}, QDir::Files);
+    QCOMPARE(images.size(), 1); // Two shared source images encode once.
+    const QString originalPath = dir.filePath(images.first());
+    QFile imageFile(originalPath);
+    QVERIFY(imageFile.open(QIODevice::ReadWrite));
+    QVERIFY(imageFile.setFileTime(QDateTime::currentDateTime().addDays(-1), QFileDevice::FileModificationTime));
+    imageFile.close();
+    const QDateTime originalTime = QFileInfo(originalPath).lastModified();
+    first->move(60, 70);
+    second->restoreTransform(1, true, false, true, false, 0.5, false, true);
+    manager.saveState(directory.path());
+    QCOMPARE(dir.entryList({QStringLiteral("paste-*.png")}, QDir::Files), images);
+    QCOMPARE(QFileInfo(originalPath).lastModified(), originalTime);
+    manager.destroyAll();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+
+    ui::PasteManager restored;
+    restored.loadState(directory.path());
+    restored.saveState(directory.path());
+    QCOMPARE(QFileInfo(originalPath).lastModified(), originalTime);
+    restored.destroyAll();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    source.fill(Qt::cyan);
+    restored.createPaste(source);
+    restored.hideAll();
+    // A directory at the index destination forces the atomic commit to fail.
+    QVERIFY(QFile::remove(statePath));
+    QVERIFY(dir.mkdir(QStringLiteral("state.json")));
+    restored.saveState(directory.path());
+    QVERIFY(QFileInfo::exists(originalPath));
+    QCOMPARE(dir.entryList({QStringLiteral("paste-*.png")}, QDir::Files), images);
+    QVERIFY(dir.rmdir(QStringLiteral("state.json")));
+    restored.saveState(directory.path());
+    images = dir.entryList({QStringLiteral("paste-*.png")}, QDir::Files);
+    QCOMPARE(images.size(), 1);
+    QVERIFY(!QFileInfo::exists(originalPath));
+    QCOMPARE(QImage(dir.filePath(images.first())), source);
 }
 
 void UiRegressionTest::independentWidthPresetsAndCornerRadius()

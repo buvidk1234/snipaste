@@ -6,6 +6,7 @@
 #include "platform/keyboard.h"
 #include "platform/screen_capture.h"
 #include "core/history/screenshot_history.h"
+#include "core/history/screenshot_history_writer.h"
 #include "core/recognition/ocr_service.h"
 #include "core/recognition/barcode_service.h"
 #include "platform/windows/global_hotkey.h"
@@ -31,8 +32,6 @@
 #include <QCommandLineParser>
 #include <QCoreApplication>
 #include <QMessageBox>
-#include <QMutex>
-#include <QMutexLocker>
 #include <QMenu>
 #include <QProcess>
 #include <QProcessEnvironment>
@@ -729,53 +728,6 @@ qreal configuredPasteOpacity(const snipaste::core::ConfigStore &config)
 
 void trimIdleProcessMemory();
 
-void saveHistorySnapshotAsync(snipaste::core::ScreenshotHistory &history,
-                              const QString &directory)
-{
-    // ScreenshotHistory is updated only on the GUI thread.  Copy its
-    // implicitly-shared image lists before dispatching so the disk writer
-    // never reads a live QList while a subsequent capture is being added.
-    const snipaste::core::ScreenshotHistory snapshot = history;
-    const quint64 snapshotRevision = history.revision();
-    static QMutex generationMutex;
-    static QMutex saveMutex;
-    static quint64 latestGeneration = 0;
-    quint64 generation = 0;
-    {
-        QMutexLocker locker(&generationMutex);
-        generation = ++latestGeneration;
-    }
-
-    QThreadPool::globalInstance()->start([snapshot, directory, generation, snapshotRevision, historyPtr = &history] {
-        QMutexLocker saveLocker(&saveMutex);
-        {
-            QMutexLocker generationLocker(&generationMutex);
-            if (generation != latestGeneration)
-                return;
-        }
-        if (!snapshot.saveToDirectory(directory)) {
-            qWarning() << "failed to save screenshot history" << directory;
-            return;
-        }
-        // Rebase only after the write that owns this generation completed.
-        // A newer capture may have prepended an item while the worker was
-        // writing; the revision check prevents its paths from being changed
-        // to filenames belonging to the older snapshot.
-        QMetaObject::invokeMethod(QCoreApplication::instance(),
-                                  [historyPtr, directory, generation, snapshotRevision] {
-                                      QMutexLocker generationLocker(&generationMutex);
-                                      if (generation == latestGeneration
-                                          && historyPtr->revision() == snapshotRevision) {
-                                          historyPtr->rebaseBackgroundPaths(directory);
-                                          historyPtr->releaseDecodedImages();
-                                          historyPtr->releaseDecodedBackgrounds();
-                                          trimIdleProcessMemory();
-                                      }
-                                  },
-                                  Qt::QueuedConnection);
-    });
-}
-
 QString outputFilePath(const QString &value, const snipaste::core::ConfigStore &config)
 {
     QString path = value.trimmed();
@@ -1005,6 +957,18 @@ int main(int argc, char *argv[])
     snipaste::ui::UpdateController updates(config, &app);
     snipaste::core::ScreenshotHistory history(
         qBound(1, config.value(QStringLiteral("capture/maxHistory"), 20).toInt(), 999));
+    snipaste::core::ScreenshotHistoryWriter historyWriter;
+    QObject::connect(&historyWriter, &snipaste::core::ScreenshotHistoryWriter::saved, &app,
+        [&history](quint64 revision, const QString &directory) {
+            if (history.revision() != revision)
+                return;
+            history.rebaseBackgroundPaths(directory);
+            history.releaseDecodedImages();
+            history.releaseDecodedBackgrounds();
+            trimIdleProcessMemory();
+        });
+    QObject::connect(&historyWriter, &snipaste::core::ScreenshotHistoryWriter::failed, &app,
+        [](const QString &directory) { qWarning() << "failed to save screenshot history" << directory; });
     QString historyPath = config.value(QStringLiteral("general/history_dir"),
                                        config.value(QStringLiteral("history_dir"))).toString().trimmed();
     if (!historyPath.isEmpty()) {
@@ -1016,6 +980,9 @@ int main(int argc, char *argv[])
         historyPath = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
                       + QStringLiteral("/history");
     }
+    const auto persistHistory = [&historyWriter, &history, &historyPath] {
+        historyWriter.save(history, historyPath);
+    };
     // Loading every historical screenshot at startup keeps up to hundreds of
     // megabytes of decoded pixels resident even though the tray is idle.  The
     // history is populated on first use instead (startSnip/history.open or a
@@ -1089,7 +1056,7 @@ int main(int argc, char *argv[])
     for (const QVariant &region : config.value(QStringLiteral("capture/recentRegions")).toList())
         if (region.toRect().isValid()) recentSelections.append(region.toRect());
     if (recentSelections.isEmpty() && lastSelection.isValid()) recentSelections.append(lastSelection);
-    const auto recordScreenshot = [&history, &historyPath, &ensureHistoryLoaded](
+    const auto recordScreenshot = [&history, persistHistory, &ensureHistoryLoaded](
                                       const QImage &image,
                                       const QImage &background = {},
                                       snipaste::core::CaptureGeometry geometry = {}) {
@@ -1099,7 +1066,7 @@ int main(int argc, char *argv[])
         // tiles, so retaining it does not rewrite a multi-megabyte PNG for
         // every capture.
         history.add(image, background, geometry);
-        saveHistorySnapshotAsync(history, historyPath);
+        persistHistory();
     };
     const auto configuredOutputQuality = [&config] {
         return qBound(-1, config.value(QStringLiteral("output/imageQuality"), -1).toInt(), 100);
@@ -1283,7 +1250,7 @@ int main(int argc, char *argv[])
                             &activeOverlay,
                             &preparedOverlay,
                             &history,
-                            &historyPath,
+                            persistHistory,
                             ensureHistoryLoaded,
                             &lastSelection,
                             &recentSelections,
@@ -1462,10 +1429,13 @@ int main(int argc, char *argv[])
         for (const QRect &region : recentSelections)
             localRegions.append(region.translated(-screen->geometry().topLeft()));
         activeOverlay->setSelectionHistory(localRegions);
+        // Keep lazy loaders and geometry bound to the same immutable order.
+        // Capturing without closing can prepend to the live history meanwhile.
+        const auto captureHistory = std::make_shared<const snipaste::core::ScreenshotHistory>(history);
         activeOverlay->setCaptureHistory(
-            history.images(), history.geometries(), history.backgrounds(),
-            [&history](int index) { return history.backgroundAt(index); },
-            [&history](int index) { return history.imageAt(index); });
+            captureHistory->images(), captureHistory->geometries(), captureHistory->backgrounds(),
+            [captureHistory](int index) { return captureHistory->backgroundAt(index); },
+            [captureHistory](int index) { return captureHistory->imageAt(index); });
         QObject::connect(activeOverlay,
                          &snipaste::ui::SnipOverlay::selectionCaptured,
                          [&lastSelection, &recentSelections, &config, &maxHistoryRegions](const QRect &globalRect) {
@@ -1516,7 +1486,7 @@ int main(int argc, char *argv[])
                          showPaste);
         QObject::connect(activeOverlay,
                          &snipaste::ui::SnipOverlay::annotateRequested,
-                         [&config, &history, &historyPath, &pasteManager, &lastSelection, autoSaveScreenshot](const QImage &image) {
+                         [&config, &history, persistHistory, &pasteManager, &lastSelection, autoSaveScreenshot](const QImage &image) {
                              const QRect captureRegion = lastSelection;
                              snipaste::ui::AnnotationDialog dialog(image);
                              dialog.setAnnotationOptions(
@@ -1527,7 +1497,7 @@ int main(int argc, char *argv[])
                                  return;
                              const QImage annotated = dialog.resultImage();
                              history.add(annotated);
-                             saveHistorySnapshotAsync(history, historyPath);
+                             persistHistory();
                              autoSaveScreenshot(annotated);
                              pasteManager.rememberCapture(annotated, captureRegion);
                              snipaste::ui::copyImageToClipboard(
@@ -2285,16 +2255,16 @@ int main(int argc, char *argv[])
     commands.registerCommand({
         QStringLiteral("history.clear"),
         QStringLiteral("清空截屏历史"),
-        [&history, &historyPath] {
+        [&history, persistHistory] {
             history.clear();
-            saveHistorySnapshotAsync(history, historyPath);
+            persistHistory();
             qInfo() << "screenshot history cleared";
         },
     });
     commands.registerCommand({
         QStringLiteral("history.open"),
         QStringLiteral("打开截屏历史"),
-        [&history, &historyPath, &pasteManager, ensureHistoryLoaded] {
+        [&history, persistHistory, &pasteManager, ensureHistoryLoaded] {
             ensureHistoryLoaded();
             snipaste::ui::ScreenshotHistoryDialog dialog(history);
             QObject::connect(&dialog,
@@ -2308,7 +2278,7 @@ int main(int argc, char *argv[])
                              [&pasteManager](const QImage &image) { pasteManager.createPaste(image); });
             QObject::connect(&dialog,
                              &snipaste::ui::ScreenshotHistoryDialog::clearRequested,
-                             [&history, &historyPath] { saveHistorySnapshotAsync(history, historyPath); });
+                             persistHistory);
             dialog.exec();
         },
     });

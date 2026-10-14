@@ -53,6 +53,7 @@ set(SNIPASTE_CORE_SOURCES
     src/core/command/command_registry.cpp
     src/core/config/config_store.cpp
     src/core/history/screenshot_history.cpp
+    src/core/history/screenshot_history_writer.cpp
     src/core/scroll_stitcher.cpp
     src/core/recognition/ocr_service.cpp
     src/core/recognition/barcode_service.cpp
@@ -70,6 +71,7 @@ set(SNIPASTE_UI_SOURCES
     src/ui/paste/paste_window.cpp
     src/ui/paste/paste_manager.cpp
     src/ui/annotation/annotation_dialog.cpp
+    src/ui/annotation/image_region.cpp
     src/ui/history/screenshot_history_dialog.cpp
     src/ui/preferences/preferences_dialog_rich.cpp
     src/ui/preferences/preferences_appearance.cpp
@@ -103,6 +105,7 @@ set(SNIPASTE_HEADERS
     src/core/config/config_store.h
     src/core/control/hot_corner_state.h
     src/core/history/screenshot_history.h
+    src/core/history/screenshot_history_writer.h
     src/core/scroll_stitcher.h
     src/core/recognition/ocr_service.h
     src/core/recognition/barcode_service.h
@@ -117,6 +120,7 @@ set(SNIPASTE_HEADERS
     src/ui/paste/paste_manager.h
     src/ui/clipboard_output.h
     src/ui/annotation/annotation_dialog.h
+    src/ui/annotation/image_region.h
     src/ui/history/screenshot_history_dialog.h
     src/ui/preferences/preferences_dialog.h
     src/ui/preferences/appearance_settings.h
@@ -385,6 +389,8 @@ if(SNIPASTE_BUILD_TESTS)
             pasteCaptureOriginAndClipboardIsolation pasteClickAndDragCursor
             inlineTextInputAndCancel inlineTextOutput textEditorCleanupAndToolSwitch
             pasteRecoveryLimitAndDestruction pasteNewClipboardTakesPriority pastePersistence
+            pastePersistenceReusesPixelsAndHandlesFailure annotationInvalidationReleasesPixels
+            historyDialogLoadsPreviewsAsynchronously
             proGroupedToolsAndStyles proSizeRefreshAndOutput proHistoryAndSelectionShortcuts
             historyRestoresPairedGeometryAndBackground legacyHistoryUsesNeutralPreview proLayoutAndAnnotations
             -o "${CMAKE_CURRENT_BINARY_DIR}/paste-test-results-${scale}.txt,txt")

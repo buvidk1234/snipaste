@@ -1,6 +1,9 @@
 #include "ui/snip/snip_overlay.h"
 #include "ui/annotation/annotation_dialog.h"
 #include "platform/screen_capture.h"
+#include "core/config/config_store.h"
+#include "ui/paste/paste_manager.h"
+#include "ui/paste/paste_window.h"
 
 #include <QApplication>
 #include <QCryptographicHash>
@@ -12,6 +15,12 @@
 #include <QMouseEvent>
 #include <QPointer>
 #include <QScreen>
+#include <QTemporaryDir>
+#include <QDir>
+#include <QImageReader>
+#include <QIcon>
+#include <QFile>
+#include <QSslSocket>
 #include <cstdio>
 #include <memory>
 #include <vector>
@@ -22,7 +31,7 @@
 #endif
 
 // Native diagnostic only: sends events to its own widgets, never global
-// hotkeys or mouse input. It does not save screenshots or application settings.
+// hotkeys or mouse input. Disk measurements use an isolated temporary directory.
 static void mouse(QWidget *widget, QEvent::Type type, QPoint point)
 {
     const auto button = type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton;
@@ -42,6 +51,8 @@ static QJsonObject resources()
     GetProcessMemoryInfo(process, reinterpret_cast<PROCESS_MEMORY_COUNTERS *>(&memory), sizeof(memory));
     result["workingSetBytes"] = double(memory.WorkingSetSize);
     result["privateBytes"] = double(memory.PrivateUsage);
+    result["peakWorkingSetBytes"] = double(memory.PeakWorkingSetSize);
+    result["peakCommitBytes"] = double(memory.PeakPagefileUsage);
     // Task Manager reports resident private pages, which differs from both
     // total working set and committed private memory. Record it explicitly.
     std::vector<quintptr> pages(size_t(memory.WorkingSetSize / 4096) + 8192);
@@ -68,10 +79,41 @@ static QJsonObject resources()
     return result;
 }
 
+static QJsonObject imageFormats(QTemporaryDir &temporary)
+{
+    QImage formatImage(32, 24, QImage::Format_RGB32);
+    formatImage.fill(Qt::magenta);
+    bool formatsOk = true;
+    for (const char *format : {"PNG", "JPEG", "BMP"}) {
+        const QString path = temporary.filePath(QString::fromLatin1(format));
+        formatsOk = formatImage.save(path, format) && QImage(path).size() == formatImage.size() && formatsOk;
+    }
+    QFile svg(temporary.filePath(QStringLiteral("test.svg")));
+    bool svgOk = svg.open(QIODevice::WriteOnly);
+    if (svgOk) {
+        svg.write("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\" fill=\"red\"/></svg>");
+        svg.close();
+        svgOk = !QIcon(svg.fileName()).pixmap(20, 20).isNull();
+    }
+    return {{"packageImageFormatsOk", formatsOk}, {"packageSvgOk", svgOk}};
+}
+
 int main(int argc, char **argv)
 {
     QApplication app(argc, argv);
     app.setQuitOnLastWindowClosed(false);
+    if (app.arguments().contains(QStringLiteral("--package-formats-only"))) {
+        QTemporaryDir temporary;
+        if (!temporary.isValid())
+            return 2;
+        QJsonObject report = imageFormats(temporary);
+        report["platform"] = QGuiApplication::platformName();
+        report["sslSupported"] = QSslSocket::supportsSsl();
+        const QByteArray json = QJsonDocument(report).toJson();
+        std::fwrite(json.constData(), 1, size_t(json.size()), stdout);
+        return report["packageImageFormatsOk"].toBool() && report["packageSvgOk"].toBool()
+            && report["sslSupported"].toBool() ? 0 : 5;
+    }
     const bool prepared = app.arguments().contains(QStringLiteral("--prepared"));
     QJsonObject report;
     report["platform"] = QGuiApplication::platformName();
@@ -164,6 +206,47 @@ int main(int argc, char **argv)
     const QImage desktop = snipaste::platform::captureScreen(screen);
     report["desktopPixels"] = QJsonArray{desktop.width(), desktop.height()};
     report["desktopOpaque"] = !desktop.isNull() && desktop.pixelColor(0, 0).alpha() == 255;
+    QTemporaryDir temporary;
+    if (!temporary.isValid())
+        return 2;
+    snipaste::core::ConfigStore config(temporary.filePath(QStringLiteral("probe.ini")));
+    for (int i = 0; i < 1000; ++i)
+        config.setValue(QStringLiteral("Saved/key%1").arg(i), i);
+    timer.restart();
+    int defaults = 0;
+    for (int i = 0; i < 10000; ++i)
+        defaults += config.value(QStringLiteral("missing/default"), 1).toInt();
+    report["defaultLookups10000Ms"] = timer.nsecsElapsed() / 1e6;
+    report["defaultValuesCorrect"] = defaults == 10000;
+
+    snipaste::ui::PasteManager manager;
+    manager.setFlashNew(false);
+    manager.setActivateNew(false);
+    manager.rememberCapture(source, QRect(QPoint(20, 20), source.size()));
+    timer.restart();
+    for (int i = 0; i < 8; ++i) {
+        auto *pin = manager.createPaste(source);
+        pin->hide();
+    }
+    report["sameCapturePins8Ms"] = timer.nsecsElapsed() / 1e6;
+    const QString pasteDirectory = temporary.filePath(QStringLiteral("pastes"));
+    manager.saveState(pasteDirectory);
+    const QJsonObject beforeSave = resources();
+    timer.restart();
+    for (int i = 0; i < 3; ++i)
+        manager.saveState(pasteDirectory);
+    report["unchangedPinsSave3Ms"] = timer.nsecsElapsed() / 1e6;
+    const QJsonObject afterSave = resources();
+    report["unchangedPinsWriteBytes"] = afterSave.value("writeBytes").toDouble()
+        - beforeSave.value("writeBytes").toDouble();
+    report["persistedPinImages"] = QDir(pasteDirectory).entryList({QStringLiteral("paste-*.png")}, QDir::Files).size();
+    manager.destroyAll();
+    QApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    report["resourcesAfterTools"] = resources();
+
+    const QJsonObject formats = imageFormats(temporary);
+    for (auto it = formats.begin(); it != formats.end(); ++it)
+        report[it.key()] = it.value();
     const QByteArray json = QJsonDocument(report).toJson();
     std::fwrite(json.constData(), 1, size_t(json.size()), stdout);
     return 0;

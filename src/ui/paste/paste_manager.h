@@ -116,6 +116,7 @@ private:
     QSize m_lastClipboardSize;
     QRect m_captureRegion;
     quint64 m_captureFingerprint = 0;
+    qint64 m_captureImageKey = 0;
     QSize m_captureSize;
     bool m_captureAwaitingPaste = false;
     bool m_useCapturePosition = true;

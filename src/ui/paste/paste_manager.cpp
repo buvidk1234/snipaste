@@ -8,10 +8,14 @@
 #include <QClipboard>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMimeData>
+#include <QSaveFile>
+#include <QSet>
 #include <QStandardPaths>
 #include <QUrl>
 #include <QUuid>
@@ -19,6 +23,9 @@
 namespace snipaste::ui {
 
 namespace {
+
+constexpr auto kPersistedImageKey = "_snipastePersistedImageKey";
+constexpr auto kPersistedImagePath = "_snipastePersistedImagePath";
 
 quint64 imageFingerprint(const QImage &image)
 {
@@ -109,7 +116,8 @@ PasteWindow *PasteManager::createPaste(const QImage &image)
     // the awaiting flag only controls clipboard-priority handling below.
     const bool fromCapture = m_captureRegion.isValid()
         && pixels.size() == m_captureSize
-        && imageFingerprint(pixels) == m_captureFingerprint;
+        && (image.cacheKey() == m_captureImageKey
+            || imageFingerprint(pixels) == m_captureFingerprint);
     const QPoint capturePosition = m_captureRegion.topLeft();
     if (fromCapture) {
         m_captureAwaitingPaste = false;
@@ -140,6 +148,7 @@ void PasteManager::rememberCapture(const QImage &image, const QRect &globalRegio
     QImage pixels = image;
     pixels.setDevicePixelRatio(1);
     m_captureFingerprint = imageFingerprint(pixels);
+    m_captureImageKey = image.cacheKey();
     m_captureSize = pixels.size();
     m_captureRegion = globalRegion;
     m_captureAwaitingPaste = !image.isNull() && globalRegion.isValid();
@@ -505,7 +514,10 @@ PasteWindow *PasteManager::pasteClipboard(const QImage &image)
     }
     QImage pixels = image;
     pixels.setDevicePixelRatio(1);
-    const quint64 fingerprint = imageFingerprint(pixels);
+    // Direct capture-to-pin calls share the same QImage. Its content key is
+    // sufficient there; clipboard conversions still verify every pixel.
+    const quint64 fingerprint = image.cacheKey() == m_captureImageKey
+        ? m_captureFingerprint : imageFingerprint(pixels);
     // A new capture is a new paste even if its pixels happen to equal an older
     // closed pin (for example, two identical icons at different positions).
     if (m_captureAwaitingPaste && m_captureRegion.isValid()
@@ -997,6 +1009,8 @@ void PasteManager::loadState(const QString &directory)
             window->setShadowEnabled(windowObject.contains(QStringLiteral("shadow"))
                                          ? windowObject.value(QStringLiteral("shadow")).toBool()
                                          : m_shadowEnabled);
+            window->setProperty(kPersistedImageKey, window->sourceImage().cacheKey());
+            window->setProperty(kPersistedImagePath, QFileInfo(imagePath).absoluteFilePath());
             group.windows.append(window);
             connectWindow(window);
             if (windowObject.value(QStringLiteral("visible")).toBool(true))
@@ -1017,19 +1031,52 @@ void PasteManager::saveState(const QString &directory) const
     if (!dir.mkpath(QStringLiteral(".")))
         return;
 
+    struct PersistedImage {
+        QPointer<PasteWindow> window;
+        qint64 key;
+        QString path;
+    };
+    QList<PersistedImage> persistedImages;
+    QHash<qint64, QString> imageNames;
+    QSet<QString> expectedImages;
+    QStringList createdImages;
+    const auto discardNewImages = [&] {
+        for (const QString &fileName : createdImages)
+            dir.remove(fileName);
+    };
     QJsonArray groups;
     for (int groupIndex = 0; groupIndex < m_groups.size(); ++groupIndex) {
         QJsonArray windows;
-        int windowIndex = 0;
         for (const QPointer<PasteWindow> &window : m_groups.at(groupIndex).windows) {
             if (!window || window->state() != PasteWindow::State::Active
                 || window->sourceImage().isNull())
                 continue;
-            const QString fileName = QStringLiteral("paste-%1-%2.png")
-                                         .arg(groupIndex, 2, 10, QChar('0'))
-                                         .arg(windowIndex++, 3, 10, QChar('0'));
-            if (!window->sourceImage().save(dir.filePath(fileName), "PNG"))
-                continue;
+            const QImage &source = window->sourceImage();
+            const qint64 imageKey = source.cacheKey();
+            QString fileName = imageNames.value(imageKey);
+            if (fileName.isEmpty()) {
+                const QFileInfo savedImage(window->property(kPersistedImagePath).toString());
+                // Moving, regrouping or transforming a pin changes its state,
+                // not its source pixels. Keep the lossless PNG already saved
+                // for that source, including legacy position-named files.
+                if (window->property(kPersistedImageKey).toLongLong() == imageKey
+                    && savedImage.isFile() && savedImage.absolutePath() == dir.absolutePath()) {
+                    fileName = savedImage.fileName();
+                } else {
+                    fileName = QStringLiteral("paste-%1.png").arg(
+                        QUuid::createUuid().toString(QUuid::Id128));
+                    QSaveFile imageFile(dir.filePath(fileName));
+                    if (!imageFile.open(QIODevice::WriteOnly) || !source.save(&imageFile, "PNG")
+                        || !imageFile.commit()) {
+                        discardNewImages();
+                        return;
+                    }
+                    createdImages.append(fileName);
+                }
+                imageNames.insert(imageKey, fileName);
+            }
+            expectedImages.insert(fileName);
+            persistedImages.append({window, imageKey, QFileInfo(dir.filePath(fileName)).absoluteFilePath()});
             QJsonObject object;
             object.insert(QStringLiteral("image"), fileName);
             object.insert(QStringLiteral("visible"), window->isVisible());
@@ -1060,9 +1107,24 @@ void PasteManager::saveState(const QString &directory) const
     QJsonObject root;
     root.insert(QStringLiteral("activeGroup"), m_activeGroup);
     root.insert(QStringLiteral("groups"), groups);
-    QFile stateFile(dir.filePath(QStringLiteral("state.json")));
-    if (stateFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
-        stateFile.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    QSaveFile stateFile(dir.filePath(QStringLiteral("state.json")));
+    const QByteArray state = QJsonDocument(root).toJson(QJsonDocument::Indented);
+    if (!stateFile.open(QIODevice::WriteOnly) || stateFile.write(state) != state.size()
+        || !stateFile.commit()) {
+        discardNewImages();
+        return;
+    }
+    // A failed state commit must leave both the old JSON and its PNGs usable.
+    // Update reuse metadata and remove obsolete files only after committing.
+    for (const PersistedImage &image : persistedImages) {
+        if (image.window) {
+            image.window->setProperty(kPersistedImageKey, image.key);
+            image.window->setProperty(kPersistedImagePath, image.path);
+        }
+    }
+    for (const QString &fileName : dir.entryList({QStringLiteral("paste-*.png")}, QDir::Files))
+        if (!expectedImages.contains(fileName))
+            dir.remove(fileName);
 }
 
 int PasteManager::visibleCount() const

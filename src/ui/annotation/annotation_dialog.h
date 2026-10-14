@@ -90,8 +90,8 @@ public:
     void undo();
     void redo();
     void clearAnnotations();
-    bool canUndo() const { return m_eraserUndoAvailable || !m_shapes.isEmpty(); }
-    bool canRedo() const { return m_eraserRedoAvailable || !m_redoShapes.isEmpty(); }
+    bool canUndo() const { return !m_undoHistory.isEmpty(); }
+    bool canRedo() const { return !m_redoHistory.isEmpty(); }
 
 signals:
     void historyChanged();
@@ -146,6 +146,14 @@ private:
         // path is in image coordinates, so it remains correct when the
         // shape is moved or rotated and can be undone with the shape state.
         QPainterPath erasedPath;
+
+        bool operator==(const Shape &) const = default;
+    };
+    struct HistoryState {
+        QVector<Shape> shapes;
+        int nextNumber = 1;
+
+        bool operator==(const HistoryState &) const = default;
     };
     struct ToolStyle {
         QColor color = QColor(237, 28, 36);
@@ -175,7 +183,9 @@ private:
     void copySelectedShape();
     void pasteShape();
     void applyEraserSegment(const QPointF &from, const QPointF &to);
-    void invalidateEraserHistory();
+    void recordHistory();
+    void finishHistoryGesture();
+    void restoreHistoryState(HistoryState state);
     void invalidateRenderCache();
 
     QImage m_image;
@@ -184,12 +194,11 @@ private:
     QPoint m_coordinateOrigin;
     QRect m_outputViewport;
     QVector<Shape> m_shapes;
-    QVector<Shape> m_redoShapes;
-    QVector<Shape> m_eraserUndoSnapshot;
-    QVector<Shape> m_eraserRedoSnapshot;
-    bool m_eraserUndoAvailable = false;
-    bool m_eraserRedoAvailable = false;
-    bool m_lastOperationWasEraser = false;
+    // Retain vector state (including erasure masks), without copying desktop
+    // rasters. Qt containers and paths share their data until an edit occurs.
+    HistoryState m_committedState;
+    QVector<HistoryState> m_undoHistory;
+    QVector<HistoryState> m_redoHistory;
     QVector<Shape> m_shapeClipboard;
     // The committed annotation layer is independent from the in-progress
     // preview.  Keep one rasterized copy so pointer moves do not redraw every

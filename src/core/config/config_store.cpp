@@ -16,6 +16,7 @@ ConfigStore::ConfigStore(QString filePath)
 bool ConfigStore::load()
 {
     m_settings->sync();
+    m_foldedKeysValid = false;
     if (m_settings->status() != QSettings::NoError) {
         qWarning() << "failed to load configuration:" << m_filePath;
         return false;
@@ -34,6 +35,7 @@ bool ConfigStore::save()
             qWarning() << "failed to back up configuration:" << m_filePath;
     }
     m_settings->sync();
+    m_foldedKeysValid = false;
     if (m_settings->status() != QSettings::NoError) {
         qWarning() << "failed to save configuration:" << m_filePath;
         return false;
@@ -51,6 +53,7 @@ bool ConfigStore::relocate(const QString &filePath)
     if (next.status() != QSettings::NoError) return false;
     m_filePath = destination;
     m_settings = std::make_unique<QSettings>(m_filePath, QSettings::IniFormat);
+    m_foldedKeysValid = false;
     return true;
 }
 
@@ -65,16 +68,23 @@ QVariant ConfigStore::value(const QString &key, const QVariant &fallback) const
     // significant, so accept a case-insensitive spelling here.  This keeps
     // hand-written config.ini files compatible without duplicating every
     // lookup at the call site.
-    const QString folded = key.toCaseFolded();
-    for (const QString &candidate : m_settings->allKeys()) {
-        if (candidate.toCaseFolded() == folded)
-            return m_settings->value(candidate, fallback);
+    if (!m_foldedKeysValid) {
+        m_foldedKeys.clear();
+        for (const QString &candidate : m_settings->allKeys()) {
+            const QString folded = candidate.toCaseFolded();
+            if (!m_foldedKeys.contains(folded))
+                m_foldedKeys.insert(folded, candidate);
+        }
+        m_foldedKeysValid = true;
     }
-    return fallback;
+    const auto match = m_foldedKeys.constFind(key.toCaseFolded());
+    return match == m_foldedKeys.cend() ? fallback : m_settings->value(*match, fallback);
 }
 
 void ConfigStore::setValue(const QString &key, const QVariant &value)
 {
+    if (!m_settings->contains(key))
+        m_foldedKeysValid = false;
     m_settings->setValue(key, value);
 }
 

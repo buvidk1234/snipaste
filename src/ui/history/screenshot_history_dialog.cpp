@@ -3,6 +3,7 @@
 #include "core/history/screenshot_history.h"
 
 #include <QFileDialog>
+#include <QFutureWatcher>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QLabel>
@@ -13,6 +14,7 @@
 #include <QPixmap>
 #include <QPushButton>
 #include <QVBoxLayout>
+#include <QtConcurrent/QtConcurrentRun>
 
 namespace snipaste::ui {
 
@@ -94,24 +96,38 @@ ScreenshotHistoryDialog::ScreenshotHistoryDialog(core::ScreenshotHistory &histor
 
 void ScreenshotHistoryDialog::refresh()
 {
+    const quint64 generation = ++m_refreshGeneration;
+    const quint64 revision = m_history.revision();
     const int previousRow = m_list->currentRow();
     m_list->clear();
     for (int index = 0; index < m_history.size(); ++index) {
-        const QImage image = m_history.imageAt(index);
-        auto *item = new QListWidgetItem(QIcon(QPixmap::fromImage(image).scaled(
-                                                  128,
-                                                  96,
-                                                  Qt::KeepAspectRatio,
-                                                  Qt::SmoothTransformation)),
-                                         QStringLiteral("%1 × %2")
-                                             .arg(image.width())
-                                             .arg(image.height()),
-                                         m_list);
+        const QSize imageSize = m_history.imageSizeAt(index);
+        auto *item = new QListWidgetItem(QStringLiteral("%1 × %2")
+                                             .arg(imageSize.width()).arg(imageSize.height()), m_list);
         item->setData(Qt::UserRole, index);
+    }
+    if (m_history.size() > 0) {
+        auto *watcher = new QFutureWatcher<QList<QImage>>(this);
+        connect(watcher, &QFutureWatcher<QList<QImage>>::finished, this,
+            [this, watcher, generation, revision] {
+                const QList<QImage> thumbnails = watcher->result();
+                watcher->deleteLater();
+                if (generation != m_refreshGeneration || revision != m_history.revision())
+                    return;
+                for (int index = 0; index < thumbnails.size() && index < m_list->count(); ++index)
+                    m_list->item(index)->setIcon(QIcon(QPixmap::fromImage(thumbnails.at(index))));
+            });
+        watcher->setFuture(QtConcurrent::run([snapshot = m_history] {
+            QList<QImage> thumbnails;
+            for (int index = 0; index < snapshot.size(); ++index)
+                thumbnails.append(snapshot.thumbnailAt(index));
+            return thumbnails;
+        }));
     }
     if (m_list->count() > 0)
         m_list->setCurrentRow(qBound(0, previousRow, m_list->count() - 1));
-    updatePreview();
+    else
+        updatePreview();
 }
 
 QImage ScreenshotHistoryDialog::selectedImage() const
@@ -127,8 +143,10 @@ QImage ScreenshotHistoryDialog::selectedImage() const
 
 void ScreenshotHistoryDialog::updatePreview()
 {
-    const QImage image = selectedImage();
-    const bool hasImage = !image.isNull();
+    ++m_previewGeneration;
+    m_previewPending = false;
+    const int index = m_list->currentRow();
+    const bool hasImage = index >= 0 && index < m_history.size();
     for (auto *button : {m_copyButton, m_pasteButton, m_saveButton, m_clearButton})
         button->setEnabled(hasImage || button == m_clearButton);
     if (!hasImage) {
@@ -136,10 +154,40 @@ void ScreenshotHistoryDialog::updatePreview()
         m_preview->setText(QStringLiteral("暂无截屏历史"));
         return;
     }
-    m_preview->setText({});
-    m_preview->setPixmap(QPixmap::fromImage(image).scaled(m_preview->size(),
-                                                          Qt::KeepAspectRatio,
-                                                          Qt::SmoothTransformation));
+    m_preview->setPixmap({});
+    m_preview->setText(QStringLiteral("正在加载…"));
+    // Keep one decode in flight. Rapid selection changes replace the next
+    // request instead of queueing full-size image decodes for obsolete rows.
+    m_previewPending = true;
+    if (!m_previewWatcher)
+        startPreviewLoad();
+}
+
+void ScreenshotHistoryDialog::startPreviewLoad()
+{
+    m_previewPending = false;
+    const quint64 generation = m_previewGeneration;
+    const quint64 revision = m_history.revision();
+    const int index = m_list->currentRow();
+    auto *watcher = new QFutureWatcher<QImage>(this);
+    m_previewWatcher = watcher;
+    connect(watcher, &QFutureWatcher<QImage>::finished, this,
+        [this, watcher, generation, revision] {
+            const QImage preview = watcher->result();
+            m_previewWatcher = nullptr;
+            watcher->deleteLater();
+            if (generation == m_previewGeneration && revision == m_history.revision()) {
+                m_preview->setText(preview.isNull() ? QStringLiteral("无法读取截图") : QString());
+                m_preview->setPixmap(QPixmap::fromImage(preview));
+                for (auto *button : {m_copyButton, m_pasteButton, m_saveButton})
+                    button->setEnabled(!preview.isNull());
+            }
+            if (m_previewPending)
+                startPreviewLoad();
+        });
+    watcher->setFuture(QtConcurrent::run([snapshot = m_history, index, size = m_preview->size()] {
+        return snapshot.imageAt(index).scaled(size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    }));
 }
 
 } // namespace snipaste::ui

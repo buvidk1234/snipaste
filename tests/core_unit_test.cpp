@@ -1,5 +1,7 @@
 #include "core/command/argument_parser.h"
 #include "core/history/screenshot_history.h"
+#include "core/history/screenshot_history_writer.h"
+#include "core/config/config_store.h"
 #include "core/scroll_stitcher.h"
 
 #include <QDir>
@@ -7,6 +9,8 @@
 #include <QFileInfo>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QSignalSpy>
+#include <atomic>
 
 using namespace snipaste::core;
 
@@ -22,6 +26,8 @@ private slots:
     void persistsHistoryWithoutRenamingExistingFiles();
     void historyGeometryStaysWithEachCapture();
     void loadsLegacyHistoryWithoutInventingGeometry();
+    void historyWriterCoalescesPendingImages();
+    void configLookupCachePreservesCompatibility();
     void stitchesVerticalScrollFrames();
 };
 
@@ -80,7 +86,7 @@ void CoreUnitTest::persistsHistoryWithoutRenamingExistingFiles()
 
     const QStringList firstFiles = QDir(directory.path()).entryList(
         {QStringLiteral("*.png"), QStringLiteral("*.background.tiles")}, QDir::Files, QDir::Name);
-    QCOMPARE(firstFiles.size(), 2);
+    QCOMPARE(firstFiles.size(), 3);
 
     QImage second(first.size(), first.format());
     second.fill(Qt::blue);
@@ -90,7 +96,7 @@ void CoreUnitTest::persistsHistoryWithoutRenamingExistingFiles()
 
     const QStringList secondFiles = QDir(directory.path()).entryList(
         {QStringLiteral("*.png"), QStringLiteral("*.background.tiles")}, QDir::Files, QDir::Name);
-    QCOMPARE(secondFiles.size(), 4);
+    QCOMPARE(secondFiles.size(), 6);
     for (const QString &file : firstFiles)
         QVERIFY2(secondFiles.contains(file), qPrintable(file));
     QCOMPARE(QDir(directory.path() + QStringLiteral("/background-tiles")).entryList(
@@ -103,6 +109,8 @@ void CoreUnitTest::persistsHistoryWithoutRenamingExistingFiles()
     QCOMPARE(loaded.imageAt(1).pixelColor(0, 0), QColor(Qt::red));
     QCOMPARE(loaded.backgroundAt(0).pixelColor(0, 0), QColor(Qt::black));
     QCOMPARE(loaded.backgroundAt(1).pixelColor(0, 0), QColor(Qt::black));
+    QCOMPARE(loaded.imageSizeAt(0), second.size());
+    QCOMPARE(loaded.thumbnailAt(0).pixelColor(0, 0), QColor(Qt::blue));
 }
 
 void CoreUnitTest::historyGeometryStaysWithEachCapture()
@@ -196,6 +204,75 @@ void CoreUnitTest::loadsLegacyHistoryWithoutInventingGeometry()
     order.close();
     history.loadFromDirectory(directory.path());
     QCOMPARE(history.size(), 0);
+}
+
+void CoreUnitTest::historyWriterCoalescesPendingImages()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    std::atomic<int> liveImages{0};
+    struct Pixels
+    {
+        QByteArray data;
+        std::atomic<int> *liveImages;
+    };
+    ScreenshotHistory history(1);
+    ScreenshotHistoryWriter writer;
+    QSignalSpy saved(&writer, &ScreenshotHistoryWriter::saved);
+    QSignalSpy failed(&writer, &ScreenshotHistoryWriter::failed);
+    for (int index = 0; index < 40; ++index) {
+        const QSize size = index == 0 ? QSize(3840, 2160) : QSize(512, 512);
+        auto *pixels = new Pixels{QByteArray(size.width() * size.height() * 4, char(index)), &liveImages};
+        ++liveImages;
+        QImage image(reinterpret_cast<uchar *>(pixels->data.data()), size.width(), size.height(),
+                     size.width() * 4, QImage::Format_RGB32, [](void *data) {
+                         auto *pixels = static_cast<Pixels *>(data);
+                         --*pixels->liveImages;
+                         delete pixels;
+                     }, pixels);
+        history.add(image);
+        writer.save(history, directory.path());
+        image = {};
+        history.clear();
+        // One being saved plus the newest pending. Superseded requests must
+        // release their pixels immediately rather than wait for a worker slot.
+        QVERIFY2(liveImages.load() <= 2, "obsolete history requests retained image buffers");
+    }
+    writer.waitForDone();
+    QTRY_COMPARE(saved.count(), 1);
+    QCOMPARE(failed.count(), 0);
+    QCOMPARE(liveImages.load(), 0);
+    ScreenshotHistory restored;
+    restored.loadFromDirectory(directory.path());
+    QCOMPARE(restored.size(), 1);
+    QCOMPARE(restored.imageAt(0).size(), QSize(512, 512));
+    QCOMPARE(restored.imageAt(0).pixel(0, 0) & 0x00ffffff, quint32(0x00272727));
+}
+
+void CoreUnitTest::configLookupCachePreservesCompatibility()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString path = directory.filePath(QStringLiteral("config.ini"));
+    ConfigStore config(path);
+    config.setValue(QStringLiteral("Snip/Remember"), true);
+    QCOMPARE(config.value(QStringLiteral("snip/remember"), false).toBool(), true);
+    QCOMPARE(config.value(QStringLiteral("missing"), 41).toInt(), 41);
+    config.setValue(QStringLiteral("MiSSing"), 42);
+    QCOMPARE(config.value(QStringLiteral("missing"), 41).toInt(), 42);
+    config.setValue(QStringLiteral("Snip/Remember"), false);
+    QCOMPARE(config.value(QStringLiteral("snip/remember"), true).toBool(), false);
+    QVERIFY(config.save());
+    {
+        QSettings external(path, QSettings::IniFormat);
+        external.setValue(QStringLiteral("New/External"), 43);
+        external.sync();
+    }
+    QVERIFY(config.load());
+    QCOMPARE(config.value(QStringLiteral("new/external")).toInt(), 43);
+    QVERIFY(config.relocate(directory.filePath(QStringLiteral("next.ini"))));
+    QCOMPARE(config.value(QStringLiteral("new/external")).toInt(), 43);
+    QCOMPARE(config.value(QStringLiteral("unknown"), 44).toInt(), 44);
 }
 
 void CoreUnitTest::stitchesVerticalScrollFrames()

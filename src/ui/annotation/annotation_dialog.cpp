@@ -1,4 +1,5 @@
 #include "ui/annotation/annotation_dialog.h"
+#include "ui/annotation/image_region.h"
 #include "ui/clipboard_output.h"
 #include "platform/keyboard.h"
 
@@ -98,6 +99,7 @@ AnnotationCanvas::~AnnotationCanvas()
 void AnnotationCanvas::setTool(Tool tool)
 {
     finishTextInput();
+    finishHistoryGesture();
     m_selectedShape = -1;
     m_editingShape = false;
     m_resizingHandle = -1;
@@ -196,6 +198,7 @@ void AnnotationCanvas::setCornerRadius(qreal radius)
     m_cornerRadius = qBound<qreal>(0.0, radius, 100.0);
     if (m_selectedShape >= 0 && m_selectedShape < m_shapes.size())
         m_shapes[m_selectedShape].cornerRadius = m_cornerRadius;
+    recordHistory();
     invalidateRenderCache();
     update();
 }
@@ -205,6 +208,7 @@ void AnnotationCanvas::setMagnification(qreal factor)
     m_magnification = qBound<qreal>(1.1, factor, 8.0);
     if (m_selectedShape >= 0 && m_selectedShape < m_shapes.size())
         m_shapes[m_selectedShape].magnification = m_magnification;
+    recordHistory();
     invalidateRenderCache();
     update();
 }
@@ -214,6 +218,7 @@ void AnnotationCanvas::setNumberStyle(int style)
     m_numberStyle = qBound(0, style, 2);
     if (m_selectedShape >= 0 && m_selectedShape < m_shapes.size())
         m_shapes[m_selectedShape].numberStyle = m_numberStyle;
+    recordHistory();
     invalidateRenderCache();
     updateToolCursor();
     update();
@@ -224,6 +229,7 @@ void AnnotationCanvas::setNumberSize(qreal size)
     m_numberSize = qBound<qreal>(12.0, size, 96.0);
     if (m_selectedShape >= 0 && m_selectedShape < m_shapes.size())
         m_shapes[m_selectedShape].numberSize = m_numberSize;
+    recordHistory();
     invalidateRenderCache();
     updateToolCursor();
     update();
@@ -234,6 +240,7 @@ void AnnotationCanvas::setShapeFilled(bool enabled)
     m_shapeFilled = enabled;
     if (m_selectedShape >= 0 && m_selectedShape < m_shapes.size())
         m_shapes[m_selectedShape].filled = enabled;
+    recordHistory();
     invalidateRenderCache();
     update();
 }
@@ -290,19 +297,19 @@ void AnnotationCanvas::setCanvasFrame(QPoint origin, QSizeF logicalSize, QRect o
 void AnnotationCanvas::setCaptureImage(QImage image, QPointF annotationOffset, QSizeF logicalSize)
 {
     finishTextInput();
+    finishHistoryGesture();
     // Resizing a screenshot changes the crop, not the scale of existing marks.
     // Retain even clipped shapes so expanding the crop or redoing restores them.
-    const auto translate = [annotationOffset](Shape &shape) {
-        shape.start += annotationOffset;
-        shape.end += annotationOffset;
-        shape.sourceRect.translate(annotationOffset);
-        for (auto &point : shape.points)
-            point += annotationOffset;
+    const auto translate = [this, annotationOffset](QVector<Shape> &shapes) {
+        for (Shape &shape : shapes)
+            translateShape(shape, annotationOffset);
     };
-    for (auto &shape : m_shapes) translate(shape);
-    for (auto &shape : m_redoShapes) translate(shape);
-    for (auto &shape : m_eraserUndoSnapshot) translate(shape);
-    for (auto &shape : m_eraserRedoSnapshot) translate(shape);
+    if (!annotationOffset.isNull()) {
+        translate(m_shapes);
+        translate(m_committedState.shapes);
+        for (HistoryState &state : m_undoHistory) translate(state.shapes);
+        for (HistoryState &state : m_redoHistory) translate(state.shapes);
+    }
     m_start += annotationOffset;
     m_current += annotationOffset;
     for (auto &point : m_currentPoints) point += annotationOffset;
@@ -449,13 +456,38 @@ int AnnotationCanvas::shapeAt(const QPointF &point) const
     return -1;
 }
 
-void AnnotationCanvas::invalidateEraserHistory()
+void AnnotationCanvas::recordHistory()
 {
-    m_eraserUndoSnapshot.clear();
-    m_eraserRedoSnapshot.clear();
-    m_eraserUndoAvailable = false;
-    m_eraserRedoAvailable = false;
-    m_lastOperationWasEraser = false;
+    HistoryState current{m_shapes, m_nextNumber};
+    if (current == m_committedState)
+        return;
+    m_undoHistory.append(std::move(m_committedState));
+    m_committedState = std::move(current);
+    m_redoHistory.clear();
+    emit historyChanged();
+}
+
+void AnnotationCanvas::finishHistoryGesture()
+{
+    m_dragging = m_editingShape = m_editingRotation = false;
+    m_resizingHandle = -1;
+    m_editingMagnifierPart = MagnifierPart::None;
+    m_currentPoints.clear();
+    // Mouse moves only update the preview. One completed gesture creates one
+    // history entry, and selecting or erasing empty space creates none.
+    recordHistory();
+}
+
+void AnnotationCanvas::restoreHistoryState(HistoryState state)
+{
+    m_shapes = state.shapes;
+    m_nextNumber = state.nextNumber;
+    m_committedState = std::move(state);
+    m_selectedShape = -1;
+    invalidateRenderCache();
+    updateToolCursor();
+    emit historyChanged();
+    update();
 }
 
 void AnnotationCanvas::applyEraserSegment(const QPointF &from, const QPointF &to)
@@ -478,7 +510,8 @@ void AnnotationCanvas::applyEraserSegment(const QPointF &from, const QPointF &to
     const QRectF eraseBounds = eraserPath.boundingRect();
     bool changed = false;
     for (Shape &shape : m_shapes) {
-        if (!shapeBounds(shape).intersects(eraseBounds))
+        if (!shapeBounds(shape).intersects(eraseBounds)
+            || shape.erasedPath.contains(eraserPath))
             continue;
         // Keep the original vector shape and accumulate covered regions.
         // Rendering subtracts this path from this shape only, so a later
@@ -490,8 +523,6 @@ void AnnotationCanvas::applyEraserSegment(const QPointF &from, const QPointF &to
     if (!changed)
         return;
     invalidateRenderCache();
-    m_redoShapes.clear();
-    emit historyChanged();
     update();
 }
 
@@ -526,8 +557,9 @@ void AnnotationCanvas::rotateSelected(qreal degrees)
 {
     if (m_selectedShape < 0 || m_selectedShape >= m_shapes.size())
         return;
+    if (qFuzzyIsNull(degrees))
+        return;
     Shape &shape = m_shapes[m_selectedShape];
-    invalidateEraserHistory();
     Shape unrotated = shape;
     unrotated.rotation = 0.0;
     const QPointF center = shapeBounds(unrotated).center();
@@ -538,8 +570,8 @@ void AnnotationCanvas::rotateSelected(qreal degrees)
     if (shape.rotation > 180.0)
         shape.rotation -= 360.0;
     invalidateRenderCache();
-    m_redoShapes.clear();
-    emit historyChanged();
+    if (!m_editingRotation)
+        recordHistory();
     update();
 }
 
@@ -1264,15 +1296,8 @@ void AnnotationCanvas::mousePressEvent(QMouseEvent *event)
     if (event->button() == Qt::RightButton) {
         if (m_textEditing)
             finishTextInput();
-        if (m_editingShape) {
-            m_editingShape = false;
-            m_editingMagnifierPart = MagnifierPart::None;
-            emit historyChanged();
-        }
-        if (m_dragging) {
-            m_dragging = false;
-            m_currentPoints.clear();
-        }
+        finishHistoryGesture();
+        update();
         setFocus();
         event->accept();
         return;
@@ -1280,6 +1305,7 @@ void AnnotationCanvas::mousePressEvent(QMouseEvent *event)
     if (event->button() != Qt::LeftButton)
         return;
     finishTextInput();
+    finishHistoryGesture();
     setFocus();
     const QPointF imagePoint = toImagePoint(event->position());
     if (!(m_tool == Tool::Eraser && m_disableEraserEditing)
@@ -1325,7 +1351,6 @@ void AnnotationCanvas::mousePressEvent(QMouseEvent *event)
         translateShape(duplicate, QPointF(12.0, 12.0));
         m_shapes.append(std::move(duplicate));
         invalidateRenderCache();
-        invalidateEraserHistory();
         m_selectedShape = m_shapes.size() - 1;
         m_editingShape = true;
         m_editingMagnifierPart = duplicatedTool == Tool::Magnifier
@@ -1383,24 +1408,17 @@ void AnnotationCanvas::mousePressEvent(QMouseEvent *event)
     }
     if (m_tool == Tool::Number) {
         m_dragging = false;
-        invalidateEraserHistory();
         Shape shape = currentShape();
         shape.text = QString::number(m_nextNumber++);
         m_shapes.append(shape);
         invalidateRenderCache();
         if (m_autoSelectOnCreation)
             m_selectedShape = m_shapes.size() - 1;
-        m_redoShapes.clear();
-        emit historyChanged();
+        recordHistory();
         updateToolCursor();
         update();
     }
     if (m_tool == Tool::Eraser) {
-        m_eraserUndoSnapshot = m_shapes;
-        m_eraserRedoSnapshot.clear();
-        m_eraserUndoAvailable = true;
-        m_eraserRedoAvailable = false;
-        m_lastOperationWasEraser = true;
         applyEraserSegment(imagePoint, imagePoint);
         return;
     }
@@ -1470,13 +1488,11 @@ void AnnotationCanvas::finishTextInput(bool commit)
     m_textShape.text = m_textEditor->toPlainText();
     m_textEditor->hide();
     if (commit && !m_textShape.text.isEmpty()) {
-        invalidateEraserHistory();
         m_shapes.append(m_textShape);
         invalidateRenderCache();
         if (m_autoSelectOnCreation)
             m_selectedShape = m_shapes.size() - 1;
-        m_redoShapes.clear();
-        emit historyChanged();
+        recordHistory();
     }
     m_textEditor->clear();
     update();
@@ -1613,11 +1629,7 @@ void AnnotationCanvas::mouseMoveEvent(QMouseEvent *event)
 void AnnotationCanvas::mouseReleaseEvent(QMouseEvent *event)
 {
     if ((m_editingShape || m_editingRotation || m_resizingHandle >= 0) && event->button() == Qt::LeftButton) {
-        m_editingShape = false;
-        m_editingRotation = false;
-        m_resizingHandle = -1;
-        m_editingMagnifierPart = MagnifierPart::None;
-        emit historyChanged();
+        finishHistoryGesture();
         update();
         event->accept();
         return;
@@ -1654,14 +1666,11 @@ void AnnotationCanvas::mouseReleaseEvent(QMouseEvent *event)
     if (m_tool == Tool::Eraser) {
         const QPointF previous = m_currentPoints.isEmpty() ? m_current : m_currentPoints.last();
         applyEraserSegment(previous, m_current);
-        m_dragging = false;
-        m_currentPoints.clear();
-        emit historyChanged();
+        finishHistoryGesture();
         update();
         event->accept();
         return;
     }
-    invalidateEraserHistory();
     const bool effectBrush = (m_tool == Tool::Mosaic || m_tool == Tool::Blur)
         && m_effectShape == EffectShape::Brush;
     if (effectBrush)
@@ -1680,10 +1689,7 @@ void AnnotationCanvas::mouseReleaseEvent(QMouseEvent *event)
     if (m_autoSelectOnCreation && !isNonMovableBrush(m_tool)
         && m_shapes.size() > shapeCountBefore)
         m_selectedShape = m_shapes.size() - 1;
-    m_redoShapes.clear();
-    m_dragging = false;
-    m_currentPoints.clear();
-    emit historyChanged();
+    finishHistoryGesture();
     update();
 }
 
@@ -1769,12 +1775,11 @@ void AnnotationCanvas::keyPressEvent(QKeyEvent *event)
     }
     if (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) {
         if (m_selectedShape >= 0 && m_selectedShape < m_shapes.size()) {
-            invalidateEraserHistory();
+            finishHistoryGesture();
             m_shapes.removeAt(m_selectedShape);
             invalidateRenderCache();
             m_selectedShape = -1;
-            m_redoShapes.clear();
-            emit historyChanged();
+            recordHistory();
             update();
         } else {
             clearAnnotations();
@@ -1795,14 +1800,13 @@ void AnnotationCanvas::pasteShape()
 {
     if (m_shapeClipboard.isEmpty())
         return;
+    finishHistoryGesture();
     Shape pasted = m_shapeClipboard.constLast();
-    invalidateEraserHistory();
     translateShape(pasted, QPointF(12.0, 12.0));
     m_shapes.append(std::move(pasted));
     invalidateRenderCache();
     m_selectedShape = m_shapes.size() - 1;
-    m_redoShapes.clear();
-    emit historyChanged();
+    recordHistory();
     update();
 }
 
@@ -1836,7 +1840,6 @@ QImage AnnotationCanvas::fullRenderedImage(bool includePendingText) const
             source = source.intersected(QRectF(result.rect()));
             if (source.isEmpty())
                 continue;
-            const QImage sourceFrame = result;
             painter.save();
             applyErasedClip(painter, shape);
             if (shape.effectShape == EffectShape::Ellipse) {
@@ -1850,18 +1853,11 @@ QImage AnnotationCanvas::fullRenderedImage(bool includePendingText) const
             } else {
                 painter.setClipRect(target, Qt::IntersectClip);
             }
-            painter.setRenderHint(QPainter::SmoothPixmapTransform);
             // Map the source centre onto the target centre.  Drawing the
             // clipped source directly through this transform avoids the
             // top-left anchoring and stretching that occurred when a source
             // rectangle touched the image boundary.
-            QTransform zoomTransform;
-            zoomTransform.translate(target.center().x(), target.center().y());
-            zoomTransform.scale(target.width() / qMax<qreal>(1.0, unclippedSource.width()),
-                                target.height() / qMax<qreal>(1.0, unclippedSource.height()));
-            zoomTransform.translate(-unclippedSource.center().x(), -unclippedSource.center().y());
-            painter.setWorldTransform(zoomTransform, true);
-            painter.drawImage(QPointF(0, 0), sourceFrame);
+            annotation::paintMagnifiedRegion(painter, result, unclippedSource, target);
             painter.restore();
             Shape outline = shape;
             outline.sourceRect = source;
@@ -1895,6 +1891,10 @@ QImage AnnotationCanvas::fullRenderedImage(bool includePendingText) const
 void AnnotationCanvas::invalidateRenderCache()
 {
     m_renderCacheValid = false;
+    // Undo/redo retains vector shapes, not this raster. Release the stale
+    // frame before rebuilding so it does not overlap with the next full-size
+    // result or survive a clear/undo back to an unannotated canvas.
+    m_renderCache = {};
 }
 
 QImage AnnotationCanvas::renderedImage(bool includePendingText) const
@@ -1907,57 +1907,33 @@ QImage AnnotationCanvas::renderedImage(bool includePendingText) const
 void AnnotationCanvas::undo()
 {
     finishTextInput();
-    if (m_lastOperationWasEraser && m_eraserUndoAvailable) {
-        m_eraserRedoSnapshot = m_shapes;
-        m_shapes = m_eraserUndoSnapshot;
-        m_eraserRedoAvailable = true;
-        m_eraserUndoAvailable = false;
-        m_lastOperationWasEraser = false;
-        invalidateRenderCache();
-        emit historyChanged();
-        update();
+    finishHistoryGesture();
+    if (m_undoHistory.isEmpty())
         return;
-    }
-    if (m_shapes.isEmpty())
-        return;
-    m_redoShapes.append(m_shapes.takeLast());
-    invalidateRenderCache();
-    emit historyChanged();
-    update();
+    m_redoHistory.append(std::move(m_committedState));
+    restoreHistoryState(m_undoHistory.takeLast());
 }
 
 void AnnotationCanvas::redo()
 {
     finishTextInput();
-    if (m_eraserRedoAvailable) {
-        m_eraserUndoSnapshot = m_shapes;
-        m_shapes = m_eraserRedoSnapshot;
-        m_eraserUndoAvailable = true;
-        m_eraserRedoAvailable = false;
-        m_lastOperationWasEraser = true;
-        invalidateRenderCache();
-        emit historyChanged();
-        update();
+    finishHistoryGesture();
+    if (m_redoHistory.isEmpty())
         return;
-    }
-    if (m_redoShapes.isEmpty())
-        return;
-    m_shapes.append(m_redoShapes.takeLast());
-    invalidateRenderCache();
-    emit historyChanged();
-    update();
+    m_undoHistory.append(std::move(m_committedState));
+    restoreHistoryState(m_redoHistory.takeLast());
 }
 
 void AnnotationCanvas::clearAnnotations()
 {
     finishTextInput(false);
+    finishHistoryGesture();
     if (m_shapes.isEmpty())
         return;
-    invalidateEraserHistory();
-    m_redoShapes += m_shapes;
     m_shapes.clear();
+    m_selectedShape = -1;
     invalidateRenderCache();
-    emit historyChanged();
+    recordHistory();
     update();
 }
 
@@ -1975,11 +1951,10 @@ void AnnotationCanvas::resetCapture()
     m_coordinateOrigin = {};
     m_outputViewport = {};
     m_shapes.clear();
-    m_redoShapes.clear();
-    m_eraserUndoSnapshot.clear();
-    m_eraserRedoSnapshot.clear();
+    m_committedState = {};
+    m_undoHistory.clear();
+    m_redoHistory.clear();
     m_shapeClipboard.clear();
-    m_eraserUndoAvailable = m_eraserRedoAvailable = m_lastOperationWasEraser = false;
     m_dragging = m_editingShape = m_editingRotation = false;
     m_resizingHandle = m_selectedShape = -1;
     m_editingMagnifierPart = MagnifierPart::None;

@@ -379,18 +379,33 @@ bool ScreenshotHistory::saveToDirectory(const QString &directory) const
             key = QStringLiteral("capture-%1").arg(QUuid::createUuid().toString(QUuid::Id128));
         const QString imageFileName = key + QStringLiteral(".png");
         const QString imagePath = historyDir.filePath(imageFileName);
+        QImage decodedImage;
         // The previous worker can have written this entry before the GUI
         // thread rebased its paths. Check its stable file, not just the path
         // list, to avoid writing it again during rapid consecutive captures.
         if (!QFileInfo::exists(imagePath)) {
-            const QImage image = imageAt(index);
+            decodedImage = imageAt(index);
             QSaveFile imageFile(imagePath);
-            if (image.isNull() || !imageFile.open(QIODevice::WriteOnly)
-                || !image.save(&imageFile, "PNG") || !imageFile.commit())
+            if (decodedImage.isNull() || !imageFile.open(QIODevice::WriteOnly)
+                || !decodedImage.save(&imageFile, "PNG") || !imageFile.commit())
                 return false;
         }
         persistedKeys.append(key);
         expectedFiles.insert(imageFileName);
+
+        const QString thumbnailFileName = key + QStringLiteral(".thumbnail.png");
+        const QString thumbnailPath = historyDir.filePath(thumbnailFileName);
+        if (!QFileInfo::exists(thumbnailPath)) {
+            if (decodedImage.isNull())
+                decodedImage = imageAt(index);
+            QImage thumbnail = decodedImage.scaled(128, 96, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            thumbnail.setDevicePixelRatio(1);
+            QSaveFile thumbnailFile(thumbnailPath);
+            if (thumbnail.isNull() || !thumbnailFile.open(QIODevice::WriteOnly)
+                || !thumbnail.save(&thumbnailFile, "PNG") || !thumbnailFile.commit())
+                return false;
+        }
+        expectedFiles.insert(thumbnailFileName);
 
         QString backgroundPath = backgroundPathForKey(historyDir, key);
         if (backgroundPath.isEmpty()) {
@@ -514,6 +529,31 @@ QImage ScreenshotHistory::imageAt(int index) const
     if (!image.load(m_imagePaths.at(index)))
         return {};
     return image;
+}
+
+QSize ScreenshotHistory::imageSizeAt(int index) const
+{
+    if (index < 0 || index >= m_images.size())
+        return {};
+    if (!m_images.at(index).isNull())
+        return m_images.at(index).size();
+    return index < m_imagePaths.size() ? QImageReader(m_imagePaths.at(index)).size() : QSize();
+}
+
+QImage ScreenshotHistory::thumbnailAt(int index) const
+{
+    if (index < 0 || index >= m_images.size())
+        return {};
+    if (index < m_imagePaths.size() && !m_imagePaths.at(index).isEmpty()) {
+        const QFileInfo imageFile(m_imagePaths.at(index));
+        QImage thumbnail(imageFile.dir().filePath(imageFile.completeBaseName()
+                                                   + QStringLiteral(".thumbnail.png")));
+        if (!thumbnail.isNull())
+            return thumbnail;
+    }
+    QImage thumbnail = imageAt(index).scaled(128, 96, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    thumbnail.setDevicePixelRatio(1);
+    return thumbnail;
 }
 
 const QList<QImage> &ScreenshotHistory::backgrounds() const
