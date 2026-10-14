@@ -1,6 +1,6 @@
 #include "ui/snip/snip_overlay.h"
 #include "ui/clipboard_output.h"
-#include "ui/annotation/annotation_dialog.h"
+#include "ui/annotation/annotation_canvas.h"
 #include "core/command/argument_parser.h"
 #include "platform/keyboard.h"
 #include "platform/screen_capture.h"
@@ -330,7 +330,7 @@ void SnipOverlay::playCaptureSound() const
     // child processes.
     PlaySoundW(reinterpret_cast<LPCWSTR>(path.utf16()), nullptr,
                SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
-#elif defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#elif defined(Q_OS_MACOS)
     QProcess::startDetached(QStringLiteral("afplay"), {path});
 #else
     if (!QProcess::startDetached(QStringLiteral("paplay"), {path}))

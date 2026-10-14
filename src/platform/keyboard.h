@@ -8,7 +8,7 @@ namespace snipaste::platform {
 
 inline constexpr Qt::KeyboardModifier primaryModifier()
 {
-#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#if defined(Q_OS_MACOS)
     return Qt::MetaModifier;
 #else
     return Qt::ControlModifier;
@@ -22,7 +22,7 @@ inline bool hasPrimaryModifier(Qt::KeyboardModifiers modifiers)
 
 inline QString primaryModifierText()
 {
-#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#if defined(Q_OS_MACOS)
     return QStringLiteral("Cmd");
 #else
     return QStringLiteral("Ctrl");
@@ -31,7 +31,7 @@ inline QString primaryModifierText()
 
 inline QString primaryPortableModifierText()
 {
-#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#if defined(Q_OS_MACOS)
     return QStringLiteral("Meta");
 #else
     return QStringLiteral("Ctrl");

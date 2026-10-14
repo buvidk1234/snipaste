@@ -189,7 +189,8 @@ private:
     int m_shadowSize = 32;
     QColor m_shadowColor = QColor(0, 0, 0, 150);
     int m_borderWidth = 1;
-    QColor m_borderColor = QColor(70, 70, 70, 180);
+    // Keep the visible outline after the introductory flash has finished.
+    QColor m_borderColor = QColor(255, 205, 60, 255);
     QColor m_customBackgroundColor = QColor(255, 255, 255, 245);
     QPoint m_dragOffset;
     QPoint m_pressPosition;

@@ -1,6 +1,6 @@
 #include "core/config/config_store.h"
 #include "core/control/hot_corner_state.h"
-#include "ui/annotation/annotation_dialog.h"
+#include "ui/annotation/annotation_canvas.h"
 #include "ui/annotation/image_region.h"
 #include "ui/preferences/preferences_dialog.h"
 #include "ui/paste/paste_manager.h"
@@ -120,6 +120,8 @@ private slots:
     void pastePreservesOriginalPixels_data();
     void pastePreservesOriginalPixels();
     void pasteDefaultsOpaque();
+    void pasteOutlineSurvivesFlashAndZoom_data();
+    void pasteOutlineSurvivesFlashAndZoom();
     void pasteDisplayKeepsNativePixels_data();
     void pasteDisplayKeepsNativePixels();
     void pasteSelectionClipboardSize_data();
@@ -2428,6 +2430,77 @@ void UiRegressionTest::pasteDefaultsOpaque()
     QPointer<ui::PasteWindow> pin = manager.createPaste(image);
     QVERIFY(pin);
     QCOMPARE(pin->windowOpacity(), 1.0);
+}
+
+void UiRegressionTest::pasteOutlineSurvivesFlashAndZoom_data()
+{
+    QTest::addColumn<bool>("shadow");
+    QTest::newRow("without-shadow") << false;
+    QTest::newRow("with-shadow") << true;
+}
+
+void UiRegressionTest::pasteOutlineSurvivesFlashAndZoom()
+{
+    QFETCH(bool, shadow);
+    QImage source(301, 199, QImage::Format_ARGB32_Premultiplied);
+    source.fill(QColor(57, 62, 72));
+    ui::PasteManager manager;
+    manager.setShadowEnabled(shadow);
+    auto *pin = manager.createPaste(source);
+    QVERIFY(pin);
+    const QString artifactDir = qEnvironmentVariable("SNIPASTE_TEST_ARTIFACTS");
+    const auto saveFrame = [&](const QString &stage) {
+        if (!artifactDir.isEmpty()) {
+            QDir().mkpath(artifactDir);
+            if (QGuiApplication::platformName() == QStringLiteral("windows")) {
+                pin->screen()->grabWindow(0, pin->x(), pin->y(), pin->width(), pin->height())
+                    .save(QDir(artifactDir).filePath(
+                        QStringLiteral("paste-outline-%1-%2-%3-screen.png")
+                            .arg(pin->devicePixelRatioF()).arg(shadow).arg(stage)));
+            }
+            pin->grab().save(QDir(artifactDir).filePath(
+                QStringLiteral("paste-outline-%1-%2-%3.png")
+                    .arg(pin->devicePixelRatioF()).arg(shadow).arg(stage)));
+        }
+    };
+    const auto outlineVisible = [&] {
+        const auto *buffer = dynamic_cast<const QImage *>(pin->backingStore()->paintDevice());
+        if (!buffer || buffer->isNull())
+            return false;
+        const int thickness = qCeil(pin->devicePixelRatioF());
+        for (int side = 0; side < 4; ++side) {
+            bool visible = false;
+            for (int inset = 0; inset < thickness; ++inset) {
+                const int x = side == 0 ? inset : side == 1 ? buffer->width() - 1 - inset
+                                                                          : buffer->width() / 2;
+                const int y = side == 2 ? inset : side == 3 ? buffer->height() - 1 - inset
+                                                                           : buffer->height() / 2;
+                const QColor color = buffer->pixelColor(x, y);
+                visible |= color.red() > 220 && color.green() > 160 && color.blue() < 100;
+            }
+            if (!visible)
+                return false;
+        }
+        return true;
+    };
+    QTest::qWait(20);
+    saveFrame(QStringLiteral("initial"));
+    QVERIFY(outlineVisible());
+    QTRY_VERIFY_WITH_TIMEOUT(!pin->isFlashing(), 1500);
+    QTest::qWait(20);
+    saveFrame(QStringLiteral("idle"));
+    QVERIFY2(outlineVisible(), "The permanent outline disappeared after the initial flash ended.");
+    for (int step = 0; step < 26; ++step) {
+        const QPointF point(pin->rect().center());
+        QWheelEvent wheel(point, pin->mapToGlobal(point.toPoint()), {}, QPoint(0, -120),
+                          Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+        QApplication::sendEvent(pin, &wheel);
+        QTest::qWait(10);
+        QVERIFY2(outlineVisible(), "Wheel zoom must retain a visible outline on all four edges.");
+    }
+    QCOMPARE(pin->scale(), qreal(0.1));
+    saveFrame(QStringLiteral("small"));
+    QCOMPARE(pin->sourceImage(), source);
 }
 
 void UiRegressionTest::pasteDisplayKeepsNativePixels_data()

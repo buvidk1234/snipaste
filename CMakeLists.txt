@@ -49,6 +49,8 @@ set(CMAKE_AUTORCC ON)
 find_package(Qt6 6.12 REQUIRED COMPONENTS Core Gui Widgets Network Concurrent PrintSupport)
 
 set(SNIPASTE_CORE_SOURCES
+    src/core/annotation/annotation_types.cpp
+    src/core/annotation/annotation_document.cpp
     src/core/command/argument_parser.cpp
     src/core/command/command_registry.cpp
     src/core/config/config_store.cpp
@@ -62,15 +64,24 @@ set(SNIPASTE_CORE_SOURCES
 )
 
 set(SNIPASTE_PLATFORM_SOURCES
+    src/platform/desktop_integration.cpp
     ${SNIPASTE_NATIVE_PLATFORM_SOURCES}
     src/platform/screen_capture.cpp
     src/platform/windows/single_instance.cpp
 )
 
 set(SNIPASTE_UI_SOURCES
+    src/ui/whiteboard/whiteboard_window.cpp
+    src/ui/snip/capture_support.cpp
+    src/ui/output/image_output.cpp
+    src/ui/paste/clipboard_content.cpp
     src/ui/paste/paste_window.cpp
     src/ui/paste/paste_manager.cpp
     src/ui/annotation/annotation_dialog.cpp
+    src/ui/annotation/annotation_canvas.cpp
+    src/ui/annotation/annotation_canvas_interaction.cpp
+    src/ui/annotation/annotation_canvas_render.cpp
+    src/ui/annotation/annotation_renderer.cpp
     src/ui/annotation/image_region.cpp
     src/ui/history/screenshot_history_dialog.cpp
     src/ui/preferences/preferences_dialog_rich.cpp
@@ -98,8 +109,13 @@ if(APPLE)
     )
 endif()
 
-set(SNIPASTE_HEADERS
+set(SNIPASTE_APP_HEADERS
+    src/app/external_command.h
+    src/app/runtime_settings.h
     src/app/logging.h
+)
+
+set(SNIPASTE_CORE_HEADERS
     src/core/command/argument_parser.h
     src/core/command/command_registry.h
     src/core/config/config_store.h
@@ -111,11 +127,25 @@ set(SNIPASTE_HEADERS
     src/core/recognition/barcode_service.h
     src/core/update/release_info.h
     src/core/update/github_update_client.h
+    src/core/annotation/annotation_types.h
+    src/core/annotation/annotation_document.h
+)
+
+set(SNIPASTE_PLATFORM_HEADERS
+    src/platform/desktop_integration.h
     src/platform/windows/global_hotkey.h
     src/platform/windows/super_capture.h
     src/platform/windows/capture_target.h
     src/platform/windows/single_instance.h
     src/platform/keyboard.h
+    src/platform/screen_capture.h
+)
+
+set(SNIPASTE_UI_HEADERS
+    src/ui/whiteboard/whiteboard_window.h
+    src/ui/snip/capture_support.h
+    src/ui/output/image_output.h
+    src/ui/paste/clipboard_content.h
     src/ui/paste/paste_window.h
     src/ui/paste/paste_manager.h
     src/ui/clipboard_output.h
@@ -132,17 +162,28 @@ set(SNIPASTE_HEADERS
     src/ui/tray/tray_controller.h
     src/ui/update/update_controller.h
     src/ui/update/update_installer.h
+    src/ui/annotation/annotation_canvas.h
+    src/ui/annotation/annotation_renderer.h
 )
 
 if(APPLE)
-    list(APPEND SNIPASTE_HEADERS
+    list(APPEND SNIPASTE_PLATFORM_HEADERS
         src/platform/macos/capture.h
         src/platform/macos/vision_ocr.h
         src/platform/macos/system.h
     )
 endif()
 
+set(SNIPASTE_HEADERS
+    ${SNIPASTE_APP_HEADERS}
+    ${SNIPASTE_CORE_HEADERS}
+    ${SNIPASTE_PLATFORM_HEADERS}
+    ${SNIPASTE_UI_HEADERS}
+)
+
 set(SNIPASTE_APP_SOURCES
+    src/app/external_command.cpp
+    src/app/runtime_settings.cpp
     src/app/main.cpp
     src/app/logging.cpp
 )
@@ -165,27 +206,14 @@ endif()
 # unrelated UI change rebuild the whole application and hid dependencies.
 qt_add_library(snipaste_core STATIC
     ${SNIPASTE_CORE_SOURCES}
-    src/core/command/argument_parser.h
-    src/core/command/command_registry.h
-    src/core/config/config_store.h
-    src/core/history/screenshot_history.h
-    src/core/scroll_stitcher.h
-    src/core/recognition/ocr_service.h
-    src/core/recognition/barcode_service.h
-    src/core/update/release_info.h
-    src/core/update/github_update_client.h
+    ${SNIPASTE_CORE_HEADERS}
 )
 target_include_directories(snipaste_core PUBLIC src)
 target_link_libraries(snipaste_core PUBLIC Qt6::Core Qt6::Gui Qt6::Network)
 
 qt_add_library(snipaste_platform STATIC
     ${SNIPASTE_PLATFORM_SOURCES}
-    src/platform/keyboard.h
-    src/platform/windows/global_hotkey.h
-    src/platform/windows/super_capture.h
-    src/platform/windows/capture_target.h
-    src/platform/windows/single_instance.h
-    src/platform/screen_capture.h
+    ${SNIPASTE_PLATFORM_HEADERS}
 )
 target_include_directories(snipaste_platform PUBLIC src)
 target_link_libraries(snipaste_platform PUBLIC Qt6::Core Qt6::Gui Qt6::Network)
@@ -199,20 +227,7 @@ endif()
 
 qt_add_library(snipaste_ui STATIC
     ${SNIPASTE_UI_SOURCES}
-    src/ui/paste/paste_window.h
-    src/ui/paste/paste_manager.h
-    src/ui/clipboard_output.h
-    src/ui/annotation/annotation_dialog.h
-    src/ui/history/screenshot_history_dialog.h
-    src/ui/preferences/preferences_dialog.h
-    src/ui/preferences/appearance_settings.h
-    src/ui/snip/snip_overlay.h
-    src/ui/snip/capture_icons.h
-    src/ui/snip/window_capture_overlay.h
-    src/ui/snip/scroll_capture_panel.h
-    src/ui/tray/tray_controller.h
-    src/ui/update/update_controller.h
-    src/ui/update/update_installer.h
+    ${SNIPASTE_UI_HEADERS}
 )
 
 qt_add_resources(snipaste_ui "update_scripts"
@@ -236,7 +251,7 @@ if(WIN32)
     target_link_libraries(snipaste_ui PUBLIC winmm)
 endif()
 
-qt_add_executable(snipaste ${SNIPASTE_APP_SOURCES})
+qt_add_executable(snipaste ${SNIPASTE_APP_SOURCES} ${SNIPASTE_APP_HEADERS})
 
 if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja")
     # Localized /showIncludes output can disagree with Ninja's detected prefix.
@@ -248,6 +263,7 @@ if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja")
     endforeach()
     set_property(SOURCE ${SNIPASTE_APP_SOURCES} ${SNIPASTE_CORE_SOURCES}
         ${SNIPASTE_PLATFORM_SOURCES} ${SNIPASTE_UI_SOURCES} tests/ui_regression_test.cpp
+        tests/snip_performance_probe.cpp tests/annotation_drawing_probe.cpp
         APPEND PROPERTY OBJECT_DEPENDS "${snipaste_header_dependencies}")
 endif()
 
@@ -349,6 +365,13 @@ if(SNIPASTE_BUILD_TESTS)
     target_include_directories(snipaste_ui_tests PRIVATE src)
     target_link_libraries(snipaste_ui_tests PRIVATE snipaste_ui Qt6::Test)
     add_executable(snipaste_performance_probe tests/snip_performance_probe.cpp)
+    add_executable(snipaste_drawing_probe tests/annotation_drawing_probe.cpp)
+    target_link_libraries(snipaste_drawing_probe PRIVATE snipaste_ui)
+    snipaste_apply_compile_options(snipaste_drawing_probe)
+    add_test(NAME annotation_drawing COMMAND snipaste_drawing_probe)
+    set_tests_properties(annotation_drawing PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
     target_link_libraries(snipaste_performance_probe PRIVATE snipaste_ui)
     target_compile_definitions(snipaste_performance_probe PRIVATE SNIPASTE_HAS_PREPARED_CAPTURE=1)
     snipaste_apply_compile_options(snipaste_performance_probe)

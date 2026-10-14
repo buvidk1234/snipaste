@@ -274,7 +274,7 @@ QWidget *PreferencesDialog::createCapturePage(QWidget *parent)
     winRow->addWidget(winLeft);
     winRow->addWidget(winRight);
     winRow->addStretch();
-#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#if defined(Q_OS_MACOS)
     // Windows key suppression has no macOS equivalent in this backend.
     winRowWidget->hide();
 #endif

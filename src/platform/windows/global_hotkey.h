@@ -31,7 +31,7 @@ private:
     unsigned int m_modifiers = 0;
     unsigned int m_key = 0;
     bool m_registered = false;
-#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#if defined(Q_OS_MACOS)
     // Opaque Carbon handles keep the public header free of platform headers.
     void *m_nativeHotKey = nullptr;
     void *m_nativeEventHandler = nullptr;

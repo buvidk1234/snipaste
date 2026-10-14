@@ -1,5 +1,5 @@
 #include "ui/snip/snip_overlay.h"
-#include "ui/annotation/annotation_dialog.h"
+#include "ui/annotation/annotation_canvas.h"
 #include "platform/screen_capture.h"
 #include "core/config/config_store.h"
 #include "ui/paste/paste_manager.h"

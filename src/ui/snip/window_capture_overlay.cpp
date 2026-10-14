@@ -1,7 +1,7 @@
 #include "ui/snip/window_capture_overlay.h"
 #include "platform/windows/capture_target.h"
 #include "platform/screen_capture.h"
-#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#if defined(Q_OS_MACOS)
 #include "platform/macos/capture.h"
 #endif
 
@@ -147,7 +147,7 @@ void WindowCaptureOverlay::updateTarget()
         m_targetWindow = 0;
         m_targetGeometry = {};
     }
-#elif defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#elif defined(Q_OS_MACOS)
     const QPoint localPosition = QCursor::pos() - m_screenGeometry.topLeft();
     quintptr nativeWindow = 0;
     const QRect localTarget = platform::captureTargetAt(localPosition, size(), winId(), m_elementMode,
@@ -171,7 +171,7 @@ void WindowCaptureOverlay::captureTarget()
     if (!m_screen || !m_targetWindow || m_targetGeometry.isEmpty())
         return;
 
-#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#if defined(Q_OS_MACOS)
     QImage image = platform::captureMacWindow(m_targetWindow);
     if (m_elementMode && !image.isNull()) {
         const QRect windowBounds = platform::macWindowBounds(m_targetWindow);

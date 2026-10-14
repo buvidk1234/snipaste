@@ -39,7 +39,7 @@ private:
     void cancelCapture();
     void *m_hook = nullptr;
     void *m_keyboardHook = nullptr;
-#elif defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#elif defined(Q_OS_MACOS)
     void installMonitor();
     void uninstallMonitor();
     bool handleNativeMouseEvent(void *event);

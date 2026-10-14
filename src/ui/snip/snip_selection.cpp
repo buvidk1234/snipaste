@@ -1,5 +1,5 @@
 #include "ui/snip/snip_overlay.h"
-#include "ui/annotation/annotation_dialog.h"
+#include "ui/annotation/annotation_canvas.h"
 
 #include <QCursor>
 #include <QFrame>

@@ -2,7 +2,7 @@
 #include "ui/clipboard_output.h"
 #include "platform/screen_capture.h"
 #include "ui/snip/capture_icons.h"
-#include "ui/annotation/annotation_dialog.h"
+#include "ui/annotation/annotation_canvas.h"
 #include "platform/keyboard.h"
 
 #include <QAction>

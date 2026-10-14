@@ -19,7 +19,7 @@
 #include <winrt/base.h>
 #endif
 
-#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#if defined(Q_OS_MACOS)
 #include "platform/macos/vision_ocr.h"
 #endif
 
@@ -247,7 +247,7 @@ OcrResult OcrService::recognize(const QImage &image,
     const QString normalizedLanguage = normalizedOcrLanguage(language);
     OcrResult nativeResult;
 
-#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#if defined(Q_OS_MACOS)
     if (!forceTesseract) {
         nativeResult = platform::recognizeWithMacVision(image, normalizedLanguage);
         if (nativeResult.success)

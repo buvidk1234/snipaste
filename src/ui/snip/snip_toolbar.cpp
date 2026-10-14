@@ -1,6 +1,6 @@
 #include "ui/snip/snip_overlay.h"
 #include "ui/snip/capture_icons.h"
-#include "ui/annotation/annotation_dialog.h"
+#include "ui/annotation/annotation_canvas.h"
 #include "platform/keyboard.h"
 
 #include <QButtonGroup>

@@ -108,6 +108,7 @@ void uninstallScrollInputHook(SnipOverlay *overlay)
 }
 #endif
 
+#ifdef Q_OS_WIN
 QString captureStatus(const snipaste::core::VerticalScrollStitcher &stitcher)
 {
     const QImage &image = stitcher.image();
@@ -118,6 +119,8 @@ QString captureStatus(const snipaste::core::VerticalScrollStitcher &stitcher)
         .arg(image.width())
         .arg(image.height());
 }
+
+#endif
 
 } // namespace
 

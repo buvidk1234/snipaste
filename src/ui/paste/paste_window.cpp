@@ -2,7 +2,7 @@
 #include "ui/paste/paste_manager.h"
 #include "ui/clipboard_output.h"
 
-#include "ui/annotation/annotation_dialog.h"
+#include "ui/annotation/annotation_canvas.h"
 #include "platform/keyboard.h"
 
 #include <QApplication>
@@ -52,7 +52,7 @@
 #include <windows.h>
 #endif
 
-#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#if defined(Q_OS_MACOS)
 #include "platform/macos/system.h"
 #endif
 
@@ -169,7 +169,7 @@ void PasteWindow::showExisting()
 #ifdef Q_OS_WIN
     if (m_virtualDesktopPinned)
         pinWindowToVirtualDesktops(reinterpret_cast<HWND>(winId()), true);
-#elif defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#elif defined(Q_OS_MACOS)
     // A newly shown QWidget may own a different NSWindow after flags or
     // screen changes, so apply the Space policy after show() each time.
     snipaste::platform::setMacWindowCollectionBehavior(winId(), m_virtualDesktopPinned);
@@ -427,7 +427,7 @@ void PasteWindow::setVirtualDesktopPinned(bool enabled)
 #ifdef Q_OS_WIN
     if (isVisible())
         pinWindowToVirtualDesktops(reinterpret_cast<HWND>(winId()), enabled);
-#elif defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#elif defined(Q_OS_MACOS)
     if (isVisible())
         snipaste::platform::setMacWindowCollectionBehavior(winId(), enabled);
 #endif
@@ -543,7 +543,12 @@ void PasteWindow::paintEvent(QPaintEvent *)
         QPen border(m_flashBorder ? QColor(255, 205, 60, 255) : m_borderColor);
         border.setWidth(m_borderWidth);
         painter.setPen(border);
-        painter.drawRect(rect().adjusted(0, 0, -1, -1));
+        painter.setBrush(Qt::NoBrush);
+        // Keep the entire stroke inside the window. Integer QRect endpoints
+        // leave the right/bottom edge uncovered after fractional-DPI resizing.
+        const qreal inset = (border.isCosmetic() ? 1.0 / devicePixelRatioF()
+                                               : border.widthF()) / 2.0;
+        painter.drawRect(QRectF(rect()).adjusted(inset, inset, -inset, -inset));
     }
 }
 

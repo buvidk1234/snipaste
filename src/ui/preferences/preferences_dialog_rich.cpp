@@ -55,7 +55,7 @@
 #include <QTextStream>
 #include <QProcess>
 
-#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#if defined(Q_OS_MACOS)
 #include <unistd.h>
 #endif
 
@@ -70,7 +70,7 @@ QLabel *makeHint(const QString &text, QWidget *parent)
     return label;
 }
 
-#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#if defined(Q_OS_MACOS)
 bool setMacLoginStartup(bool enabled)
 {
     const QString launchAgentsPath = QDir::home().filePath(QStringLiteral("Library/LaunchAgents"));
@@ -894,7 +894,7 @@ PreferencesDialog::PreferencesDialog(core::ConfigStore &config, QWidget *parent)
     m_outputCopyWindowsBitmapCheck = new QCheckBox(QStringLiteral("以 Windows Bitmap 格式复制图片:"), bitmapRow);
     m_outputCopyWindowsBitmapCheck->setChecked(
         m_config.value(QStringLiteral("output/clipboardWindowsBitmap"), true).toBool());
-#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#if defined(Q_OS_MACOS)
     // CF_DIB is a Windows clipboard compatibility format and is not exposed
     // by the Cocoa clipboard backend.
     m_outputCopyWindowsBitmapCheck->hide();
@@ -978,7 +978,7 @@ PreferencesDialog::PreferencesDialog(core::ConfigStore &config, QWidget *parent)
     textRecognitionLayout->addLayout(ocrLanguageRow);
 
     auto *ocrNote = new QLabel(
-#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#if defined(Q_OS_MACOS)
         QStringLiteral("* 使用 macOS Vision；无结果时回退到 Tesseract")
 #else
         QStringLiteral("* 需要 Windows 10 版本 1903 或更高版本")
@@ -1142,7 +1142,7 @@ PreferencesDialog::PreferencesDialog(core::ConfigStore &config, QWidget *parent)
     superLayout->setVerticalSpacing(4);
     auto *superModifier = new QComboBox(superGroup);
     superModifier->addItems({QStringLiteral("无"), QStringLiteral("Ctrl"), QStringLiteral("Shift"), QStringLiteral("Alt")
-#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#if defined(Q_OS_MACOS)
                              , QStringLiteral("Command")
 #endif
     });
@@ -1151,7 +1151,7 @@ PreferencesDialog::PreferencesDialog(core::ConfigStore &config, QWidget *parent)
     superMouse->addItems({QStringLiteral("鼠标左键拖拽"), QStringLiteral("鼠标右键拖拽")});
     superMouse->setCurrentText(m_config.value(QStringLiteral("control/superCaptureMouse"), QStringLiteral("鼠标左键拖拽")).toString());
     superLayout->addWidget(new QLabel(
-#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#if defined(Q_OS_MACOS)
         QStringLiteral("修饰键")
 #else
         QStringLiteral("Win")
@@ -1248,7 +1248,7 @@ PreferencesDialog::PreferencesDialog(core::ConfigStore &config, QWidget *parent)
         auto *firstBox = new QComboBox(pasteMouseGroup);
         auto *secondBox = new QComboBox(pasteMouseGroup);
         firstBox->addItems({QStringLiteral("无"), QStringLiteral("Ctrl"), QStringLiteral("Shift"), QStringLiteral("Alt")});
-#if defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#if defined(Q_OS_MACOS)
         firstBox->addItem(QStringLiteral("Cmd"));
 #endif
         secondBox->addItems({QStringLiteral("无"), QStringLiteral("左键双击"), QStringLiteral("中键单击"),
@@ -1868,7 +1868,7 @@ void PreferencesDialog::accept()
     }
     startupSettings.sync();
     }
-#elif defined(Q_OS_MACOS) || defined(Q_OS_MAC)
+#elif defined(Q_OS_MACOS)
     if (startupChanged && !setMacLoginStartup(m_startupCheck->isChecked()))
         qWarning() << "failed to update macOS login item";
 #else
