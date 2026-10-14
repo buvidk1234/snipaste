@@ -7,6 +7,10 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QImageReader>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QSet>
 #include <QUuid>
@@ -30,7 +34,43 @@ struct BackgroundManifest
 QString backgroundPathForKey(const QDir &directory, const QString &key)
 {
     const QString path = directory.filePath(key + QStringLiteral(".background.tiles"));
-    return QFileInfo::exists(path) ? path : QString();
+    if (QFileInfo::exists(path))
+        return path;
+    const QString legacyPath = directory.filePath(key + QStringLiteral(".background.png"));
+    return QFileInfo::exists(legacyPath) ? legacyPath : QString();
+}
+
+snipaste::core::CaptureGeometry loadCaptureGeometry(const QString &path)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly) || file.size() > 4096)
+        return {};
+    const QJsonObject object = QJsonDocument::fromJson(file.readAll()).object();
+    const QJsonArray region = object.value(QStringLiteral("region")).toArray();
+    const QJsonArray desktopSize = object.value(QStringLiteral("desktopSize")).toArray();
+    if (object.value(QStringLiteral("version")).toInt() != 1
+        || region.size() != 4 || desktopSize.size() != 2)
+        return {};
+    const snipaste::core::CaptureGeometry geometry{
+        QRect(region.at(0).toInt(), region.at(1).toInt(),
+              region.at(2).toInt(), region.at(3).toInt()),
+        QSize(desktopSize.at(0).toInt(), desktopSize.at(1).toInt())};
+    return geometry.isValid() ? geometry : snipaste::core::CaptureGeometry{};
+}
+
+bool saveCaptureGeometry(const QString &path, const snipaste::core::CaptureGeometry &geometry)
+{
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly))
+        return false;
+    const QJsonObject object{
+        {QStringLiteral("version"), 1},
+        {QStringLiteral("region"), QJsonArray{geometry.region.x(), geometry.region.y(),
+                                             geometry.region.width(), geometry.region.height()}},
+        {QStringLiteral("desktopSize"), QJsonArray{geometry.desktopSize.width(),
+                                                  geometry.desktopSize.height()}}};
+    const QByteArray data = QJsonDocument(object).toJson(QJsonDocument::Compact);
+    return file.write(data) == data.size() && file.commit();
 }
 
 QString backgroundTileDirectory(const QString &historyDirectory)
@@ -223,6 +263,8 @@ void ScreenshotHistory::setMaximumCount(int maximumCount)
             m_backgrounds.removeLast();
         if (!m_backgroundPaths.isEmpty())
             m_backgroundPaths.removeLast();
+        if (!m_geometries.isEmpty())
+            m_geometries.removeLast();
     }
     trimToLimits();
 }
@@ -233,7 +275,7 @@ void ScreenshotHistory::setMemoryLimitBytes(qint64 bytes)
     trimToLimits();
 }
 
-void ScreenshotHistory::add(const QImage &image, const QImage &background)
+void ScreenshotHistory::add(const QImage &image, const QImage &background, CaptureGeometry geometry)
 {
     if (image.isNull())
         return;
@@ -244,12 +286,17 @@ void ScreenshotHistory::add(const QImage &image, const QImage &background)
     m_imagePaths.prepend(QString());
     m_backgrounds.prepend(background);
     m_backgroundPaths.prepend(QString());
+    // Direct full-screen commands pass the very same frame as image/background.
+    if (!geometry.isValid() && !background.isNull() && image.cacheKey() == background.cacheKey())
+        geometry = {background.rect(), background.size()};
+    m_geometries.prepend(geometry.isValid() ? geometry : CaptureGeometry{});
     while (m_images.size() > m_maximumCount) {
         m_images.removeLast();
         m_storageKeys.removeLast();
         m_imagePaths.removeLast();
         m_backgrounds.removeLast();
         m_backgroundPaths.removeLast();
+        m_geometries.removeLast();
     }
     trimToLimits();
 }
@@ -262,6 +309,7 @@ void ScreenshotHistory::clear()
     m_imagePaths.clear();
     m_backgrounds.clear();
     m_backgroundPaths.clear();
+    m_geometries.clear();
 }
 
 void ScreenshotHistory::loadFromDirectory(const QString &directory)
@@ -272,6 +320,7 @@ void ScreenshotHistory::loadFromDirectory(const QString &directory)
     m_imagePaths.clear();
     m_backgrounds.clear();
     m_backgroundPaths.clear();
+    m_geometries.clear();
     const QDir dir(directory);
     const QString orderPath = dir.filePath(QStringLiteral(".snipaste-order"));
     QStringList keys;
@@ -282,6 +331,13 @@ void ScreenshotHistory::loadFromDirectory(const QString &directory)
             if (!key.isEmpty() && QFileInfo(key).fileName() == key)
                 keys.append(key);
         }
+    } else if (!QFileInfo::exists(orderPath)) {
+        // Versions before the stable-key index used 000.png, 001.png, etc.
+        // Only import that known layout; an empty committed index stays empty.
+        const QRegularExpression legacyName(QStringLiteral("^[0-9]+\\.png$"));
+        for (const QString &file : dir.entryList({QStringLiteral("*.png")}, QDir::Files, QDir::Name))
+            if (legacyName.match(file).hasMatch())
+                keys.append(QFileInfo(file).completeBaseName());
     }
     for (const QString &key : keys) {
         const QString imagePath = dir.filePath(key + QStringLiteral(".png"));
@@ -301,6 +357,7 @@ void ScreenshotHistory::loadFromDirectory(const QString &directory)
             // navigation or persistence actually needs the frame.
             m_backgrounds.append(QImage());
             m_backgroundPaths.append(backgroundPath);
+            m_geometries.append(loadCaptureGeometry(dir.filePath(key + QStringLiteral(".geometry.json"))));
         }
         if (m_images.size() >= m_maximumCount)
             break;
@@ -350,6 +407,15 @@ bool ScreenshotHistory::saveToDirectory(const QString &directory) const
         }
         if (!backgroundPath.isEmpty())
             expectedFiles.insert(QFileInfo(backgroundPath).fileName());
+
+        if (index < m_geometries.size() && m_geometries.at(index).isValid()) {
+            const QString geometryFileName = key + QStringLiteral(".geometry.json");
+            const QString geometryPath = historyDir.filePath(geometryFileName);
+            if (!QFileInfo::exists(geometryPath)
+                && !saveCaptureGeometry(geometryPath, m_geometries.at(index)))
+                return false;
+            expectedFiles.insert(geometryFileName);
+        }
     }
 
     // The order file is tiny; unlike the old scheme it does not require
@@ -367,7 +433,8 @@ bool ScreenshotHistory::saveToDirectory(const QString &directory) const
     // Delete evicted entries and their unshared blocks only after the new
     // order is committed, so a failed save leaves the old history intact.
     const QStringList oldFiles = historyDir.entryList(
-        {QStringLiteral("*.png"), QStringLiteral("*.background.tiles")}, QDir::Files);
+        {QStringLiteral("*.png"), QStringLiteral("*.background.tiles"),
+         QStringLiteral("*.geometry.json")}, QDir::Files);
     for (const QString &file : oldFiles)
         if (!expectedFiles.contains(file))
             historyDir.remove(file);
@@ -421,7 +488,8 @@ QImage ScreenshotHistory::backgroundAt(int index) const
         return m_backgrounds.at(index);
     if (index >= m_backgroundPaths.size() || m_backgroundPaths.at(index).isEmpty())
         return {};
-    return loadBackgroundTiles(m_backgroundPaths.at(index));
+    const QString path = m_backgroundPaths.at(index);
+    return path.endsWith(QStringLiteral(".background.png")) ? QImage(path) : loadBackgroundTiles(path);
 }
 
 int ScreenshotHistory::size() const
@@ -475,6 +543,8 @@ void ScreenshotHistory::trimToLimits()
             m_backgrounds.removeLast();
         if (!m_backgroundPaths.isEmpty())
             m_backgroundPaths.removeLast();
+        if (!m_geometries.isEmpty())
+            m_geometries.removeLast();
     }
 
     // A background is only needed to restore the desktop around a historical
@@ -518,6 +588,8 @@ void ScreenshotHistory::trimToLimits()
         }
         if (!m_backgroundPaths.isEmpty())
             m_backgroundPaths.removeLast();
+        if (!m_geometries.isEmpty())
+            m_geometries.removeLast();
     }
 }
 

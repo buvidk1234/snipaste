@@ -1813,7 +1813,8 @@ QImage AnnotationCanvas::fullRenderedImage(bool includePendingText) const
     // second full-size ARGB buffer just to paint an unchanged frame.
     if (m_shapes.isEmpty() && (!includePendingText || !m_textEditing))
         return m_image;
-    if (!includePendingText && m_renderCacheValid)
+    const bool cacheable = !includePendingText || !m_textEditing;
+    if (cacheable && m_renderCacheValid)
         return m_renderCache;
 
     QImage result = m_image.convertToFormat(QImage::Format_ARGB32_Premultiplied);
@@ -1868,8 +1869,10 @@ QImage AnnotationCanvas::fullRenderedImage(bool includePendingText) const
             continue;
         }
         if (shape.tool == Tool::Mosaic || shape.tool == Tool::Blur) {
-            const QImage sourceFrame = result;
-            drawEffect(painter, sourceFrame, shape);
+            // drawEffect snapshots its affected rectangle before drawing.
+            // Passing the image by reference avoids copying the whole desktop
+            // just to produce that small crop from an active paint device.
+            drawEffect(painter, result, shape);
             continue;
         }
         drawShape(painter, shape, 1.0);
@@ -1879,7 +1882,10 @@ QImage AnnotationCanvas::fullRenderedImage(bool includePendingText) const
         pending.text = m_textEditor->toPlainText();
         drawShape(painter, pending, 1.0);
     }
-    if (!includePendingText) {
+    // QImage copies an actively painted buffer deeply. End painting first
+    // so the committed cache and return value share the same pixels.
+    painter.end();
+    if (cacheable) {
         m_renderCache = result;
         m_renderCacheValid = true;
     }
@@ -1953,6 +1959,34 @@ void AnnotationCanvas::clearAnnotations()
     invalidateRenderCache();
     emit historyChanged();
     update();
+}
+
+void AnnotationCanvas::resetCapture()
+{
+    finishTextInput(false);
+    m_textEditor->clear();
+    m_textEditor->document()->clearUndoRedoStacks();
+    m_textShape = {};
+    m_image = {};
+    m_renderCache = {};
+    m_renderCacheValid = false;
+    m_logicalImageSize = {};
+    m_hasFixedLogicalSize = false;
+    m_coordinateOrigin = {};
+    m_outputViewport = {};
+    m_shapes.clear();
+    m_redoShapes.clear();
+    m_eraserUndoSnapshot.clear();
+    m_eraserRedoSnapshot.clear();
+    m_shapeClipboard.clear();
+    m_eraserUndoAvailable = m_eraserRedoAvailable = m_lastOperationWasEraser = false;
+    m_dragging = m_editingShape = m_editingRotation = false;
+    m_resizingHandle = m_selectedShape = -1;
+    m_editingMagnifierPart = MagnifierPart::None;
+    m_start = m_current = {};
+    m_currentPoints.clear();
+    m_nextNumber = 1;
+    setTool(Tool::Rectangle);
 }
 
 AnnotationDialog::AnnotationDialog(const QImage &image, QWidget *parent)

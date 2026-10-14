@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/scroll_stitcher.h"
+#include "core/history/screenshot_history.h"
 
 #include <QImage>
 #include <QColor>
@@ -40,6 +41,12 @@ public:
                 QRect initialSelection,
                 QWidget *parent = nullptr);
 
+    // Construct the hidden controls at application startup, without capturing
+    // the desktop. The caller owns this reusable overlay.
+    static SnipOverlay *createPrepared(QScreen *screen);
+    void beginCapture(QScreen *screen, bool autoCopy = false,
+                      bool captureCursor = false, QRect initialSelection = {});
+
     void captureSelectionImmediately();
     // The global paste command uses the current selection while this
     // capture session is open, before it has entered clipboard/history.
@@ -54,8 +61,9 @@ public:
     void setExchangeNavigationKeys(bool enabled) { m_exchangeNavigationKeys = enabled; }
     void setLastSelection(QRect selection);
     void setSelectionHistory(const QList<QRect> &regions);
+    core::CaptureGeometry captureGeometry() const { return {m_selection, size()}; }
     void setCaptureHistory(const QList<QImage> &images,
-                           const QList<QRect> &regions = {},
+                           const QList<core::CaptureGeometry> &geometries = {},
                            const QList<QImage> &backgrounds = {},
                            std::function<QImage(int)> backgroundLoader = {},
                            std::function<QImage(int)> imageLoader = {});
@@ -144,6 +152,7 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 signals:
+    void sessionClosed();
     void screenshotCaptured(const QImage &image);
     void screenshotCapturedWithBackground(const QImage &image, const QImage &background);
     void unsavedScreenshotCaptured(const QImage &image);
@@ -160,6 +169,7 @@ signals:
     void quickSaveCompleted(const QString &path);
 
 private:
+    SnipOverlay(QScreen *screen, QWidget *parent, bool reusable);
     QRect imageSelection() const;
     QImage selectionImage() const;
     void createToolbar();
@@ -244,7 +254,7 @@ private:
     QImage m_liveBackground;
     QList<QImage> m_captureHistory;
     QList<QImage> m_captureHistoryBackgrounds;
-    QList<QRect> m_captureHistoryRegions;
+    QList<core::CaptureGeometry> m_captureHistoryGeometries;
     std::function<QImage(int)> m_captureHistoryBackgroundLoader;
     std::function<QImage(int)> m_captureHistoryImageLoader;
     int m_historyIndex = -1;
@@ -307,6 +317,10 @@ private:
     QToolButton *m_shareButton = nullptr;
     bool m_showShareButton = true;
     AnnotationCanvas *m_canvas = nullptr;
+    AnnotationCanvas *m_preparedCanvas = nullptr;
+    bool m_reusable = false;
+    bool m_captureActive = false;
+    quint64 m_sessionGeneration = 0;
     QWidget *m_selectionBorder = nullptr;
     QPoint m_cursorPosition;
     bool m_showMagnifier = true;

@@ -409,7 +409,10 @@ void SnipOverlay::refreshBackground()
     m_refreshing = true;
     if (m_canvas) m_canvas->finishTextInput();
     hide(); // Let the compositor remove the overlay before taking a new frame.
-    QTimer::singleShot(60, this, [this] {
+    const auto generation = m_sessionGeneration;
+    QTimer::singleShot(60, this, [this, generation] {
+        if (generation != m_sessionGeneration || !m_captureActive || !m_backgroundProvider)
+            return;
         const QImage image = m_backgroundProvider();
         if (!image.isNull()) {
             m_cleanBackground = image; m_cleanBackground.setDevicePixelRatio(1);
@@ -438,13 +441,13 @@ void SnipOverlay::toggleCapturedCursor()
 }
 
 void SnipOverlay::setCaptureHistory(const QList<QImage> &images,
-                                    const QList<QRect> &regions,
+                                    const QList<core::CaptureGeometry> &geometries,
                                     const QList<QImage> &backgrounds,
                                     std::function<QImage(int)> backgroundLoader,
                                     std::function<QImage(int)> imageLoader)
 {
     m_captureHistory = images;
-    m_captureHistoryRegions = regions;
+    m_captureHistoryGeometries = geometries;
     m_captureHistoryBackgrounds = backgrounds;
     m_captureHistoryBackgroundLoader = std::move(backgroundLoader);
     m_captureHistoryImageLoader = std::move(imageLoader);
@@ -467,23 +470,11 @@ void SnipOverlay::navigateHistory(int direction)
     if (m_historyIndex == -1) { m_liveBackground = m_cleanBackground; m_liveSelection = m_selection; }
     m_historyIndex = next;
     resetSelection();
-    // Historical captures also keep the complete desktop frame.  Restore that
-    // frame before drawing the selected image so pixels outside the selection
-    // match the moment at which the capture was made.
     m_background = m_liveBackground;
     if (next == -1) {
         m_selection = m_liveSelection;
+        m_cleanBackground = m_background;
     } else {
-        QImage historicalBackground;
-        if (next < m_captureHistoryBackgrounds.size())
-            historicalBackground = m_captureHistoryBackgrounds.at(next);
-        if (historicalBackground.isNull() && m_captureHistoryBackgroundLoader)
-            historicalBackground = m_captureHistoryBackgroundLoader(next);
-        if (!historicalBackground.isNull()) {
-            historicalBackground.setDevicePixelRatio(1);
-            if (historicalBackground.size() == m_liveBackground.size())
-                m_background = std::move(historicalBackground);
-        }
         QImage image = m_captureHistory.at(next);
         if (image.isNull() && m_captureHistoryImageLoader)
             image = m_captureHistoryImageLoader(next);
@@ -503,28 +494,52 @@ void SnipOverlay::navigateHistory(int direction)
         }
         image.setDevicePixelRatio(1);
         m_selectionImageOverride = image;
+        const core::CaptureGeometry geometry = next < m_captureHistoryGeometries.size()
+            ? m_captureHistoryGeometries.at(next) : core::CaptureGeometry{};
+        QImage historicalBackground;
+        // Old records have no selection coordinates. Do not guess using the
+        // live selection or recent regions, or decode a desktop we cannot align.
+        if (geometry.isValid()) {
+            if (next < m_captureHistoryBackgrounds.size())
+                historicalBackground = m_captureHistoryBackgrounds.at(next);
+            if (historicalBackground.isNull() && m_captureHistoryBackgroundLoader)
+                historicalBackground = m_captureHistoryBackgroundLoader(next);
+        }
+        if (!historicalBackground.isNull()) {
+            historicalBackground.setDevicePixelRatio(1);
+            // Display the original frame even if resolution/DPI has changed.
+            // Both the frame and its selection map to the current viewport.
+            m_background = std::move(historicalBackground);
+        } else {
+            m_background = QImage(m_liveBackground.size(), QImage::Format_RGB32);
+            m_background.fill(QColor(32, 32, 32));
+        }
+        m_cleanBackground = m_background;
         QRect restored;
-        if (next < m_captureHistoryRegions.size())
-            // Keep the recorded logical position intact.  A history item may
-            // have been captured on a different device scale, and clipping
-            // it to the current overlay would silently change its geometry.
-            restored = m_captureHistoryRegions.at(next);
-        if (restored.isEmpty())
-            restored = m_liveSelection;
+        if (geometry.isValid()) {
+            const qreal sx = qreal(width()) / geometry.desktopSize.width();
+            const qreal sy = qreal(height()) / geometry.desktopSize.height();
+            const int left = qRound(geometry.region.x() * sx);
+            const int top = qRound(geometry.region.y() * sy);
+            const int right = qRound((geometry.region.x() + geometry.region.width()) * sx);
+            const int bottom = qRound((geometry.region.y() + geometry.region.height()) * sy);
+            restored = QRect(left, top, qMax(1, right - left), qMax(1, bottom - top));
+        }
         if (restored.isEmpty()) {
             const qreal sx = qreal(m_background.width()) / qMax(1, width());
             const qreal sy = qreal(m_background.height()) / qMax(1, height());
-            const QSize extent(qMax(2, qRound(image.width() / qMax<qreal>(0.01, sx))),
-                               qMax(2, qRound(image.height() / qMax<qreal>(0.01, sy))));
+            QSize extent(qMax(2, qRound(image.width() / qMax<qreal>(0.01, sx))),
+                         qMax(2, qRound(image.height() / qMax<qreal>(0.01, sy))));
+            if (extent.width() > width() || extent.height() > height())
+                extent.scale(size(), Qt::KeepAspectRatio);
             restored = QRect((width() - extent.width()) / 2,
                              (height() - extent.height()) / 2,
-                             extent.width(), extent.height()).intersected(rect());
+                             extent.width(), extent.height());
         }
         m_selection = restored;
         QPainter painter(&m_background);
         painter.drawImage(imageSelection(), image);
     }
-    m_cleanBackground = m_background;
     if (!m_selection.isEmpty()) confirmSelection();
     else updateHoverTarget();
     updateToolbarGeometry(); update();

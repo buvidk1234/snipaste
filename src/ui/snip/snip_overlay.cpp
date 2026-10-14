@@ -6,8 +6,10 @@
 #include "platform/screen_capture.h"
 #include "platform/windows/capture_target.h"
 #include "ui/snip/scroll_capture_panel.h"
+#include "ui/snip/scroll_capture_preview.h"
 
 #include <QApplication>
+#include <QBackingStore>
 #include <QCoreApplication>
 #include <QClipboard>
 #include <QCursor>
@@ -19,6 +21,7 @@
 #include <QFrame>
 #include <QFontMetrics>
 #include <QKeyEvent>
+#include <QLayout>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -30,6 +33,7 @@
 #include <QMessageBox>
 #include <QTimer>
 #include <QToolTip>
+#include <QToolButton>
 #include <algorithm>
 #include <cmath>
 
@@ -74,20 +78,93 @@ SnipOverlay::SnipOverlay(QScreen *screen,
                          bool captureCursor,
                          QRect initialSelection,
                          QWidget *parent)
+    : SnipOverlay(screen, parent, false)
+{
+    beginCapture(screen, autoCopy, captureCursor, std::move(initialSelection));
+}
+
+SnipOverlay::SnipOverlay(QScreen *screen, QWidget *parent, bool reusable)
     : QWidget(parent)
-    , m_autoCopy(autoCopy)
-    , m_captureCursor(captureCursor)
-    , m_initialSelection(std::move(initialSelection))
+    , m_reusable(reusable)
 {
     Q_ASSERT(screen);
-    setAttribute(Qt::WA_DeleteOnClose);
+    setAttribute(Qt::WA_DeleteOnClose, !reusable);
     setWindowFlags(Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
     setAttribute(Qt::WA_TranslucentBackground, false);
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);
+    setGeometry(screen->geometry());
+    m_selectionBorder = new SnipBorderOverlay(this);
+    m_selectionBorder->setGeometry(rect());
+    m_selectionBorder->show();
+    m_targetDetector = [this](QPoint point, bool elements) {
+        if (QGuiApplication::platformName() == QStringLiteral("offscreen"))
+            return QRect();
+        return platform::captureTargetAt(point, size(), winId(), elements,
+                                         m_excludedDetectionProcesses,
+                                         m_unstableDetectionProcesses);
+    };
+}
 
+SnipOverlay *SnipOverlay::createPrepared(QScreen *screen)
+{
+    auto *overlay = new SnipOverlay(screen, nullptr, true);
+    overlay->createToolbar();
+    overlay->m_preparedCanvas = new AnnotationCanvas({}, overlay);
+    overlay->m_preparedCanvas->setObjectName(QStringLiteral("preparedSelectionCanvas"));
+    overlay->m_preparedCanvas->setMinimumSize(0, 0);
+    overlay->m_preparedCanvas->hide();
+    // Prepare styles and the action row now. Keep hidden option-page layouts
+    // lazy: activating all of them retains large font/style caches at idle.
+    overlay->ensurePolished();
+    overlay->m_toolbar->adjustSize();
+    overlay->m_sizeToolbar->adjustSize();
+    overlay->winId();
+    return overlay;
+}
+
+void SnipOverlay::beginCapture(QScreen *screen, bool autoCopy,
+                               bool captureCursor, QRect initialSelection)
+{
+    Q_ASSERT(screen && !m_captureActive);
+    ++m_sessionGeneration;
+    m_captureActive = true;
+    m_autoCopy = autoCopy;
+    m_captureCursor = captureCursor;
+    m_initialSelection = std::move(initialSelection);
+    m_outputEmitted = false;
+    m_toolbarHidden = false;
+    m_dragging = m_dragMoved = m_refreshing = false;
+    m_hoverSelection = m_pressedTarget = {};
+    m_dragOrigin = m_transformOrigin = {};
+    m_transformOriginSelection = {};
+    m_targetPoint = QPoint(-1, -1);
+    m_targetLevel = 0;
+    m_historyIndex = m_regionHistoryIndex = -1;
+    m_liveSelection = m_lastSelection = {};
+    m_regionHistory.clear();
+    m_fixedSelectionSize = {};
+    m_aspectRatio = 0;
+    m_virtualDesktopMode = false;
+    m_elementMode = true;
+    m_hexColor = m_showMagnifierGuides = false;
+    m_roundedCorners = m_outputShadow = m_outputBorder = false;
+    m_captureCornerRadius = 8;
+    if (m_roundedButton)
+        m_roundedButton->setChecked(false);
+    if (m_cornerRadiusPopup)
+        m_cornerRadiusPopup->hide();
+    if (m_toolbar)
+        resetSelection();
     m_screenGeometry = screen->geometry();
     m_singleScreenGeometry = m_screenGeometry;
+    setGeometry(m_screenGeometry);
+    if (m_toolbar) {
+        const qreal compact = qMin<qreal>(1, qMax<qreal>(0, (width() - 40) / 576.0));
+        for (auto *button : m_toolbar->findChildren<QToolButton *>())
+            if (button->property("captureActionButton").toBool())
+                button->setFixedSize(qMax(16, int(32 * compact)), 30);
+    }
     m_background = platform::captureScreen(screen);
     m_background.setDevicePixelRatio(1);
     m_cleanBackground = m_background;
@@ -96,42 +173,27 @@ SnipOverlay::SnipOverlay(QScreen *screen,
         return screen ? platform::captureScreen(screen) : QImage();
     };
     m_backgroundProvider = m_singleScreenBackgroundProvider;
-    setGeometry(m_screenGeometry);
     m_cursorPosition = QCursor::pos() - m_screenGeometry.topLeft();
-    m_targetDetector = [this](QPoint point, bool elements) {
-        // Offscreen tests use an injected detector instead of touching the desktop.
-        if (QGuiApplication::platformName() == QStringLiteral("offscreen"))
-            return QRect();
-        return platform::captureTargetAt(point, size(), winId(), elements,
-                                         m_excludedDetectionProcesses,
-                                         m_unstableDetectionProcesses);
-    };
     if (m_captureCursor)
         drawCapturedCursor(screen);
     if (!m_initialSelection.isEmpty())
         m_selection = m_initialSelection.intersected(rect());
-    // Building the complete annotation toolbar (nine option pages and their
-    // icons) is comparatively expensive.  Show the captured frame first and
-    // finish constructing controls on the next event turn; a very fast first
-    // click still calls createToolbar() from confirmSelection().
-    if (m_initialSelection.isEmpty() && QGuiApplication::platformName() != QStringLiteral("offscreen")) {
-        // Let the first captured frame reach the compositor before building
-        // the large widget toolbar.  A selection made during this short
-        // window still creates it synchronously from confirmSelection().
-        QTimer::singleShot(40, this, [this] {
-            if (!m_toolbar) {
-                createToolbar();
-                updateToolbarGeometry();
-                update();
-            }
-        });
-    } else {
-        createToolbar();
+    if (!m_toolbar) {
+        if (m_initialSelection.isEmpty() && QGuiApplication::platformName() != QStringLiteral("offscreen")) {
+            const auto generation = m_sessionGeneration;
+            QTimer::singleShot(40, this, [this, generation] {
+                if (m_captureActive && generation == m_sessionGeneration && !m_toolbar) {
+                    createToolbar();
+                    updateToolbarGeometry();
+                    update();
+                }
+            });
+        } else {
+            createToolbar();
+        }
     }
-    m_selectionBorder = new SnipBorderOverlay(this);
-    m_selectionBorder->setGeometry(rect());
-    m_selectionBorder->show();
-    if (!m_selection.isEmpty())
+    // Prepared application sessions apply preferences before showEvent.
+    if (!m_reusable && !m_selection.isEmpty())
         confirmSelection();
 }
 
@@ -213,7 +275,8 @@ void SnipOverlay::setDetectionOptions(bool detectWindows, bool detectElements, b
     m_elementMode = detectElements;
     m_showShortcutHints = showHints;
     m_targetPoint = QPoint(-1, -1);
-    updateHoverTarget();
+    if (isVisible())
+        updateHoverTarget();
 }
 
 void SnipOverlay::setCaptureDisplayOptions(bool showAnchor,
@@ -880,8 +943,10 @@ void SnipOverlay::changeEvent(QEvent *event)
     QWidget::changeEvent(event);
     if (event->type() != QEvent::WindowDeactivate || !m_exitOnFocusLoss)
         return;
-    QTimer::singleShot(0, this, [this] {
-        if (!isVisible() || isActiveWindow() || QApplication::activePopupWidget()
+    const auto generation = m_sessionGeneration;
+    QTimer::singleShot(0, this, [this, generation] {
+        if (generation != m_sessionGeneration || !m_captureActive
+            || !isVisible() || isActiveWindow() || QApplication::activePopupWidget()
             || QApplication::activeModalWidget())
             return;
         close();
@@ -899,13 +964,16 @@ void SnipOverlay::showEvent(QShowEvent *event)
     // defer it until the frame is already visible and the cursor has stayed
     // still.  A cursor move or a click will perform the detailed hit test on
     // demand through the normal event path.
+    if (!m_selection.isEmpty() && !m_selectionConfirmed)
+        confirmSelection();
     updateHoverTarget(false);
     updateToolbarGeometry();
     update();
     if (m_detectElements && m_elementMode) {
         const QPoint initialCursor = m_cursorPosition;
-        QTimer::singleShot(120, this, [this, initialCursor] {
-            if (!isVisible() || m_selectionConfirmed || m_dragging
+        const auto generation = m_sessionGeneration;
+        QTimer::singleShot(120, this, [this, initialCursor, generation] {
+            if (generation != m_sessionGeneration || !m_captureActive || !isVisible() || m_selectionConfirmed || m_dragging
                 || m_cursorPosition != initialCursor)
                 return;
             m_targetPoint = QPoint(-1, -1);
@@ -1113,6 +1181,8 @@ void SnipOverlay::closeEvent(QCloseEvent *event)
     if (m_toolbar)
         m_toolbar->hide();
     if (m_sizeToolbar) m_sizeToolbar->hide();
+    if (m_toolOptions) m_toolOptions->hide();
+    if (m_cornerRadiusPopup) m_cornerRadiusPopup->hide();
     // The capture result has already been delivered synchronously above.
     // Drop the desktop-sized images before QWidget's deferred destruction so
     // a finished screenshot does not keep the entire monitor resident.
@@ -1124,17 +1194,36 @@ void SnipOverlay::closeEvent(QCloseEvent *event)
     // deleteLater() is idempotent and guarantees the overlay is released on
     // the next event turn after the close event has been accepted.
     if (event->isAccepted()) {
-        deleteLater();
+        const bool wasActive = m_captureActive;
+        m_captureActive = false;
+        ++m_sessionGeneration;
+        if (m_reusable) {
+            hide();
+            resize(1, 1);
+            // A hidden QWidget retains its last full-screen backing buffer.
+            // Shrink it explicitly; the next capture restores the geometry.
+            if (auto *store = backingStore())
+                store->resize(QSize(1, 1));
+        }
+        if (wasActive)
+            emit sessionClosed();
+        if (!m_reusable)
+            deleteLater();
     }
 }
 
 void SnipOverlay::releaseCaptureResources()
 {
-    // Delete the annotation canvas first: it owns the converted render cache
-    // and may share the original full-screen image with this overlay.
-    delete m_canvas;
+    // Release the canvas pixels first, including the converted render cache
+    // and any shared references to the original full-screen image.
+    if (m_preparedCanvas) {
+        m_preparedCanvas->hide();
+        m_preparedCanvas->resetCapture();
+        m_preparedCanvas->setObjectName(QStringLiteral("preparedSelectionCanvas"));
+    } else {
+        delete m_canvas;
+    }
     m_canvas = nullptr;
-    m_selectionBorder = nullptr;
 
     m_background = {};
     m_cleanBackground = {};
@@ -1143,12 +1232,21 @@ void SnipOverlay::releaseCaptureResources()
     m_singleScreenBackground = {};
     m_captureHistory.clear();
     m_captureHistoryBackgrounds.clear();
-    m_captureHistoryRegions.clear();
+    m_captureHistoryGeometries.clear();
     m_captureHistoryBackgroundLoader = {};
     m_captureHistoryImageLoader = {};
     m_backgroundProvider = {};
     m_singleScreenBackgroundProvider = {};
     m_targetHierarchy.clear();
+    m_scrollStitcher.clear();
+    m_scrollScreen = nullptr;
+    m_scrollGlobalSelection = {};
+    m_scrollCaptureCount = 0;
+    if (m_scrollPreview) {
+        m_scrollPreview->hide();
+        m_scrollPreview->deleteLater();
+        m_scrollPreview = nullptr;
+    }
 }
 
 void SnipOverlay::updateToolbarGeometry()

@@ -92,20 +92,21 @@ QImage captureScreen(QScreen *screen)
     GdiFlush();
 
     if (copied) {
-        // Windows' 32-bit DIB layout is BGRA, which is the in-memory layout
-        // Qt uses for Format_ARGB32_Premultiplied on little-endian Windows.
-        // Keep the DIB alive as the QImage backing store.  The old path copied
-        // the complete frame a second time before returning, which was both a
-        // measurable part of the hotkey latency and an unnecessary peak-memory
-        // spike for a 4K desktop.
+        // BI_RGB supplies BGR plus an unused high byte, not premultiplied
+        // alpha. Normalize it to opaque RGB32 while keeping the DIB as the
+        // backing store; do not allocate a second desktop-sized image.
+        auto *pixels = static_cast<quint32 *>(bits);
+        for (qsizetype i = 0, count = qsizetype(width) * height; i < count; ++i)
+            pixels[i] |= 0xff000000u;
         auto *resources = new CaptureResources{desktop, memory, bitmap, previous};
         QImage result(static_cast<uchar *>(bits), width, height, width * 4,
-                      QImage::Format_ARGB32_Premultiplied,
+                      QImage::Format_RGB32,
                       releaseCaptureResources, resources);
         result.setDevicePixelRatio(1.0);
         return result;
     }
 
+    SelectObject(memory, previous);
     DeleteObject(bitmap);
     DeleteDC(memory);
     ReleaseDC(nullptr, desktop);

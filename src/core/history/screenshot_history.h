@@ -2,11 +2,27 @@
 
 #include <QImage>
 #include <QList>
+#include <QRect>
+#include <QSize>
 #include <QString>
 #include <QStringList>
 #include <QtGlobal>
 
 namespace snipaste::core {
+
+// Coordinates within the desktop shown during this capture, before DPI scaling.
+// This belongs to a screenshot, independently of the deduplicated recent regions.
+struct CaptureGeometry
+{
+    QRect region;
+    QSize desktopSize;
+
+    bool isValid() const
+    {
+        return !region.isEmpty() && !desktopSize.isEmpty()
+            && QRect(QPoint(), desktopSize).contains(region);
+    }
+};
 
 class ScreenshotHistory final
 {
@@ -21,7 +37,8 @@ public:
     void setMaximumCount(int maximumCount);
     void setMemoryLimitBytes(qint64 bytes);
     qint64 memoryUsageBytes() const;
-    void add(const QImage &image, const QImage &background = {});
+    void add(const QImage &image, const QImage &background = {},
+             CaptureGeometry geometry = {});
     void clear();
     void loadFromDirectory(const QString &directory);
     // Write new entries only. Backgrounds use lossless content-addressed
@@ -52,6 +69,7 @@ public:
     // obtain one historical image without materializing the whole list.
     const QList<QImage> &images() const;
     const QList<QImage> &backgrounds() const;
+    const QList<CaptureGeometry> &geometries() const { return m_geometries; }
 
 private:
     void trimToLimits();
@@ -65,6 +83,7 @@ private:
     QStringList m_imagePaths;
     QList<QImage> m_backgrounds;
     QStringList m_backgroundPaths;
+    QList<CaptureGeometry> m_geometries;
     quint64 m_revision = 0;
 };
 

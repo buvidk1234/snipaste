@@ -80,6 +80,9 @@ public:
     void refreshToolCursor() { updateToolCursor(); }
     void setCaptureImage(QImage image, QPointF annotationOffset = {},
                          QSizeF logicalSize = {});
+    // Reset session state and release image buffers, keeping the text editor
+    // and tool preferences ready for the next capture.
+    void resetCapture();
     bool isDrawing() const { return m_dragging || m_textEditing; }
     void finishTextInput(bool commit = true);
     QImage renderedImage(bool includePendingText = true) const;

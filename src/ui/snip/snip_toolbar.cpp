@@ -595,6 +595,7 @@ void SnipOverlay::createToolbar()
         b->setIcon(captureIcon(icon));
         b->setIconSize(QSize(16, 16));
         b->setFixedSize(qMax(16, int(32 * compact)), 30);
+        b->setProperty("captureActionButton", true);
         b->setFocusPolicy(Qt::NoFocus);
         b->setToolTip(tip);
         row->addWidget(b);
@@ -766,6 +767,7 @@ void SnipOverlay::createToolbar()
             &QToolButton::clicked, this, [this] { copySelection(); });
     m_outputOptionsButton = button(CaptureIcon::More, QStringLiteral("更多"), QStringLiteral("更多输出操作"));
     m_outputOptionsButton->setFixedWidth(16);
+    m_outputOptionsButton->setProperty("captureActionButton", false);
     m_outputOptionsButton->setVisible(!m_hideOutputOptions);
     connect(m_outputOptionsButton, &QToolButton::clicked, this, [this] {
         showOutputMenu(m_outputOptionsButton->mapToGlobal(QPoint(0, m_outputOptionsButton->height())));
@@ -1689,12 +1691,15 @@ void SnipOverlay::confirmSelection()
     QImage image = historyOverride ? m_selectionImageOverride : m_background;
     m_selectionImageOverride = {};
     image.setDevicePixelRatio(1);
-    m_canvas = new AnnotationCanvas(image, this);
+    m_canvas = m_preparedCanvas ? m_preparedCanvas : new AnnotationCanvas(image, this);
     m_canvas->setCaptureImage(image, {}, historyOverride
                                          ? QSizeF(m_selection.size()) : QSizeF(size()));
     m_canvas->setCanvasFrame(historyOverride ? QPoint() : m_selection.topLeft(),
                              historyOverride ? QSizeF(m_selection.size()) : QSizeF(size()),
                              historyOverride ? QRect() : m_selection);
+    // These bindings belong to the current selection. Child/editor bindings
+    // stay intact when the prepared canvas is reused.
+    disconnect(m_canvas, nullptr, this, nullptr);
     m_canvas->setAutoSelectOnCreation(m_autoSelectAnnotations);
     m_canvas->setRememberToolColors(m_rememberToolColors);
     m_canvas->setFreeSelect(m_freeSelect);
@@ -1747,7 +1752,13 @@ void SnipOverlay::resetSelection()
     m_externalDrawing = false;
     m_selection = {};
     m_selectionImageOverride = {};
-    delete m_canvas;
+    if (m_preparedCanvas) {
+        m_preparedCanvas->hide();
+        m_preparedCanvas->resetCapture();
+        m_preparedCanvas->setObjectName(QStringLiteral("preparedSelectionCanvas"));
+    } else {
+        delete m_canvas;
+    }
     m_canvas = nullptr;
     m_toolbar->hide();
     m_sizeToolbar->hide();

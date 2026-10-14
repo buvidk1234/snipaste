@@ -13,6 +13,7 @@
 #include "platform/keyboard.h"
 
 #include <QApplication>
+#include <QBackingStore>
 #include <QCheckBox>
 #include <QColor>
 #include <QClipboard>
@@ -50,6 +51,7 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QUrl>
+#include <memory>
 
 using namespace snipaste;
 
@@ -68,9 +70,13 @@ private slots:
     void trayContextMenuMatchesReference();
     void hotCornerDwellState();
     void toolbarOnlyAfterSelection();
+    void preparedOverlayReusesControlsAndReleasesPixels();
+    void annotationExportSharesCommittedCache();
     void proGroupedToolsAndStyles();
     void proSizeRefreshAndOutput();
     void proHistoryAndSelectionShortcuts();
+    void historyRestoresPairedGeometryAndBackground();
+    void legacyHistoryUsesNeutralPreview();
     void proLayoutAndAnnotations();
     void magnifierFramesMoveIndependently();
     void autoCopySkipsToolbar();
@@ -757,6 +763,101 @@ void UiRegressionTest::moveSelectionAndClampToScreen()
     QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
 }
 
+void UiRegressionTest::preparedOverlayReusesControlsAndReleasesPixels()
+{
+    std::unique_ptr<ui::SnipOverlay> overlay(ui::SnipOverlay::createPrepared(QGuiApplication::primaryScreen()));
+    auto *toolbar = overlay->findChild<QFrame *>(QStringLiteral("captureToolbar"));
+    auto *preparedCanvas = overlay->findChild<ui::AnnotationCanvas *>();
+    auto *editor = overlay->findChild<QPlainTextEdit *>();
+    QVERIFY(toolbar && preparedCanvas && editor);
+    QVERIFY(!overlay->isVisible());
+    QVERIFY(preparedCanvas->fullRenderedImage().isNull());
+    const auto controlCount = overlay->findChildren<QWidget *>().size();
+    QSignalSpy closed(overlay.get(), &ui::SnipOverlay::sessionClosed);
+    for (int session = 0; session < 3; ++session) {
+        overlay->beginCapture(QGuiApplication::primaryScreen());
+        overlay->setExitOnFocusLoss(false);
+        overlay->setDetectionOptions(false, false, false);
+        QImage frame(overlay->size(), QImage::Format_RGB32);
+        frame.fill(session == 0 ? Qt::red : Qt::blue);
+        overlay->setBackgroundProvider([frame] { return frame; });
+        overlay->show();
+        QTest::keyClick(overlay.get(), Qt::Key_F5);
+        QTRY_VERIFY(overlay->isVisible());
+        QTest::mousePress(overlay.get(), Qt::LeftButton, Qt::NoModifier, QPoint(40, 40));
+        QTest::mouseRelease(overlay.get(), Qt::LeftButton, Qt::NoModifier, QPoint(400, 300));
+        QCOMPARE(overlay->findChild<ui::AnnotationCanvas *>(QStringLiteral("selectionCanvas")), preparedCanvas);
+        QCOMPARE(overlay->findChild<QFrame *>(QStringLiteral("captureToolbar")), toolbar);
+        QCOMPARE(preparedCanvas->fullRenderedImage(), frame);
+        QVERIFY(!preparedCanvas->canUndo());
+        QVERIFY(!preparedCanvas->canRedo());
+        QVERIFY(toolbar->isVisible());
+        preparedCanvas->setTool(ui::AnnotationCanvas::Tool::Text);
+        QTest::mouseClick(preparedCanvas, Qt::LeftButton, Qt::NoModifier, QPoint(70, 70));
+        editor->setPlainText(QStringLiteral("pending text from old capture"));
+        overlay->close();
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        QCOMPARE(closed.count(), session + 1);
+        QVERIFY(!overlay->isVisible());
+        QCOMPARE(overlay->size(), QSize(1, 1));
+        if (overlay->backingStore())
+            QCOMPARE(overlay->backingStore()->size(), QSize(1, 1));
+        QVERIFY(!toolbar->isVisible());
+        QVERIFY(preparedCanvas->fullRenderedImage().isNull());
+        QVERIFY(!preparedCanvas->canUndo() && !preparedCanvas->canRedo());
+        QVERIFY(editor->toPlainText().isEmpty());
+        QCOMPARE(overlay->findChildren<QWidget *>().size(), controlCount);
+    }
+    // Initial selections and automatic output use the same prepared controls.
+    overlay->beginCapture(QGuiApplication::primaryScreen(), true, false, QRect(40, 40, 120, 80));
+    overlay->setExitOnFocusLoss(false);
+    QImage frame(overlay->size(), QImage::Format_RGB32);
+    frame.fill(Qt::green);
+    overlay->setBackgroundProvider([frame] { return frame; });
+    QSignalSpy captured(overlay.get(), &ui::SnipOverlay::screenshotCaptured);
+    overlay->show();
+    QTest::keyClick(overlay.get(), Qt::Key_F5);
+    QTRY_VERIFY(overlay->isVisible());
+    overlay->captureSelectionImmediately();
+    QCOMPARE(captured.count(), 1);
+    QCOMPARE(closed.count(), 4);
+    QCOMPARE(captured.first().first().value<QImage>(), frame.copy(40, 40, 120, 80));
+    // A refresh left pending at cancellation cannot revive a closed session.
+    overlay->beginCapture(QGuiApplication::primaryScreen());
+    overlay->setExitOnFocusLoss(false);
+    overlay->setBackgroundProvider([frame] { return frame; });
+    overlay->show();
+    QTest::keyClick(overlay.get(), Qt::Key_F5);
+    overlay->close();
+    QTest::qWait(80);
+    QVERIFY(!overlay->isVisible());
+    QCOMPARE(closed.count(), 5);
+}
+
+void UiRegressionTest::annotationExportSharesCommittedCache()
+{
+    QImage frame(640, 420, QImage::Format_ARGB32_Premultiplied);
+    frame.fill(Qt::white);
+    ui::AnnotationCanvas canvas(frame);
+    canvas.resize(frame.size());
+    QTest::mousePress(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(40, 40));
+    QTest::mouseRelease(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(300, 240));
+    const QImage committed = canvas.fullRenderedImage(false);
+    const QImage exported = canvas.fullRenderedImage();
+    QCOMPARE(exported, committed);
+    QCOMPARE(exported.constBits(), committed.constBits());
+    canvas.show();
+    canvas.setTool(ui::AnnotationCanvas::Tool::Text);
+    QTest::mouseClick(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(80, 80));
+    auto *editor = canvas.findChild<QPlainTextEdit *>();
+    QVERIFY(editor->isVisible());
+    editor->setPlainText(QStringLiteral("pending"));
+    QVERIFY(canvas.fullRenderedImage() != committed);
+    QCOMPARE(canvas.fullRenderedImage(false), committed);
+    canvas.finishTextInput(false);
+    QCOMPARE(canvas.fullRenderedImage(), committed);
+}
+
 void UiRegressionTest::toolbarOnlyAfterSelection()
 {
     QPointer<ui::SnipOverlay> overlay = overlayForTest();
@@ -984,7 +1085,7 @@ void UiRegressionTest::proHistoryAndSelectionShortcuts()
     const QRect historicalRegion(300, 160, 180, 120);
     QImage historyImage(historicalRegion.size(), QImage::Format_ARGB32_Premultiplied);
     historyImage.fill(Qt::green);
-    overlay->setCaptureHistory({historyImage}, {historicalRegion});
+    overlay->setCaptureHistory({historyImage}, {{historicalRegion, overlay->size()}});
     QTest::keyClick(overlay, Qt::Key_Comma);
     canvas = overlay->findChild<ui::AnnotationCanvas *>();
     QCOMPARE(canvas->geometry(), historicalRegion);
@@ -996,6 +1097,90 @@ void UiRegressionTest::proHistoryAndSelectionShortcuts()
     QTest::keyClick(overlay, Qt::Key_A, snipaste::platform::primaryModifier());
     QCOMPARE(canvas->geometry(), overlay->rect());
     QVERIFY(overlay->rect().contains(overlay->findChild<QFrame *>(QStringLiteral("captureSizeToolbar"))->geometry()));
+    overlay->close();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+}
+
+void UiRegressionTest::historyRestoresPairedGeometryAndBackground()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    core::ScreenshotHistory history;
+    const QSize sourceDesktop(640, 480);
+    const QList<QRect> regions{QRect(80, 80, 160, 80), QRect(320, 160, 160, 80),
+                              QRect(80, 80, 160, 80)};
+    const QList<QColor> colors{Qt::red, Qt::green, Qt::blue};
+    for (int index = 0; index < regions.size(); ++index) {
+        QImage background(sourceDesktop * 2, QImage::Format_RGB32);
+        background.fill(colors.at(index));
+        // A capture with annotations differs from the original desktop inside
+        // its selection, but must not contaminate the stored clean background.
+        QImage image(regions.at(index).size() * 2, QImage::Format_RGB32);
+        image.fill(Qt::yellow);
+        history.add(image, background, {regions.at(index), sourceDesktop});
+    }
+    QVERIFY(history.saveToDirectory(directory.path()));
+    history.loadFromDirectory(directory.path());
+    QCOMPARE(history.memoryUsageBytes(), 0);
+
+    QPointer<ui::SnipOverlay> overlay = overlayForTest();
+    overlay->resize(800, 600);
+    overlay->setSelectionHistory({QRect(10, 20, 40, 50)});
+    overlay->setCaptureHistory(history.images(), history.geometries(), history.backgrounds(),
+        [&history](int index) { return history.backgroundAt(index); },
+        [&history](int index) { return history.imageAt(index); });
+    overlay->setMouseActions({}, false, {}, false, QStringLiteral("复制到剪贴板"), false);
+    QSignalSpy captured(overlay, &ui::SnipOverlay::screenshotCapturedWithBackground);
+    for (int index = 0; index < history.size(); ++index) {
+        QTest::keyClick(overlay, Qt::Key_Comma);
+        const QRect region = regions.at(2 - index);
+        const QRect expected(qRound(region.x() * 1.25), qRound(region.y() * 1.25),
+                             qRound(region.width() * 1.25), qRound(region.height() * 1.25));
+        auto *canvas = overlay->findChild<ui::AnnotationCanvas *>();
+        QVERIFY(canvas);
+        QCOMPARE(canvas->geometry(), expected);
+        QCOMPARE(canvas->renderedImage(), history.imageAt(index));
+        QCOMPARE(overlay->captureGeometry().region, expected);
+        QTest::keyClick(overlay, Qt::Key_Return);
+        QCOMPARE(captured.count(), index + 1);
+        const QImage restoredBackground = captured.last().at(1).value<QImage>();
+        QCOMPARE(restoredBackground.size(), sourceDesktop * 2);
+        QCOMPARE(restoredBackground.pixelColor(0, 0), colors.at(2 - index));
+        QCOMPARE(restoredBackground.pixelColor(region.x() * 2, region.y() * 2), colors.at(2 - index));
+        QCOMPARE(captured.last().at(0).value<QImage>(), history.imageAt(index));
+    }
+    overlay->close();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+}
+
+void UiRegressionTest::legacyHistoryUsesNeutralPreview()
+{
+    QPointer<ui::SnipOverlay> overlay = overlayForTest();
+    overlay->resize(800, 600);
+    overlay->setSelectionHistory({QRect(10, 20, 40, 50)});
+    QTest::keyClick(overlay, Qt::Key_R);
+    QImage image(QSize(160, 80), QImage::Format_RGB32);
+    image.fill(Qt::green);
+    int backgroundLoads = 0;
+    overlay->setCaptureHistory({image}, {}, {}, [&backgroundLoads](int) {
+        ++backgroundLoads;
+        return QImage();
+    });
+    QTest::keyClick(overlay, Qt::Key_Comma);
+    auto *canvas = overlay->findChild<ui::AnnotationCanvas *>();
+    QVERIFY(canvas);
+    QVERIFY(canvas->geometry() != QRect(10, 20, 40, 50));
+    QCOMPARE(canvas->geometry().center(), overlay->rect().center());
+    QCOMPARE(canvas->renderedImage(), image);
+    QCOMPARE(backgroundLoads, 0);
+    overlay->setMouseActions({}, false, {}, false, QStringLiteral("复制到剪贴板"), false);
+    QSignalSpy captured(overlay, &ui::SnipOverlay::screenshotCapturedWithBackground);
+    QTest::keyClick(overlay, Qt::Key_Return);
+    QCOMPARE(captured.count(), 1);
+    const QImage background = captured.first().at(1).value<QImage>();
+    QCOMPARE(background.pixelColor(0, 0), QColor(32, 32, 32));
+    QTest::keyClick(overlay, Qt::Key_Period);
+    QCOMPARE(overlay->findChild<ui::AnnotationCanvas *>()->geometry(), QRect(10, 20, 40, 50));
     overlay->close();
     QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
 }

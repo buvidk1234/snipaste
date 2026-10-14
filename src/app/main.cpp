@@ -79,6 +79,7 @@
 #include <QFutureWatcher>
 #include <QtConcurrent/QtConcurrentRun>
 #include <algorithm>
+#include <memory>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -1090,13 +1091,14 @@ int main(int argc, char *argv[])
     if (recentSelections.isEmpty() && lastSelection.isValid()) recentSelections.append(lastSelection);
     const auto recordScreenshot = [&history, &historyPath, &ensureHistoryLoaded](
                                       const QImage &image,
-                                      const QImage &background = {}) {
+                                      const QImage &background = {},
+                                      snipaste::core::CaptureGeometry geometry = {}) {
         ensureHistoryLoaded();
         // History navigation must restore the exact desktop around a capture.
         // ScreenshotHistory stores the background losslessly in deduplicated
         // tiles, so retaining it does not rewrite a multi-megabyte PNG for
         // every capture.
-        history.add(image, background);
+        history.add(image, background, geometry);
         saveHistorySnapshotAsync(history, historyPath);
     };
     const auto configuredOutputQuality = [&config] {
@@ -1138,6 +1140,9 @@ int main(int argc, char *argv[])
         });
     };
     QPointer<snipaste::ui::SnipOverlay> activeOverlay;
+    std::unique_ptr<snipaste::ui::SnipOverlay> preparedOverlay;
+    if (auto *screen = QGuiApplication::primaryScreen())
+        preparedOverlay.reset(snipaste::ui::SnipOverlay::createPrepared(screen));
     QPointer<snipaste::ui::WindowCaptureOverlay> activeWindowOverlay;
     const auto showPaste = [&pasteManager](const QImage &image) {
         // Let the capture overlay process its close/repaint events first.  A
@@ -1276,6 +1281,7 @@ int main(int argc, char *argv[])
     };
     const auto startSnip = [&app,
                             &activeOverlay,
+                            &preparedOverlay,
                             &history,
                             &historyPath,
                             ensureHistoryLoaded,
@@ -1319,14 +1325,18 @@ int main(int argc, char *argv[])
             initialSelection = local.intersected(screen->geometry().translated(-screen->geometry().topLeft()));
         }
 
-        activeOverlay = new snipaste::ui::SnipOverlay(screen,
-                                                     autoCopy,
-                                                     config.value(QStringLiteral("capture/cursor"),
-                                                                  false)
-                                                         .toBool(),
-                                                     initialSelection);
-        QObject::connect(activeOverlay, &QObject::destroyed, &app, [] {
-            QTimer::singleShot(250, qApp, [] { trimIdleProcessMemory(); });
+        if (!preparedOverlay)
+            preparedOverlay.reset(snipaste::ui::SnipOverlay::createPrepared(screen));
+        // Drop outgoing callbacks from the previous session (output spec,
+        // autosave, pinning, etc.), keeping all child-control bindings.
+        QObject::disconnect(preparedOverlay.get(), nullptr, nullptr, nullptr);
+        activeOverlay = preparedOverlay.get();
+        activeOverlay->beginCapture(screen, autoCopy,
+                                   config.value(QStringLiteral("capture/cursor"), false).toBool(),
+                                   initialSelection);
+        QObject::connect(activeOverlay, &snipaste::ui::SnipOverlay::sessionClosed,
+                         &app, [&activeOverlay] {
+            activeOverlay = nullptr;
         });
         activeOverlay->setFixedSelectionSize(fixedSize);
         activeOverlay->setHoldAfterCapture(hold);
@@ -1453,7 +1463,7 @@ int main(int argc, char *argv[])
             localRegions.append(region.translated(-screen->geometry().topLeft()));
         activeOverlay->setSelectionHistory(localRegions);
         activeOverlay->setCaptureHistory(
-            history.images(), localRegions, history.backgrounds(),
+            history.images(), history.geometries(), history.backgrounds(),
             [&history](int index) { return history.backgroundAt(index); },
             [&history](int index) { return history.imageAt(index); });
         QObject::connect(activeOverlay,
@@ -1471,10 +1481,11 @@ int main(int argc, char *argv[])
                          });
         QObject::connect(activeOverlay,
                          &snipaste::ui::SnipOverlay::screenshotCapturedWithBackground,
-                         [&pasteManager, &lastSelection, recordScreenshot](const QImage &image,
-                                                                            const QImage &background) {
+                         [&pasteManager, &lastSelection, recordScreenshot, overlay = activeOverlay](
+                             const QImage &image, const QImage &background) {
                              pasteManager.rememberCapture(image, lastSelection);
-                             recordScreenshot(image, background);
+                             recordScreenshot(image, background, background.isNull()
+                                 ? snipaste::core::CaptureGeometry{} : overlay->captureGeometry());
                          });
         if (!noAutoSave) {
             QObject::connect(activeOverlay,
@@ -1483,9 +1494,10 @@ int main(int argc, char *argv[])
         }
         QObject::connect(activeOverlay,
                          &snipaste::ui::SnipOverlay::unsavedScreenshotCapturedWithBackground,
-                         [&config, recordScreenshot](const QImage &image, const QImage &background) {
+                         [&config, recordScreenshot, overlay = activeOverlay](
+                             const QImage &image, const QImage &background) {
                              if (config.value(QStringLiteral("capture/includeUnsaved"), false).toBool())
-                                 recordScreenshot(image, background);
+                                 recordScreenshot(image, background, overlay->captureGeometry());
                          });
         if (!outputSpec.isEmpty()) {
             QObject::connect(activeOverlay,
@@ -1966,12 +1978,24 @@ int main(int argc, char *argv[])
             }
         },
     });
+    QTimer hotCornerTimer;
+    snipaste::core::HotCornerState hotCornerState;
+    QElapsedTimer hotCornerClock;
+    hotCornerClock.start();
+    const auto configureHotCorners = [&] {
+        hotCornerState.reset();
+        hotCornerTimer.setInterval(qBound(10, config.value(QStringLiteral("control/cornerInterval"), 125).toInt(), 2000));
+        if (config.value(QStringLiteral("control/cornerEnabled"), false).toBool())
+            hotCornerTimer.start();
+        else
+            hotCornerTimer.stop();
+    };
     snipaste::ui::TrayController *trayController = nullptr;
     commands.registerCommand({
         QStringLiteral("preferences.open"),
         QStringLiteral("首选项"),
         [&config, &history, &pasteManager, &maxHistoryRegions, &trayController, &updates,
-         applyHotkeys, configureSuperCapture, configuredPasteMouseActions] {
+         applyHotkeys, configureSuperCapture, configureHotCorners, configuredPasteMouseActions] {
             snipaste::ui::PreferencesDialog dialog(config);
             dialog.setUpdateCheckHandler([&updates](QWidget *parent) { updates.checkNow(parent); });
             if (dialog.exec() == QDialog::Accepted) {
@@ -1986,6 +2010,7 @@ int main(int argc, char *argv[])
                 snipaste::ui::applyApplicationAppearance(config);
                 applyHotkeys();
                 configureSuperCapture();
+                configureHotCorners();
                 if (trayController)
                     trayController->refreshIcon();
                 history.setMaximumCount(qBound(1,
@@ -2500,10 +2525,6 @@ int main(int argc, char *argv[])
         customCommandHotkeys.append(hotkey);
     }
 
-    QTimer hotCornerTimer;
-    snipaste::core::HotCornerState hotCornerState;
-    QElapsedTimer hotCornerClock;
-    hotCornerClock.start();
     QObject::connect(&hotCornerTimer, &QTimer::timeout, &app, [&] {
         const int interval = qBound(10, config.value(QStringLiteral("control/cornerInterval"), 125).toInt(), 2000);
         if (hotCornerTimer.interval() != interval) hotCornerTimer.setInterval(interval);
@@ -2529,12 +2550,11 @@ int main(int argc, char *argv[])
         const QString command = config.value(keys.at(corner), corner < 2 ? QStringLiteral("toggle-images") : QString()).toString();
         if (!command.trimmed().isEmpty()) commands.execute(command);
     });
-    hotCornerTimer.setInterval(qBound(10, config.value(QStringLiteral("control/cornerInterval"), 125).toInt(), 2000));
-    hotCornerTimer.start();
+    configureHotCorners();
     const auto setCornersEnabled = [&](bool enabled) {
         config.setValue(QStringLiteral("control/cornerEnabled"), enabled);
         config.save();
-        hotCornerState.reset();
+        configureHotCorners();
     };
     commands.registerCommand({QStringLiteral("corners.disable"), QStringLiteral("禁用触发角"),
                               [setCornersEnabled] { setCornersEnabled(false); }});
@@ -3094,7 +3114,7 @@ int main(int argc, char *argv[])
                     QTimer::singleShot(qMax(1, qRound(seconds * 1000.0)),
                                        &app, &QCoreApplication::quit);
                 } else if (activeOverlay) {
-                    QObject::connect(activeOverlay, &QObject::destroyed,
+                    QObject::connect(activeOverlay, &snipaste::ui::SnipOverlay::sessionClosed,
                                      &app, &QCoreApplication::quit,
                                      Qt::SingleShotConnection);
                 } else if (activeWindowOverlay) {

@@ -3,6 +3,8 @@
 #include "core/scroll_stitcher.h"
 
 #include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QTemporaryDir>
 #include <QTest>
 
@@ -18,6 +20,8 @@ private slots:
     void normalizesMultiValueOptions();
     void expandsOutputPatterns();
     void persistsHistoryWithoutRenamingExistingFiles();
+    void historyGeometryStaysWithEachCapture();
+    void loadsLegacyHistoryWithoutInventingGeometry();
     void stitchesVerticalScrollFrames();
 };
 
@@ -99,6 +103,99 @@ void CoreUnitTest::persistsHistoryWithoutRenamingExistingFiles()
     QCOMPARE(loaded.imageAt(1).pixelColor(0, 0), QColor(Qt::red));
     QCOMPARE(loaded.backgroundAt(0).pixelColor(0, 0), QColor(Qt::black));
     QCOMPARE(loaded.backgroundAt(1).pixelColor(0, 0), QColor(Qt::black));
+}
+
+void CoreUnitTest::historyGeometryStaysWithEachCapture()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    ScreenshotHistory history(3);
+    const QSize desktopSize(640, 480);
+    const QList<QRect> regions{QRect(20, 30, 80, 60), QRect(200, 150, 40, 80),
+                              QRect(20, 30, 80, 60)};
+    const QList<QColor> colors{Qt::red, Qt::green, Qt::blue};
+    for (int index = 0; index < regions.size(); ++index) {
+        QImage image(regions.at(index).size(), QImage::Format_RGB32);
+        image.fill(colors.at(index));
+        QImage background(desktopSize * 2, QImage::Format_RGB32);
+        background.fill(colors.at(index));
+        background.setDevicePixelRatio(2);
+        history.add(image, background, {regions.at(index), desktopSize});
+        QVERIFY(history.saveToDirectory(directory.path()));
+        history.rebaseBackgroundPaths(directory.path());
+        history.releaseDecodedImages();
+        history.releaseDecodedBackgrounds();
+        QCOMPARE(history.memoryUsageBytes(), 0);
+    }
+    ScreenshotHistory loaded(3);
+    loaded.loadFromDirectory(directory.path());
+    QCOMPARE(loaded.size(), 3);
+    QCOMPARE(loaded.memoryUsageBytes(), 0);
+    for (int index = 0; index < loaded.size(); ++index) {
+        const int source = 2 - index;
+        QCOMPARE(loaded.geometries().at(index).region, regions.at(source));
+        QCOMPARE(loaded.geometries().at(index).desktopSize, desktopSize);
+        QCOMPARE(loaded.imageAt(index).pixelColor(0, 0), colors.at(source));
+        QCOMPARE(loaded.backgroundAt(index).pixelColor(0, 0), colors.at(source));
+        QCOMPARE(loaded.backgroundAt(index).devicePixelRatio(), 2);
+    }
+    loaded.setMaximumCount(2);
+    QCOMPARE(loaded.geometries().size(), loaded.size());
+    QVERIFY(loaded.saveToDirectory(directory.path()));
+    QCOMPARE(QDir(directory.path()).entryList({QStringLiteral("*.geometry.json")}, QDir::Files).size(), 2);
+    loaded.clear();
+    QVERIFY(loaded.geometries().isEmpty());
+
+    // Full-screen commands have no separately selected rectangle.
+    QImage fullScreen(desktopSize, QImage::Format_RGB32);
+    fullScreen.fill(Qt::cyan);
+    loaded.add(fullScreen, fullScreen);
+    QCOMPARE(loaded.geometries().first().region, fullScreen.rect());
+    QCOMPARE(loaded.geometries().first().desktopSize, desktopSize);
+}
+
+void CoreUnitTest::loadsLegacyHistoryWithoutInventingGeometry()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QDir dir(directory.path());
+    QImage oldImage(QSize(32, 24), QImage::Format_RGB32);
+    oldImage.fill(Qt::yellow);
+    QImage oldBackground(QSize(640, 480), QImage::Format_RGB32);
+    oldBackground.fill(Qt::magenta);
+    QVERIFY(oldImage.save(dir.filePath(QStringLiteral("000.png"))));
+    QVERIFY(oldBackground.save(dir.filePath(QStringLiteral("000.background.png"))));
+
+    ScreenshotHistory history;
+    history.loadFromDirectory(directory.path());
+    QCOMPARE(history.size(), 1);
+    QCOMPARE(history.memoryUsageBytes(), 0);
+    QVERIFY(!history.geometries().first().isValid());
+    QCOMPARE(history.imageAt(0), oldImage);
+    QCOMPARE(history.backgroundAt(0), oldBackground);
+
+    QImage newImage(QSize(20, 20), QImage::Format_RGB32);
+    newImage.fill(Qt::cyan);
+    history.add(newImage, oldBackground, {QRect(80, 60, 20, 20), oldBackground.size()});
+    QVERIFY(history.saveToDirectory(directory.path()));
+    history.rebaseBackgroundPaths(directory.path());
+    history.releaseDecodedImages();
+    history.releaseDecodedBackgrounds();
+    QCOMPARE(history.memoryUsageBytes(), 0);
+    QVERIFY(QFileInfo::exists(dir.filePath(QStringLiteral("000.background.png"))));
+    history.loadFromDirectory(directory.path());
+    QCOMPARE(history.size(), 2);
+    QVERIFY(history.geometries().first().isValid());
+    QVERIFY(!history.geometries().last().isValid());
+    QCOMPARE(history.imageAt(1), oldImage);
+    QCOMPARE(history.backgroundAt(1), oldBackground);
+
+    // An explicitly empty index must not resurrect the numbered legacy files.
+    QFile order(dir.filePath(QStringLiteral(".snipaste-order")));
+    QVERIFY(order.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    order.close();
+    history.loadFromDirectory(directory.path());
+    QCOMPARE(history.size(), 0);
 }
 
 void CoreUnitTest::stitchesVerticalScrollFrames()

@@ -344,6 +344,13 @@ if(SNIPASTE_BUILD_TESTS)
     )
     target_include_directories(snipaste_ui_tests PRIVATE src)
     target_link_libraries(snipaste_ui_tests PRIVATE snipaste_ui Qt6::Test)
+    add_executable(snipaste_performance_probe tests/snip_performance_probe.cpp)
+    target_link_libraries(snipaste_performance_probe PRIVATE snipaste_ui)
+    target_compile_definitions(snipaste_performance_probe PRIVATE SNIPASTE_HAS_PREPARED_CAPTURE=1)
+    snipaste_apply_compile_options(snipaste_performance_probe)
+    if(WIN32)
+        target_link_libraries(snipaste_performance_probe PRIVATE psapi)
+    endif()
     if(WIN32)
         add_executable(snipaste_capture_probe tests/capture_target_probe.cpp)
         target_include_directories(snipaste_capture_probe PRIVATE src)
@@ -378,7 +385,8 @@ if(SNIPASTE_BUILD_TESTS)
             pasteCaptureOriginAndClipboardIsolation pasteClickAndDragCursor
             inlineTextInputAndCancel inlineTextOutput textEditorCleanupAndToolSwitch
             pasteRecoveryLimitAndDestruction pasteNewClipboardTakesPriority pastePersistence
-            proGroupedToolsAndStyles proSizeRefreshAndOutput proHistoryAndSelectionShortcuts proLayoutAndAnnotations
+            proGroupedToolsAndStyles proSizeRefreshAndOutput proHistoryAndSelectionShortcuts
+            historyRestoresPairedGeometryAndBackground legacyHistoryUsesNeutralPreview proLayoutAndAnnotations
             -o "${CMAKE_CURRENT_BINARY_DIR}/paste-test-results-${scale}.txt,txt")
         set_tests_properties(paste_dpi_${scale} PROPERTIES
             ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_PLUGIN_PATH=${snipaste_qt_sdk}/plugins;QT_SCALE_FACTOR=${scale}"
