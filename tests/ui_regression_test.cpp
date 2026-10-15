@@ -16,6 +16,7 @@
 
 #include <QApplication>
 #include <QBackingStore>
+#include <QBuffer>
 #include <QCheckBox>
 #include <QColor>
 #include <QClipboard>
@@ -69,6 +70,7 @@ private slots:
     void preferencesPendingCallbacksAreCancelled();
     void preferencesProfessionalReferencePages();
     void copyAsFileModesProduceExpectedClipboardFormats();
+    void clipboardBitmapCompatibility();
     void overlayCopyButtonHonorsCopyAsFileMode();
     void scrollCapturePanelUsesFloatingToolbar();
     void scrollCapturePreviewShowsStitchedImage();
@@ -161,6 +163,36 @@ void UiRegressionTest::preferencesUpdateCheckUsesCurrentSettings()
     port->setValue(8080);
     check->click();
     QCOMPARE(requests, 1);
+}
+
+void UiRegressionTest::clipboardBitmapCompatibility()
+{
+    QImage image(QSize(7, 5), QImage::Format_ARGB32_Premultiplied);
+    image.fill(QColor(12, 34, 56, 255));
+    image.setPixelColor(3, 2, QColor(87, 65, 43, 128));
+    QByteArray expected;
+    QBuffer buffer(&expected);
+    QVERIFY(buffer.open(QIODevice::WriteOnly));
+    QVERIFY(image.save(&buffer, "BMP"));
+
+    ui::ClipboardImageData mime(image, true);
+    mime.setUrls({QUrl::fromLocalFile(QStringLiteral("capture.png"))});
+    QVERIFY(mime.hasImage());
+    QVERIFY(mime.hasUrls());
+    QVERIFY(mime.hasFormat(QStringLiteral("image/bmp")));
+    QVERIFY(mime.formats().contains(QStringLiteral("image/bmp")));
+    QCOMPARE(qvariant_cast<QImage>(mime.imageData()), image);
+    QCOMPARE(mime.data(QStringLiteral("image/bmp")), expected);
+    QCOMPARE(mime.data(QStringLiteral("image/bmp")), expected);
+    QCOMPARE(qvariant_cast<QImage>(mime.imageData()), image);
+
+    ui::ClipboardImageData withoutBitmap(image, false);
+    QVERIFY(withoutBitmap.hasImage());
+    QVERIFY(!withoutBitmap.hasFormat(QStringLiteral("image/bmp")));
+    QVERIFY(!withoutBitmap.formats().contains(QStringLiteral("image/bmp")));
+    QVERIFY(withoutBitmap.data(QStringLiteral("image/bmp")).isEmpty());
+    ui::ClipboardImageData empty({}, true);
+    QVERIFY(!empty.hasFormat(QStringLiteral("image/bmp")));
 }
 
 void UiRegressionTest::copyAsFileModesProduceExpectedClipboardFormats()

@@ -1,8 +1,8 @@
 #pragma once
 
+#include "ui/output/clipboard_image_data.h"
+
 #include <QClipboard>
-#include <QBuffer>
-#include <QByteArray>
 #include <QDir>
 #include <QGuiApplication>
 #include <QImage>
@@ -60,18 +60,6 @@ inline bool shouldCopyWindowsBitmap(ClipboardImageSource source)
         && (source == ClipboardImageSource::Screenshot ? options.screenshot : options.paste);
 }
 
-inline bool addWindowsBitmapFormat(QMimeData *mime, const QImage &image)
-{
-    if (!mime || image.isNull())
-        return false;
-    QByteArray bytes;
-    QBuffer buffer(&bytes);
-    if (!buffer.open(QIODevice::WriteOnly) || !image.save(&buffer, "BMP"))
-        return false;
-    mime->setData(QStringLiteral("image/bmp"), bytes);
-    return true;
-}
-
 inline CopyAsFileMode copyAsFileModeFromInt(int value)
 {
     switch (value) {
@@ -108,10 +96,7 @@ inline bool copyImageToClipboard(const QImage &image,
             return false;
     }
 
-    auto *mime = new QMimeData;
-    mime->setImageData(image);
-    if (includeWindowsBitmap)
-        addWindowsBitmapFormat(mime, image);
+    auto *mime = new ClipboardImageData(image, includeWindowsBitmap);
     if (asFile)
         mime->setUrls({QUrl::fromLocalFile(path)});
     QGuiApplication::clipboard()->setMimeData(mime);

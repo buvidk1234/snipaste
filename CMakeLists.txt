@@ -89,6 +89,7 @@ set(SNIPASTE_UI_SOURCES
     src/ui/paste/paste_group_dialog.cpp
     src/ui/whiteboard/whiteboard_window.cpp
     src/ui/snip/capture_support.cpp
+    src/ui/output/clipboard_image_data.cpp
     src/ui/output/image_output.cpp
     src/ui/paste/clipboard_content.cpp
     src/ui/paste/paste_window.cpp
@@ -181,6 +182,7 @@ set(SNIPASTE_UI_HEADERS
     src/ui/whiteboard/whiteboard_window.h
     src/ui/snip/capture_support.h
     src/ui/output/image_output.h
+    src/ui/output/clipboard_image_data.h
     src/ui/paste/clipboard_content.h
     src/ui/paste/paste_window.h
     src/ui/paste/paste_manager.h
