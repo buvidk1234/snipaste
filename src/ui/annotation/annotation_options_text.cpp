@@ -6,6 +6,7 @@
 #include <QButtonGroup>
 #include <QComboBox>
 #include <QHBoxLayout>
+#include <QSignalBlocker>
 #include <QToolButton>
 namespace snipaste::ui
 {
@@ -19,6 +20,7 @@ QWidget *AnnotationOptions::createTextPage()
     layoutText->setSpacing(2);
 
     auto *btnBold = new QToolButton(pageText);
+    btnBold->setObjectName(QStringLiteral("annotationTextBold"));
     btnBold->setIcon(captureIcon(CaptureIcon::TextBold));
     btnBold->setFixedSize(24, 24);
     btnBold->setCheckable(true);
@@ -31,6 +33,7 @@ QWidget *AnnotationOptions::createTextPage()
     });
 
     auto *btnItalic = new QToolButton(pageText);
+    btnItalic->setObjectName(QStringLiteral("annotationTextItalic"));
     btnItalic->setIcon(captureIcon(CaptureIcon::TextItalic));
     btnItalic->setFixedSize(24, 24);
     btnItalic->setCheckable(true);
@@ -43,6 +46,7 @@ QWidget *AnnotationOptions::createTextPage()
     });
 
     auto *btnOutline = new QToolButton(pageText);
+    btnOutline->setObjectName(QStringLiteral("annotationTextOutline"));
     btnOutline->setIcon(captureIcon(CaptureIcon::TextOutline));
     btnOutline->setFixedSize(24, 24);
     btnOutline->setCheckable(true);
@@ -55,6 +59,7 @@ QWidget *AnnotationOptions::createTextPage()
     });
 
     auto *btnTextBg = new QToolButton(pageText);
+    btnTextBg->setObjectName(QStringLiteral("annotationTextBackground"));
     btnTextBg->setIcon(captureIcon(CaptureIcon::TextBackground));
     btnTextBg->setFixedSize(24, 24);
     btnTextBg->setCheckable(true);
@@ -69,6 +74,7 @@ QWidget *AnnotationOptions::createTextPage()
     layoutText->addWidget(makeSeparator(pageText));
 
     auto *comboFontFamily = new QComboBox(pageText);
+    comboFontFamily->setObjectName(QStringLiteral("annotationFontFamily"));
     comboFontFamily->setFixedSize(110, 24);
     comboFontFamily->addItems({QStringLiteral("Microsoft YaHei UI"), QStringLiteral("SimSun"),
                                QStringLiteral("SimHei"), QStringLiteral("Segoe UI"),
@@ -81,6 +87,7 @@ QWidget *AnnotationOptions::createTextPage()
     });
 
     auto *comboFontSize = new QComboBox(pageText);
+    comboFontSize->setObjectName(QStringLiteral("annotationFontSize"));
     comboFontSize->setFixedSize(45, 24);
     for (int i = 1; i <= 10; ++i)
         comboFontSize->addItem(QString::number(i));
@@ -89,12 +96,53 @@ QWidget *AnnotationOptions::createTextPage()
     layoutText->addWidget(comboFontSize);
     connect(comboFontSize, &QComboBox::currentTextChanged, this, [this](const QString &s) {
         if (m_canvas)
-            m_canvas->setTextFontSize(s.toInt() * 4.0 + 4.0);
+            m_canvas->setTextFontSize(s.toDouble() * 4.0 + 4.0);
     });
 
     layoutText->addWidget(makeSeparator(pageText));
     layoutText->addWidget(makeColorModule(pageText));
     return pageText;
+}
+
+void AnnotationOptions::syncTextControls()
+{
+    if (!m_canvas || m_canvas->tool() != AnnotationCanvas::Tool::Text)
+        return;
+    const auto style = m_canvas->annotationStyle();
+    m_toolOptionsStack->setCurrentIndex(5);
+    const auto check = [this](const QString &name, bool enabled) {
+        if (auto *button = findChild<QToolButton *>(name))
+        {
+            const QSignalBlocker blocker(button);
+            button->setChecked(enabled);
+        }
+    };
+    check(QStringLiteral("annotationTextBold"), style.textBold);
+    check(QStringLiteral("annotationTextItalic"), style.textItalic);
+    check(QStringLiteral("annotationTextBackground"), style.textBackground);
+    check(QStringLiteral("annotationTextOutline"), style.textOutlineWidth > 0);
+    if (auto *family = findChild<QComboBox *>(QStringLiteral("annotationFontFamily")))
+    {
+        const QSignalBlocker blocker(family);
+        if (family->findText(style.fontFamily) < 0)
+            family->addItem(style.fontFamily);
+        family->setCurrentText(style.fontFamily);
+    }
+    if (auto *size = findChild<QComboBox *>(QStringLiteral("annotationFontSize")))
+    {
+        const QSignalBlocker blocker(size);
+        int index = -1;
+        for (int i = 0; i < size->count(); ++i)
+            if (qFuzzyCompare(size->itemText(i).toDouble() * 4 + 4, style.fontSize))
+                index = i;
+        if (index < 0)
+        {
+            size->addItem(QString::number((style.fontSize - 4) / 4));
+            index = size->count() - 1;
+        }
+        size->setCurrentIndex(index);
+    }
+    updateAllColorWatchers(style.color);
 }
 
 QWidget *AnnotationOptions::createNumberPage()
@@ -112,6 +160,7 @@ QWidget *AnnotationOptions::createNumberPage()
     for (const auto &ns : numStyles)
     {
         auto *b = new QToolButton(pageNumber);
+        b->setProperty("numberStyle", ns.second);
         b->setIcon(captureIcon(ns.first));
         b->setFixedSize(24, 24);
         b->setCheckable(true);
@@ -129,6 +178,7 @@ QWidget *AnnotationOptions::createNumberPage()
     layoutNumber->addWidget(makeSeparator(pageNumber));
 
     auto *comboNumScale = new QComboBox(pageNumber);
+    comboNumScale->setObjectName(QStringLiteral("annotationNumberSize"));
     comboNumScale->setFixedSize(45, 24);
     for (int i = 1; i <= 10; ++i)
         comboNumScale->addItem(QString::number(i));
@@ -138,7 +188,7 @@ QWidget *AnnotationOptions::createNumberPage()
     layoutNumber->addWidget(comboNumScale);
     connect(comboNumScale, &QComboBox::currentTextChanged, this, [this](const QString &s) {
         if (m_canvas)
-            m_canvas->setNumberSize(s.toInt() * 4.0 + 4.0);
+            m_canvas->setNumberSize(s.toDouble() * 4.0 + 4.0);
     });
 
     layoutNumber->addWidget(makeSeparator(pageNumber));

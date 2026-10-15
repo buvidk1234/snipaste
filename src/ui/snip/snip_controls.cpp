@@ -579,11 +579,8 @@ bool SnipOverlay::handleProShortcut(QKeyEvent *event)
     if (key == Qt::Key_Tab && m_canvas
         && (m_canvas->tool() == AnnotationCanvas::Tool::Line || m_canvas->tool() == AnnotationCanvas::Tool::Arrow)
         && !m_canvas->testAttribute(Qt::WA_TransparentForMouseEvents)) {
-        const auto tool = m_canvas->tool() == AnnotationCanvas::Tool::Line
-            ? AnnotationCanvas::Tool::Arrow : AnnotationCanvas::Tool::Line;
-        m_canvas->setTool(tool);
-        refreshAnnotationCursor();
-        m_toolbar->findChild<QToolButton *>(QStringLiteral("线条"))->setProperty("annotationTool", int(tool));
+        if (auto *toggle = m_toolOptions->findChild<QToolButton *>(QStringLiteral("annotationToggleArrow")))
+            toggle->click();
         return true;
     }
     if ((key == Qt::Key_1 || key == Qt::Key_2
@@ -592,7 +589,7 @@ bool SnipOverlay::handleProShortcut(QKeyEvent *event)
         const int direction = (key == Qt::Key_1 || key == Qt::Key_BracketRight) ? 1 : -1;
         if (!m_selectionConfirmed) cycleTarget(direction);
         else if (m_canvas && !m_canvas->testAttribute(Qt::WA_TransparentForMouseEvents))
-            m_canvas->setPenWidth(m_canvas->penWidth() + direction);
+            m_canvas->adjustToolSize(direction);
         else resizeFromCenter(direction);
         return true;
     }
@@ -640,7 +637,7 @@ void SnipOverlay::wheelEvent(QWheelEvent *event)
     const int direction = event->angleDelta().y() > 0 ? 1 : -1;
     if (!m_selectionConfirmed) cycleTarget(direction);
     else if (m_canvas && !m_canvas->testAttribute(Qt::WA_TransparentForMouseEvents))
-        m_canvas->setPenWidth(m_canvas->penWidth() + direction);
+        m_canvas->adjustToolSize(direction);
     else resizeFromCenter(direction);
     event->accept();
 }

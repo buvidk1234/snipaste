@@ -6,6 +6,7 @@
 #include "ui/annotation/annotation_canvas.h"
 #include "ui/annotation/annotation_options.h"
 #include "ui/clipboard_output.h"
+#include "ui/recognition/ocr_overlay.h"
 #include "ui/snip/scroll_capture_panel.h"
 #include "ui/snip/scroll_capture_preview.h"
 
@@ -236,6 +237,8 @@ void SnipOverlay::resizeEvent(QResizeEvent *event)
     QWidget::resizeEvent(event);
     if (m_selectionBorder)
         m_selectionBorder->setGeometry(rect());
+    if (m_ocrOverlay)
+        m_ocrOverlay->setGeometry(rect());
 }
 
 void SnipOverlay::captureSelectionImmediately()
@@ -491,7 +494,7 @@ void SnipOverlay::paintEvent(QPaintEvent *)
         // The canvas paints the transient text editor/brush preview itself.
         // The overlay only needs the committed layer here, which is cached by
         // AnnotationCanvas between pointer moves.
-        const QImage annotated = m_canvas->fullRenderedImage(false);
+        const QImage annotated = m_canvas->displayImage();
         if (annotated.size() == m_background.size())
             display = annotated;
     }
@@ -762,6 +765,10 @@ void SnipOverlay::mouseDoubleClickEvent(QMouseEvent *event)
 
 void SnipOverlay::keyPressEvent(QKeyEvent *event)
 {
+    if (m_ocrOverlay) {
+        QApplication::sendEvent(m_ocrOverlay, event);
+        return;
+    }
     if (m_scrollCaptureActive)
     {
         if (event->key() == Qt::Key_Escape)
@@ -1128,11 +1135,26 @@ void SnipOverlay::drawMagnifier(QPainter &painter) const
         painter.setPen(QPen(Qt::white, 1));
         painter.drawRect(target.adjusted(0, 0, -1, -1));
     }
-    if (m_magnifierAnchor)
+    // Always identify the sampled pixel, including with the grid or anchors disabled.
+    // Leave its interior untouched so the preview still shows the actual colour.
+    const QRectF sampledCell(target.left() + 9 * cellWidth, target.top() + 7 * cellHeight,
+                             cellWidth, cellHeight);
+    const QPointF centre = sampledCell.center();
+    const qreal guideLength = m_magnifierAnchor ? qMax(panelWidth, previewHeight) : 7;
+    const QLineF guides[] = {
+        {{qMax(qreal(target.left() + 2), sampledCell.left() - 3 - guideLength), centre.y()},
+         {sampledCell.left() - 3, centre.y()}},
+        {{sampledCell.right() + 3, centre.y()},
+         {qMin(qreal(target.right() - 2), sampledCell.right() + 3 + guideLength), centre.y()}},
+        {{centre.x(), qMax(qreal(target.top() + 2), sampledCell.top() - 3 - guideLength)},
+         {centre.x(), sampledCell.top() - 3}},
+        {{centre.x(), sampledCell.bottom() + 3},
+         {centre.x(), qMin(qreal(target.bottom() - 2), sampledCell.bottom() + 3 + guideLength)}}};
+    for (const auto &pen : {QPen(Qt::black, 3), QPen(Qt::white, 1)})
     {
-        painter.setPen(QPen(Qt::white, 1));
-        painter.drawRect(
-            QRectF(target.left() + 9 * cellWidth, target.top() + 7 * cellHeight, cellWidth, cellHeight));
+        painter.setPen(pen);
+        painter.drawLines(guides, 4);
+        painter.drawRect(sampledCell.adjusted(-1, -1, 1, 1));
     }
 
     const QRect info(target.left(), target.bottom() + 1, panelWidth, infoHeight);
@@ -1311,6 +1333,7 @@ void SnipOverlay::closeEvent(QCloseEvent *event)
 
 void SnipOverlay::releaseCaptureResources()
 {
+    clearOcrOverlay();
     // Release the canvas pixels first, including the converted render cache
     // and any shared references to the original full-screen image.
     if (m_preparedCanvas)
@@ -1356,6 +1379,12 @@ void SnipOverlay::updateToolbarGeometry()
 {
     if (!m_toolbar)
         return;
+    if (m_ocrOverlay) {
+        m_toolbar->hide();
+        m_sizeToolbar->hide();
+        m_ocrOverlay->raise();
+        return;
+    }
     updateSizeToolbar();
     if (m_toolbarHidden || m_dragging || m_transformingSelection || !m_selectionConfirmed ||
         !m_selection.isValid() || m_selection.isEmpty())
@@ -1702,20 +1731,6 @@ void SnipOverlay::annotateSelection()
 
     emit selectionCaptured(globalSelection());
     emit annotateRequested(image);
-    close();
-}
-
-void SnipOverlay::ocrSelection()
-{
-    const QImage image = selectionImage();
-    if (image.isNull())
-        return;
-
-    emit selectionCaptured(globalSelection());
-    emit screenshotCaptured(image);
-    emit screenshotCapturedWithBackground(image, m_cleanBackground);
-    m_outputEmitted = true;
-    emit ocrRequested(image);
     close();
 }
 

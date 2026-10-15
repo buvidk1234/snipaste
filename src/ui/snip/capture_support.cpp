@@ -7,7 +7,7 @@
 #include <QPainter>
 #include <QScreen>
 #ifdef Q_OS_MACOS
-#include "platform/macos/capture.h"
+#include "platform/macos/system.h"
 #endif
 
 namespace snipaste::ui {

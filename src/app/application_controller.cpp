@@ -3,6 +3,7 @@
 #include "app/runtime_settings.h"
 #include "core/config/config_store.h"
 #include "platform/windows/single_instance.h"
+#include "ui/preferences/preferences_dialog.h"
 #include "ui/whiteboard/whiteboard_window.h"
 #include <QApplication>
 #include <QCursor>
@@ -71,6 +72,8 @@ ApplicationController::ApplicationController(QApplication &app, core::ConfigStor
             poll->start();
         });
 }
+ApplicationController::~ApplicationController() = default;
+
 void ApplicationController::start(const QStringList &arguments)
 {
     m_tray.show();

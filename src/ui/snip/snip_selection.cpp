@@ -38,14 +38,15 @@ void SnipOverlay::updateSelectionCursor(QPoint position)
                                             || m_canvas->tool() == AnnotationCanvas::Tool::Blur
                                             || m_canvas->tool() == AnnotationCanvas::Tool::Eraser);
     const bool canvasDrawing = canvasActive && m_canvas->isDrawing();
+    const bool annotationHit = canvasActive && m_canvas->ownsPointerAt(m_canvas->mapFrom(this, position));
     const Qt::Edges edges = m_transformingSelection
         ? m_resizeEdges
-        : ((brushTool || canvasDrawing) ? Qt::Edges() : resizeEdgesAt(position));
+        : ((brushTool || canvasDrawing || annotationHit) ? Qt::Edges() : resizeEdgesAt(position));
     // Once an annotation tool owns the canvas, let AnnotationCanvas display
     // its tool-specific brush cursor.  Selection resize cursors still win at
     // the border, where the canvas is temporarily forwarded to the overlay.
     if (canvasActive
-        && edges == Qt::Edges() && !m_transformingSelection) {
+        && (edges == Qt::Edges() || canvasDrawing) && !m_transformingSelection) {
         // The child canvas owns the mouse events while an annotation tool is
         // active, but Windows may still use the parent overlay cursor when
         // the pointer crosses a masked child boundary.  Keep both cursors in
@@ -54,7 +55,7 @@ void SnipOverlay::updateSelectionCursor(QPoint position)
         // can deliver the first hover event before the child cursor change
         // reaches the native window, leaving the previous resize cursor on
         // screen until another input event (for example the mouse wheel).
-        m_canvas->refreshToolCursor();
+        m_canvas->updatePointerCursor(m_canvas->mapFrom(this, position));
         const QCursor toolCursor = m_canvas->cursor();
         setCursor(toolCursor);
         return;
@@ -80,12 +81,14 @@ void SnipOverlay::refreshAnnotationCursor()
 {
     if (!m_canvas || m_canvas->testAttribute(Qt::WA_TransparentForMouseEvents))
         return;
-    m_canvas->refreshToolCursor();
     updateSelectionCursor(mapFromGlobal(QCursor::pos()));
 }
 
 bool SnipOverlay::beginSelectionTransform(QPoint position)
 {
+    if (m_canvas && !m_canvas->testAttribute(Qt::WA_TransparentForMouseEvents) &&
+        (m_canvas->isDrawing() || m_canvas->ownsPointerAt(m_canvas->mapFrom(this, position))))
+        return false;
     m_resizeEdges = resizeEdgesAt(position);
     m_movingSelection = m_resizeEdges == Qt::Edges() && m_selection.contains(position)
         && m_canvas && m_canvas->testAttribute(Qt::WA_TransparentForMouseEvents);
@@ -152,7 +155,7 @@ bool SnipOverlay::eventFilter(QObject *watched, QEvent *event)
                 if (delta != 0) {
                     const int steps = qMax(1, qAbs(delta) / 120);
                     const int sign = delta > 0 ? 1 : -1;
-                    m_canvas->setPenWidth(m_canvas->penWidth() + sign * steps);
+                    m_canvas->adjustToolSize(sign * steps);
                     return true;
                 }
             }
@@ -171,7 +174,8 @@ bool SnipOverlay::eventFilter(QObject *watched, QEvent *event)
                 || m_canvas->tool() == AnnotationCanvas::Tool::Blur
                 || m_canvas->tool() == AnnotationCanvas::Tool::Eraser);
         const bool overResizeEdge = resizeEdgesAt(position) != Qt::Edges();
-        if (m_transformingSelection || (!brushTool && !m_canvas->isDrawing() && overResizeEdge)) {
+        const bool annotationHit = canvasActive && m_canvas->ownsPointerAt(mouse->position());
+        if (m_transformingSelection || (!brushTool && !m_canvas->isDrawing() && !annotationHit && overResizeEdge)) {
             QMouseEvent forwarded(mouse->type(), QPointF(position), mouse->globalPosition(),
                                    mouse->button(), mouse->buttons(), mouse->modifiers());
             if (mouse->type() == QEvent::MouseButtonPress) mousePressEvent(&forwarded);

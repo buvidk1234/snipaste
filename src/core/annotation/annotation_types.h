@@ -12,6 +12,64 @@ namespace snipaste::core {
 enum class AnnotationTool { Rectangle, Ellipse, Line, Arrow, Pen, Marker, Text, Number, Mosaic, Blur, Eraser,
                             RoundedRectangle, Magnifier };
 enum class ArrowStyle { None, End, Start, Both, Flat, HollowEnd, HollowStart, HollowBoth };
+enum class ArrowHead {
+    None = 0,
+    Flat = 1,
+    Circle = 2,
+    Diamond = 3,
+    Triangle = 4,
+    Classic = 5,
+    Stealth = 6,
+    Hollow = 7,
+    Solid = Classic
+};
+
+inline ArrowHead startArrowHead(ArrowStyle style) {
+    switch (style) {
+    case ArrowStyle::Start:
+    case ArrowStyle::Both:
+        return ArrowHead::Solid;
+    case ArrowStyle::HollowStart:
+    case ArrowStyle::HollowBoth:
+        return ArrowHead::Hollow;
+    default:
+        return ArrowHead::None;
+    }
+}
+
+inline ArrowHead endArrowHead(ArrowStyle style) {
+    switch (style) {
+    case ArrowStyle::End:
+    case ArrowStyle::Both:
+        return ArrowHead::Solid;
+    case ArrowStyle::HollowEnd:
+    case ArrowStyle::HollowBoth:
+        return ArrowHead::Hollow;
+    case ArrowStyle::Flat:
+        return ArrowHead::Flat;
+    default:
+        return ArrowHead::None;
+    }
+}
+
+inline ArrowStyle combineArrowHeads(ArrowHead start, ArrowHead end) {
+    if (start == ArrowHead::None && end == ArrowHead::None)
+        return ArrowStyle::None;
+    if (start == ArrowHead::None) {
+        if (end == ArrowHead::Hollow) return ArrowStyle::HollowEnd;
+        if (end == ArrowHead::Flat) return ArrowStyle::Flat;
+        return ArrowStyle::End;
+    }
+    if (end == ArrowHead::None) {
+        if (start == ArrowHead::Hollow) return ArrowStyle::HollowStart;
+        if (start == ArrowHead::Flat) return ArrowStyle::Flat;
+        return ArrowStyle::Start;
+    }
+    if (start == ArrowHead::Hollow && end == ArrowHead::Hollow)
+        return ArrowStyle::HollowBoth;
+    return ArrowStyle::Both;
+}
+
 // Mosaic/blur share one renderer.  This only controls the geometry used
 // to select pixels for that renderer.
 enum class EffectShape { Brush, Rectangle, Ellipse };
@@ -31,6 +89,8 @@ struct AnnotationShape {
     Qt::PenStyle penStyle = Qt::SolidLine;
     bool textBackground = false;
     ArrowStyle arrowStyle = ArrowStyle::End;
+    ArrowHead startArrowHead = ArrowHead::None;
+    ArrowHead endArrowHead = ArrowHead::Classic;
     QColor textOutlineColor;
     qreal textOutlineWidth = 0.0;
     QString fontFamily;

@@ -7,6 +7,10 @@
 #include <QPainter>
 #include <QPainterPathStroker>
 #include <QTransform>
+#include <QAbstractTextDocumentLayout>
+#include <QTextCursor>
+#include <QTextDocument>
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <utility>
@@ -14,7 +18,16 @@
 namespace snipaste::ui::annotation {
 using Tool = core::AnnotationTool;
 using ArrowStyle = core::ArrowStyle;
+using ArrowHead = core::ArrowHead;
 using EffectShape = core::EffectShape;
+
+void applyLineStyle(QPen &pen, Qt::PenStyle style)
+{
+    pen.setStyle(style);
+    // Preserve custom strokes already held in an annotation document.
+    if (style == Qt::CustomDashLine)
+        pen.setDashPattern({7, 3});
+}
 
 namespace {
 QPen shapePen(const Shape &shape, qreal scale)
@@ -22,14 +35,204 @@ QPen shapePen(const Shape &shape, qreal scale)
     QColor color = shape.color;
     if (shape.tool == Tool::Marker)
         color.setAlpha(190);
-    QPen pen(color);
-    pen.setWidthF(qMax<qreal>(1.0, shape.width * scale));
-    pen.setCapStyle(Qt::RoundCap);
-    pen.setJoinStyle(Qt::RoundJoin);
-    pen.setStyle(shape.penStyle);
+    QPen pen(color, qMax<qreal>(1.0, shape.width * scale), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+    applyLineStyle(pen, shape.penStyle);
     return pen;
 }
+
+QPainterPath strokePath(const QPainterPath &path, const QPen &pen)
+{
+    if (pen.style() == Qt::NoPen)
+        return {};
+    QPainterPathStroker stroker;
+    stroker.setWidth(pen.widthF());
+    stroker.setCapStyle(pen.capStyle());
+    stroker.setJoinStyle(pen.joinStyle());
+    if (pen.style() != Qt::SolidLine)
+        stroker.setDashPattern(pen.dashPattern());
+    stroker.setDashOffset(pen.dashOffset());
+    return stroker.createStroke(path);
+}
+
+QPainterPath roundHull(QPointF start, qreal startRadius, QPointF end, qreal endRadius)
+{
+    QPainterPath first, second;
+    first.addEllipse(start, startRadius, startRadius);
+    second.addEllipse(end, endRadius, endRadius);
+    const QPointF delta = end - start;
+    const qreal distance = std::hypot(delta.x(), delta.y());
+    if (distance <= std::abs(endRadius - startRadius))
+        return startRadius >= endRadius ? first : second;
+    const QPointF unit = delta / distance;
+    const QPointF side(-unit.y(), unit.x());
+    const qreal slope = (endRadius - startRadius) / distance;
+    const qreal normal = std::sqrt(qMax<qreal>(0, 1 - slope * slope));
+    const QPointF upper = -slope * unit + normal * side;
+    const QPointF lower = -slope * unit - normal * side;
+    QPainterPath bridge;
+    bridge.addPolygon(QPolygonF{start + startRadius * upper, end + endRadius * upper,
+                               end + endRadius * lower, start + startRadius * lower});
+    bridge.closeSubpath();
+    return first.united(bridge).united(second);
+}
 } // namespace
+
+QPainterPath arrowPath(const Shape &shape, qreal scale, qreal headAspect)
+{
+    const QPen shaftPen = shapePen(shape, scale);
+    const qreal width = shaftPen.widthF();
+    const qreal headWidth = qMax<qreal>(shape.width, 1.5) * scale;
+    const QPointF delta = shape.end - shape.start;
+    const qreal length = std::hypot(delta.x(), delta.y());
+    if (length < 0.001) {
+        QPainterPath dot;
+        dot.addEllipse(shape.start, width * 0.5, width * 0.5);
+        return dot;
+    }
+    // A stored pair is authoritative. Legacy styles only fill an absent pair.
+    const bool explicitHeads = shape.startArrowHead != ArrowHead::None ||
+                               shape.endArrowHead != ArrowHead::None;
+    const ArrowHead startHead = explicitHeads ? shape.startArrowHead : startArrowHead(shape.arrowStyle);
+    const ArrowHead endHead = explicitHeads ? shape.endArrowHead : endArrowHead(shape.arrowStyle);
+    const QPointF unit = delta / length;
+    const auto tapered = [](ArrowHead head) {
+        return head == ArrowHead::Stealth || head == ArrowHead::Hollow;
+    };
+    const auto pointed = [](ArrowHead head) {
+        return head == ArrowHead::Triangle || head == ArrowHead::Classic ||
+               head == ArrowHead::Stealth || head == ArrowHead::Hollow;
+    };
+    const int pointedCount = int(pointed(startHead)) + int(pointed(endHead));
+    // The native head dimensions are independent of length. Fit them on short
+    // segments so the shaft cannot reverse or a taper become degenerate.
+    const qreal available = length * (pointedCount == 2 ? 0.45 : 0.8);
+    const auto dimensions = [&](ArrowHead head) {
+        const qreal factor = head == ArrowHead::Triangle ? 0.88 :
+                             head == ArrowHead::Classic ? 1.45 : 0.95;
+        const qreal fraction = head == ArrowHead::Classic ? 0.4 : 1.0;
+        const qreal depth = qMin(headWidth * 4.5 * fraction * factor, available);
+        return QPointF(depth, depth * headAspect * factor);
+    };
+    const qreal nativeWidth = qMax<qreal>(shape.width, 1.5);
+    const qreal radius = (nativeWidth + (0.2 + 1.8 * std::tanh(3 * (nativeWidth - 1) / 16))
+                                         * 4.5 * 0.38) * scale;
+    const auto bodyPoint = [&](QPointF tip, QPointF direction, ArrowHead head) {
+        if (head == ArrowHead::Triangle)
+            return tip - direction * (dimensions(head).x() * 0.82);
+        if (head == ArrowHead::Classic)
+            return tip - direction * (dimensions(head).x() * 0.41);
+        return tip;
+    };
+    const auto dart = [&](QPointF tip, QPointF direction, ArrowHead head) {
+        const QPointF size = dimensions(head);
+        const QPointF side(-direction.y(), direction.x());
+        QPainterPath path;
+        path.moveTo(tip);
+        path.lineTo(tip - direction * size.x() + side * size.y());
+        path.lineTo(tip - direction * (size.x() * 0.82));
+        path.lineTo(tip - direction * size.x() - side * size.y());
+        path.closeSubpath();
+        return path;
+    };
+    const auto marker = [&](QPointF tip, QPointF direction, ArrowHead head) {
+        const QPointF side(-direction.y(), direction.x());
+        QPainterPath path;
+        switch (head) {
+        case ArrowHead::Flat:
+            path.moveTo(tip - side * radius);
+            path.lineTo(tip + side * radius);
+            return strokePath(path, QPen(Qt::black, width, Qt::SolidLine, Qt::SquareCap, Qt::RoundJoin));
+        case ArrowHead::Circle:
+            path.addEllipse(tip, radius, radius);
+            break;
+        case ArrowHead::Diamond: {
+            const qreal diagonal = radius * 1.2;
+            path.addPolygon(QPolygonF{tip + direction * diagonal, tip + side * diagonal,
+                                       tip - direction * diagonal, tip - side * diagonal});
+            path.closeSubpath();
+            break;
+        }
+        case ArrowHead::Triangle:
+            return dart(tip, direction, head);
+        case ArrowHead::Classic: {
+            const QPointF size = dimensions(head);
+            path.moveTo(tip - direction * size.x() + side * size.y());
+            path.lineTo(tip);
+            path.lineTo(tip - direction * size.x() - side * size.y());
+            return strokePath(path, QPen(Qt::black, headWidth, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        }
+        default:
+            break;
+        }
+        return path;
+    };
+    const auto taper = [&](QPointF tail, QPointF tip, QPointF direction, ArrowHead head) {
+        const QPointF size = dimensions(head);
+        const bool hollow = head == ArrowHead::Hollow;
+        const QPointF neck = tip - direction * (size.x() * 0.82);
+        return dart(tip, direction, head).united(roundHull(tail, headWidth * (hollow ? 0.01 : 0.15),
+                                                          neck, size.y() * (hollow ? 0.36 : 0.43)));
+    };
+    const auto outline = [&](const QPainterPath &path) {
+        QPen pen(Qt::black, width * 0.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+        applyLineStyle(pen, shape.penStyle);
+        return strokePath(path, pen);
+    };
+    QPainterPath result;
+    if (tapered(startHead) && tapered(endHead)) {
+        const QPointF middle = (shape.start + shape.end) * 0.5;
+        const QPainterPath first = taper(middle, shape.start, -unit, startHead);
+        const QPainterPath second = taper(middle, shape.end, unit, endHead);
+        if (startHead == endHead) {
+            result = first.united(second);
+            if (startHead == ArrowHead::Hollow)
+                result = outline(result);
+        } else {
+            result = (startHead == ArrowHead::Hollow ? outline(first) : first)
+                .united(endHead == ArrowHead::Hollow ? outline(second) : second);
+        }
+    } else if (tapered(startHead) || tapered(endHead)) {
+        const bool atStart = tapered(startHead);
+        const ArrowHead head = atStart ? startHead : endHead;
+        result = atStart ? taper(bodyPoint(shape.end, unit, endHead), shape.start, -unit, head)
+                         : taper(bodyPoint(shape.start, -unit, startHead), shape.end, unit, head);
+        if (head == ArrowHead::Hollow)
+            result = outline(result);
+    } else {
+        QPainterPath shaft;
+        shaft.moveTo(bodyPoint(shape.start, -unit, startHead));
+        shaft.lineTo(bodyPoint(shape.end, unit, endHead));
+        result = strokePath(shaft, shaftPen);
+    }
+    return result.united(marker(shape.start, -unit, startHead))
+                 .united(marker(shape.end, unit, endHead));
+}
+
+void configureTextDocument(QTextDocument &document, const Shape &shape, qreal scale)
+{
+    QFont font;
+    font.setFamily(shape.fontFamily.isEmpty() ? QStringLiteral("Microsoft YaHei UI") : shape.fontFamily);
+    font.setPixelSize(qMax(1, qRound(shape.fontSize * scale)));
+    font.setBold(shape.textBold);
+    font.setItalic(shape.textItalic);
+    document.setDefaultFont(font);
+    document.setDocumentMargin(0);
+    QTextOption option;
+    option.setWrapMode(QTextOption::NoWrap);
+    document.setDefaultTextOption(option);
+    document.setPlainText(shape.text);
+    document.setTextWidth(-1);
+}
+
+QRectF textBoxRect(const Shape &shape)
+{
+    QTextDocument document;
+    configureTextDocument(document, shape);
+    const QFontMetricsF metrics(document.defaultFont());
+    const QSizeF natural = document.size();
+    return QRectF(shape.start, QSizeF(qMax(natural.width(), metrics.horizontalAdvance(QStringLiteral("M"))),
+                                     natural.height()));
+}
 
 QRectF magnifierTargetRect(const Shape &shape)
 {
@@ -55,25 +258,13 @@ QRectF shapeBounds(const Shape &shape)
     }
     bounds = bounds.normalized();
     if (shape.tool == Tool::Text) {
-        QFont textFont;
-        textFont.setFamily(shape.fontFamily.isEmpty()
-                               ? QStringLiteral("Microsoft YaHei UI")
-                               : shape.fontFamily);
-        textFont.setPixelSize(qMax(6, qRound(shape.fontSize)));
-        textFont.setBold(shape.textBold);
-        textFont.setItalic(shape.textItalic);
-        const QFontMetricsF metrics(textFont);
-        const QStringList lines = shape.text.split(QChar::LineFeed);
-        qreal width = 0.0;
-        for (const QString &line : lines)
-            width = qMax(width, metrics.horizontalAdvance(line));
-        const qreal height = qMax(metrics.lineSpacing(),
-                                  metrics.lineSpacing() * qMax(1, lines.size()));
-        bounds |= QRectF(shape.start, QSizeF(width + 6.0, height + 4.0));
+        bounds = textBoxRect(shape);
     } else if (shape.tool == Tool::Number) {
         const qreal diameter = qMax<qreal>(1.0, shape.numberSize);
         bounds |= QRectF(shape.start - QPointF(diameter * 0.5, diameter * 0.5),
                          QSizeF(diameter, diameter));
+    } else if (shape.tool == Tool::Arrow) {
+        bounds = bounds.united(arrowPath(shape).boundingRect());
     }
     bounds = bounds.normalized();
     const qreal margin = qMax<qreal>(6.0, shape.width * 1.5);
@@ -302,44 +493,8 @@ void AnnotationRenderer::drawShape(QPainter &painter, const Shape &shape, qreal 
         return;
     }
     if (shape.tool == Tool::Arrow) {
-        const QPointF delta = shape.end - shape.start;
-        const qreal length = std::hypot(delta.x(), delta.y());
-        painter.drawLine(shape.start, shape.end);
-        if (length > 1.0) {
-            const QPointF unit = delta / length;
-            const QPointF normal(-unit.y(), unit.x());
-            const qreal head = 14.0 * scale;
-            const auto drawHead = [&](const QPointF &tip, const QPointF &direction, bool hollow) {
-                const QPointF side(-direction.y(), direction.x());
-                const QPointF left = tip - direction * head + side * head * 0.45;
-                const QPointF right = tip - direction * head - side * head * 0.45;
-                if (hollow) {
-                    painter.setBrush(Qt::NoBrush);
-                    painter.drawPolygon(QPolygonF{tip, left, right});
-                } else {
-                    painter.setBrush(color);
-                    painter.drawPolygon(QPolygonF{tip, left, right});
-                    painter.setBrush(Qt::NoBrush);
-                }
-            };
-            const bool startHead = shape.arrowStyle == ArrowStyle::Start
-                || shape.arrowStyle == ArrowStyle::Both
-                || shape.arrowStyle == ArrowStyle::HollowBoth
-                || shape.arrowStyle == ArrowStyle::HollowStart;
-            const bool endHead = shape.arrowStyle == ArrowStyle::End
-                || shape.arrowStyle == ArrowStyle::Both
-                || shape.arrowStyle == ArrowStyle::Flat
-                || shape.arrowStyle == ArrowStyle::HollowEnd
-                || shape.arrowStyle == ArrowStyle::HollowBoth;
-            const bool hollowStart = shape.arrowStyle == ArrowStyle::HollowStart
-                || shape.arrowStyle == ArrowStyle::HollowBoth;
-            const bool hollowEnd = shape.arrowStyle == ArrowStyle::HollowEnd
-                || shape.arrowStyle == ArrowStyle::HollowBoth;
-            if (startHead)
-                drawHead(shape.start, -unit, hollowStart);
-            if (endHead)
-                drawHead(shape.end, unit, hollowEnd);
-        }
+        // Composite the complete silhouette once, including translucent joints.
+        painter.fillPath(arrowPath(shape, scale), color);
         return;
     }
     QFont font = painter.font();
@@ -377,28 +532,25 @@ void AnnotationRenderer::drawShape(QPainter &painter, const Shape &shape, qreal 
         painter.drawText(badge, Qt::AlignCenter, shape.text);
         return;
     }
-    const QFontMetricsF metrics(font);
-    const QStringList lines = shape.text.split(QChar::LineFeed);
-    for (qsizetype index = 0; index < lines.size(); ++index) {
-        const QPointF top = shape.start + QPointF(0, index * metrics.lineSpacing());
-        if (shape.textBackground) {
-            painter.fillRect(QRectF(top, QSizeF(metrics.horizontalAdvance(lines.at(index)) + 4,
-                                               metrics.lineSpacing())),
-                             QColor(color.red(), color.green(), color.blue(), 80));
-        }
-        const QPointF baseline = top + QPointF(0, metrics.ascent());
-        if (shape.textOutlineWidth > 0.0 && shape.textOutlineColor.alpha() > 0) {
-            QPainterPath textPath;
-            textPath.addText(baseline, font, lines.at(index));
-            painter.fillPath(textPath, color);
-            QPen outline(shape.textOutlineColor);
-            outline.setWidthF(shape.textOutlineWidth * scale);
-            outline.setJoinStyle(Qt::RoundJoin);
-            painter.strokePath(textPath, outline);
-        } else {
-            painter.drawText(baseline, lines.at(index));
-        }
+    QTextDocument document;
+    configureTextDocument(document, shape, scale);
+    QTextCursor cursor(&document);
+    cursor.select(QTextCursor::Document);
+    QTextCharFormat format;
+    format.setForeground(color);
+    if (shape.textBackground)
+        format.setBackground(QColor(color.red(), color.green(), color.blue(), 80));
+    if (shape.textOutlineWidth > 0 && shape.textOutlineColor.alpha() > 0) {
+        QPen outline(shape.textOutlineColor);
+        outline.setWidthF(shape.textOutlineWidth * scale);
+        outline.setJoinStyle(Qt::RoundJoin);
+        format.setTextOutline(outline);
     }
+    cursor.mergeCharFormat(format);
+    painter.save();
+    painter.translate(shape.start);
+    document.documentLayout()->draw(&painter, QAbstractTextDocumentLayout::PaintContext{});
+    painter.restore();
 }
 
 QPainterPath effectMask(const Shape &shape)

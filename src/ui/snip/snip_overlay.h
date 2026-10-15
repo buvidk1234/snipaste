@@ -31,6 +31,7 @@ class AnnotationOptions;
 class SnipBorderOverlay;
 class ScrollCapturePanel;
 class ScrollCapturePreview;
+class OcrOverlay;
 
 class SnipOverlay final : public QWidget
 {
@@ -99,6 +100,7 @@ class SnipOverlay final : public QWidget
     void setFreeSelect(bool enabled);
     void setDisableEraserEditing(bool enabled);
     void setQuickResponse(bool enabled);
+    void setOcrOptions(const QString &engine, const QString &language);
     void setAnchorThreshold(int pixels) { m_anchorThreshold = qMax(0, pixels); }
     void setUppercaseHexColor(bool enabled) { m_uppercaseHexColor = enabled; }
     void setHideOutputOptions(bool enabled);
@@ -148,6 +150,7 @@ class SnipOverlay final : public QWidget
     void pasteRequested(const QImage &image);
     void annotateRequested(const QImage &image);
     void ocrRequested(const QImage &image);
+    void ocrCompleted();
     void barcodeRequested(const QImage &image);
     void printRequested(const QImage &image);
     // Emitted after a file has been written successfully.  The application
@@ -182,6 +185,8 @@ class SnipOverlay final : public QWidget
     void executeConfiguredAction(const QString &action, bool closeAfter);
     void annotateSelection();
     void ocrSelection();
+    void leaveOcrMode();
+    void clearOcrOverlay();
     void barcodeSelection();
     void startScrollCapture();
     void captureScrollFrame();
@@ -297,6 +302,9 @@ class SnipOverlay final : public QWidget
     bool m_showShareButton = true;
     AnnotationCanvas *m_canvas = nullptr;
     AnnotationCanvas *m_preparedCanvas = nullptr;
+    OcrOverlay *m_ocrOverlay = nullptr;
+    QString m_ocrEngine;
+    QString m_ocrLanguage;
     bool m_reusable = false;
     bool m_captureActive = false;
     quint64 m_sessionGeneration = 0;

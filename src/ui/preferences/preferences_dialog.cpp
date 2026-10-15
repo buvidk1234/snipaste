@@ -15,8 +15,9 @@ using preferences::compactLayoutTree;
 PreferencesDialog::PreferencesDialog(core::ConfigStore &config, QWidget *parent)
     : QDialog(parent), m_config(config)
 {
-    setWindowTitle(QStringLiteral("Snipaste 首选项 [专业版]"));
-    setModal(true);
+    setWindowTitle(QStringLiteral("Snipaste 首选项"));
+    // Global capture hotkeys open independent windows that must still receive input.
+    setModal(false);
     setAttribute(Qt::WA_QuitOnClose, false);
     // All pages share a fixed logical width; their height follows the active tab.
     setFixedWidth(508);

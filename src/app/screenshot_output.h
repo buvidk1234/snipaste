@@ -18,7 +18,6 @@ class ScreenshotOutput final : public QObject
     void autoSave(const QImage &image);
     void execute(const QImage &image, const QString &spec);
     void showPaste(const QImage &image);
-    void recognizeText(const QImage &image);
 
   private:
     int imageQuality() const;

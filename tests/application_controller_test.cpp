@@ -5,14 +5,20 @@
 #include "core/config/config_store.h"
 #include "core/history/screenshot_history.h"
 #include "platform/windows/single_instance.h"
+#include "platform/windows/capture_target.h"
 #include "ui/paste/paste_window.h"
+#include "ui/preferences/preferences_dialog.h"
 #include "ui/snip/snip_overlay.h"
 
 #include <QApplication>
 #include <QFile>
+#include <QElapsedTimer>
+#include <QScreen>
 #include <QStandardPaths>
+#include <QSpinBox>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTimer>
 
 using namespace snipaste;
 
@@ -114,6 +120,109 @@ class ApplicationControllerTest final : public QObject
         core::ScreenshotHistory reloaded;
         reloaded.loadFromDirectory(path);
         QVERIFY(reloaded.images().isEmpty());
+    }
+    void preferencesAllowCaptureWithoutBlockingInput()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        core::ConfigStore config(directory.filePath(QStringLiteral("config.ini")));
+        configureTest(config, directory.path());
+        config.setValue(QStringLiteral("capture/autoDetectWindow"), false);
+        config.setValue(QStringLiteral("capture/autoDetectElements"), false);
+        config.setValue(QStringLiteral("capture/soundEnabled"), false);
+        platform::SingleInstance instance;
+        QPointer<ui::PreferencesDialog> preferences;
+        {
+            app::ApplicationController controller(*static_cast<QApplication *>(qApp), config, instance);
+            // Unwind a regressed exec() instead of hanging the test in its nested loop.
+            bool enteredNestedLoop = false;
+            QTimer nestedLoopGuard;
+            QObject::connect(&nestedLoopGuard, &QTimer::timeout, &nestedLoopGuard, [&] {
+                enteredNestedLoop = true;
+                for (auto *widget : QApplication::topLevelWidgets())
+                    if (auto *dialog = dynamic_cast<ui::PreferencesDialog *>(widget))
+                        dialog->close();
+            });
+            nestedLoopGuard.start(0);
+            const bool opened = controller.dispatchArguments({QStringLiteral("open-preferences")}, false);
+            nestedLoopGuard.stop();
+            QVERIFY(opened);
+            QVERIFY2(!enteredNestedLoop, "Preferences must not run a nested modal event loop");
+            for (auto *widget : QApplication::topLevelWidgets())
+                if (auto *dialog = dynamic_cast<ui::PreferencesDialog *>(widget))
+                    preferences = dialog;
+            QVERIFY(preferences);
+            QVERIFY(preferences->isVisible());
+            QCOMPARE(preferences->windowModality(), Qt::NonModal);
+            QVERIFY(!QApplication::activeModalWidget());
+            auto *border = preferences->findChild<QSpinBox *>(QStringLiteral("captureBorderWidth"));
+            QVERIFY(border);
+            border->setValue(7);
+            QVERIFY(controller.dispatchArguments({QStringLiteral("open-preferences")}, false));
+            int visiblePreferences = 0;
+            for (auto *widget : QApplication::topLevelWidgets())
+                if (dynamic_cast<ui::PreferencesDialog *>(widget) && widget->isVisible())
+                    ++visiblePreferences;
+            QCOMPARE(visiblePreferences, 1);
+            QCOMPARE(border->value(), 7);
+            for (int cycle = 0; cycle < 2; ++cycle)
+            {
+                QVERIFY(controller.dispatchArguments({QStringLiteral("snip")}, false));
+                ui::SnipOverlay *overlay = nullptr;
+                for (auto *widget : QApplication::topLevelWidgets())
+                    if (auto *candidate = qobject_cast<ui::SnipOverlay *>(widget); candidate && candidate->isVisible())
+                        overlay = candidate;
+                QVERIFY(overlay);
+                QVERIFY(!QApplication::activeModalWidget());
+                QTest::mousePress(overlay, Qt::LeftButton, Qt::NoModifier, QPoint(40, 40));
+                QTest::mouseRelease(overlay, Qt::LeftButton, Qt::NoModifier, QPoint(240, 180));
+                QVERIFY(!overlay->captureGeometry().region.isEmpty());
+                QTest::keyClick(overlay, Qt::Key_Escape);
+                QVERIFY(!overlay->isVisible());
+                QVERIFY(preferences->isVisible());
+                QCOMPARE(border->value(), 7);
+            }
+            preferences->close();
+            QVERIFY(!preferences->isVisible());
+            QCOMPARE(config.value(QStringLiteral("capture/borderWidth")).toInt(), 7);
+            QVERIFY(controller.dispatchArguments({QStringLiteral("open-preferences")}, false));
+            for (auto *widget : QApplication::topLevelWidgets())
+                if (auto *dialog = dynamic_cast<ui::PreferencesDialog *>(widget); dialog && dialog->isVisible())
+                    preferences = dialog;
+            QVERIFY(preferences);
+            QVERIFY(preferences->isVisible());
+        }
+        QVERIFY(!preferences);
+    }
+    void ownPreferencesElementDetectionRemainsResponsive()
+    {
+#ifndef Q_OS_WIN
+        QSKIP("Windows native accessibility regression.");
+#else
+        if (QGuiApplication::platformName() != QStringLiteral("windows"))
+            QSKIP("Requires the Windows desktop platform.");
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        core::ConfigStore config(directory.filePath(QStringLiteral("config.ini")));
+        configureTest(config, directory.path());
+        ui::PreferencesDialog preferences(config);
+        preferences.setModal(false);
+        preferences.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&preferences));
+        const QRect screen = preferences.screen()->geometry();
+        QWidget anchor;
+        anchor.setGeometry(screen);
+        const QPoint point = preferences.mapToGlobal(QPoint(80, 80)) - screen.topLeft();
+        quintptr nativeWindow = 0;
+        QElapsedTimer timer;
+        timer.start();
+        const auto targets = platform::captureTargetHierarchyAt(
+            point, screen.size(), anchor.winId(), true, {}, {}, &nativeWindow);
+        QVERIFY2(timer.elapsed() < 1000, "Detecting our own preferences must not wait for accessibility RPC");
+        QCOMPARE(nativeWindow, quintptr(preferences.winId()));
+        QVERIFY(!targets.isEmpty());
+        QVERIFY(targets.first().contains(point));
+#endif
     }
     void fullScreenOutputRunsOnceWithoutExtraPin()
     {

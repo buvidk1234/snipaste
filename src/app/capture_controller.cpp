@@ -1,4 +1,5 @@
 #include "app/capture_controller.h"
+#include "app/external_command.h"
 #include "app/runtime_settings.h"
 #include "app/screenshot_history_service.h"
 #include "app/screenshot_output.h"
@@ -212,8 +213,11 @@ void CaptureController::start(const CaptureRequest &request)
                                                snipaste::ui::ClipboardImageSource::Screenshot);
             m_pastes.createPaste(annotated);
         });
-    QObject::connect(m_activeOverlay, &snipaste::ui::SnipOverlay::ocrRequested, &m_output,
-                     &ScreenshotOutput::recognizeText);
+    QObject::connect(m_activeOverlay, &snipaste::ui::SnipOverlay::ocrCompleted, this, [this] {
+        if (m_config.value(QStringLiteral("output/ocrSound"), true).toBool())
+            playConfiguredSound(m_config.value(QStringLiteral("capture/soundFile"),
+                                                QStringLiteral("sound/snip.wav")).toString());
+    });
     QObject::connect(m_activeOverlay, &snipaste::ui::SnipOverlay::barcodeRequested, [](const QImage &image) {
         const snipaste::core::BarcodeResult result = snipaste::core::BarcodeService::recognize(image);
         if (result.success)
@@ -239,6 +243,9 @@ void CaptureController::start(const CaptureRequest &request)
 }
 void CaptureController::configureOverlay(bool superCaptureMode)
 {
+    m_activeOverlay->setOcrOptions(
+        m_config.value(QStringLiteral("output/ocrEngine"), QStringLiteral("系统自带")).toString(),
+        m_config.value(QStringLiteral("output/ocrLanguage"), QStringLiteral("系统默认")).toString());
     const bool captureDisabled = m_config.value(QStringLiteral("capture/disable"), false).toBool();
     m_activeOverlay->setDetectionOptions(
         !captureDisabled && m_config.value(QStringLiteral("capture/autoDetectWindow"), true).toBool(),

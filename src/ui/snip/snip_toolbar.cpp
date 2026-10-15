@@ -276,6 +276,11 @@ void SnipOverlay::createToolbar()
 
     m_toolbar->installEventFilter(this);
     m_toolOptions->installEventFilter(this);
+    // Wheel events over child buttons/sliders are delivered to those widgets,
+    // so filtering only the two frames misses the actual toolbar interaction.
+    for (QWidget *widget : m_toolbar->findChildren<QWidget *>())
+        if (!widget->isWindow())
+            widget->installEventFilter(this);
 
     // Option widgets keep their own bindings and state.
     // Keep additional commands accessible without displacing the reference toolbar actions.
@@ -371,6 +376,22 @@ void SnipOverlay::confirmSelection()
         m_toolbar->findChild<QToolButton *>(QStringLiteral("重做"))->setEnabled(m_canvas->canRedo());
     });
     m_annotationOptions->setCanvas(m_canvas);
+    connect(m_canvas, &AnnotationCanvas::selectionChanged, this, [this] {
+        if (auto *group = m_toolbar->findChild<QButtonGroup *>(QStringLiteral("annotationTools")))
+            for (auto *button : group->buttons())
+            {
+                const QSignalBlocker blocker(button);
+                const bool selected = button->property("pageIndex").toInt() == m_toolOptionsStack->currentIndex();
+                button->setChecked(selected);
+                if (selected)
+                    button->setProperty("annotationTool", int(m_canvas->tool()));
+            }
+        if (QWidget *page = m_toolOptionsStack->currentWidget())
+            m_toolOptions->setFixedSize(page->sizeHint() + QSize(2, 2));
+        m_toolOptions->show();
+        m_toolbar->adjustSize();
+        updateToolbarGeometry();
+    });
     m_selectionConfirmed = true;
     updateToolbarGeometry();
     update();
@@ -378,6 +399,7 @@ void SnipOverlay::confirmSelection()
 
 void SnipOverlay::resetSelection()
 {
+    clearOcrOverlay();
     if (!m_toolbar)
         createToolbar();
     m_transformingSelection = false;

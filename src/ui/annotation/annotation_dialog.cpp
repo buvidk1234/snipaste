@@ -56,7 +56,12 @@ AnnotationDialog::AnnotationDialog(const QImage &image, QWidget *parent)
     width->setValue(3);
     width->setSuffix(QStringLiteral(" px"));
     auto *lineStyle = new QComboBox(this);
-    lineStyle->addItems({QStringLiteral("实线"), QStringLiteral("虚线"), QStringLiteral("点线")});
+    lineStyle->setObjectName(QStringLiteral("annotationLineStyle"));
+    lineStyle->addItem(QStringLiteral("实线"), int(Qt::SolidLine));
+    lineStyle->addItem(QStringLiteral("虚线"), int(Qt::DashLine));
+    lineStyle->addItem(QStringLiteral("点线"), int(Qt::DotLine));
+    lineStyle->addItem(QStringLiteral("点划线"), int(Qt::DashDotLine));
+    lineStyle->addItem(QStringLiteral("双点划线"), int(Qt::DashDotDotLine));
     auto *textBackground = new QCheckBox(QStringLiteral("文字底色"), this);
     auto *undo = new QPushButton(QStringLiteral("撤销"), this);
     auto *redo = new QPushButton(QStringLiteral("重做"), this);
@@ -197,8 +202,8 @@ AnnotationDialog::AnnotationDialog(const QImage &image, QWidget *parent)
     connect(width, &QSpinBox::valueChanged, this, [this](int value) {
         m_canvas->setPenWidth(value);
     });
-    connect(lineStyle, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index) {
-        m_canvas->setPenStyle(index == 1 ? Qt::DashLine : index == 2 ? Qt::DotLine : Qt::SolidLine);
+    connect(lineStyle, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, lineStyle](int index) {
+        m_canvas->setPenStyle(Qt::PenStyle(lineStyle->itemData(index).toInt()));
     });
     connect(textBackground, &QCheckBox::toggled, m_canvas, &AnnotationCanvas::setTextBackground);
     connect(undo, &QPushButton::clicked, m_canvas, &AnnotationCanvas::undo);

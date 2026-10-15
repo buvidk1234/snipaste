@@ -2,7 +2,6 @@
 
 #include <QBuffer>
 #include <QByteArray>
-#include <QStringList>
 
 #import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
@@ -52,7 +51,7 @@ core::OcrResult recognizeWithMacVision(const QImage &image, const QString &langu
         if (!cgImage)
             return {false, {}, QStringLiteral("无法读取 OCR 图像")};
 
-        __block QStringList lines;
+        __block core::OcrResult recognized;
         __block NSString *requestError = nil;
         VNRecognizeTextRequest *request = [[VNRecognizeTextRequest alloc]
             initWithCompletionHandler:^(VNRequest *completedRequest, NSError *error) {
@@ -64,8 +63,17 @@ core::OcrResult recognizeWithMacVision(const QImage &image, const QString &langu
                     (NSArray<VNRecognizedTextObservation *> *)completedRequest.results;
                 for (VNRecognizedTextObservation *observation in observations) {
                     VNRecognizedText *candidate = [[observation topCandidates:1] firstObject];
-                    if (candidate.string.length > 0)
-                        lines.append(qStringFromNSString(candidate.string));
+                    if (candidate.string.length > 0) {
+                        if (!recognized.text.isEmpty())
+                            recognized.text += QChar('\n');
+                        const QString text = qStringFromNSString(candidate.string);
+                        const CGRect box = observation.boundingBox;
+                        recognized.boxes.append({QRectF(box.origin.x * image.width(),
+                            (1 - box.origin.y - box.size.height) * image.height(),
+                            box.size.width * image.width(), box.size.height * image.height()),
+                            recognized.text.size(), text.size(), int(recognized.boxes.size())});
+                        recognized.text += text;
+                    }
                 }
             }];
         request.recognitionLevel = VNRequestTextRecognitionLevelAccurate;
@@ -96,7 +104,8 @@ core::OcrResult recognizeWithMacVision(const QImage &image, const QString &langu
             result.error = QStringLiteral("macOS Vision OCR 失败: %1")
                                .arg(qStringFromNSString(message));
         } else {
-            result.text = lines.join(QChar('\n')).trimmed();
+            result.text = recognized.text;
+            result.boxes = recognized.boxes;
             if (result.text.isEmpty())
                 result.error = QStringLiteral("没有识别到文字");
             else

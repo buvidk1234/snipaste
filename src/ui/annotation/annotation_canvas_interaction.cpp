@@ -1,6 +1,7 @@
 #include "platform/keyboard.h"
 #include "ui/annotation/annotation_canvas.h"
 #include "ui/annotation/annotation_renderer.h"
+#include "ui/annotation/annotation_selection_geometry.h"
 #include "ui/annotation/annotation_stroke_preview.h"
 #include <QCursor>
 #include <QKeyEvent>
@@ -9,6 +10,7 @@
 #include <QPainter>
 #include <QPainterPathStroker>
 #include <QPixmap>
+#include <QPlainTextEdit>
 #include <QTransform>
 #include <QWheelEvent>
 #include <cmath>
@@ -58,9 +60,8 @@ int AnnotationCanvas::shapeAt(const QPointF &point) const
 {
     for (int index = m_document.shapes().size() - 1; index >= 0; --index)
     {
-        if (isNonMovableBrush(m_document.shapes().at(index).tool))
-            continue;
-        if (annotation::shapeBounds(m_document.shapes().at(index)).contains(point))
+        if (annotation::containsShape(m_document.shapes().at(index), point,
+                                      5 * m_image.width() / qMax<qreal>(1, imageRect().width())))
             return index;
     }
     return -1;
@@ -332,33 +333,53 @@ void AnnotationCanvas::mousePressEvent(QMouseEvent *event)
         m_selectedShape < m_document.shapes().size())
     {
         const Shape &sel = m_document.shapes().at(m_selectedShape);
-        QRectF bounds = annotation::shapeBounds(sel);
-        const QPointF rotHandleCenter(bounds.center().x(), bounds.top() - 20.0);
-        if (QLineF(imagePoint, rotHandleCenter).length() <= 10.0)
+        const qreal tolerance = 7 * m_image.width() / qMax<qreal>(1, imageRect().width());
+        if (annotation::hasRotationHandle(sel) &&
+            QLineF(imagePoint, annotation::rotationHandle(sel)).length() <= tolerance)
         {
             m_editingRotation = true;
             m_start = imagePoint;
             event->accept();
             return;
         }
-        const QList<QPointF> handles = {bounds.topLeft(),     QPointF(bounds.center().x(), bounds.top()),
-                                        bounds.topRight(),    QPointF(bounds.right(), bounds.center().y()),
-                                        bounds.bottomRight(), QPointF(bounds.center().x(), bounds.bottom()),
-                                        bounds.bottomLeft(),  QPointF(bounds.left(), bounds.center().y())};
-        for (int i = 0; i < handles.size(); ++i)
+        const int handle = annotation::selectionHandleAt(sel, imagePoint, tolerance);
+        if (handle >= 0)
         {
-            if (QLineF(imagePoint, handles[i]).length() <= 7.0)
-            {
-                m_resizingHandle = i;
-                m_start = imagePoint;
-                event->accept();
-                return;
-            }
+            m_resizingHandle = handle;
+            m_start = imagePoint;
+            updatePointerCursor(event->position());
+            event->accept();
+            return;
         }
     }
     // Freehand tools must always start a new stroke, even over an existing
     // stroke or effect.  Their wide bounds are not selection handles.
-    const int hit = isNonMovableBrush(m_tool) ? -1 : shapeAt(imagePoint);
+    const bool drawingBrush = m_tool == Tool::Pen || m_tool == Tool::Marker ||
+        ((m_tool == Tool::Mosaic || m_tool == Tool::Blur) && (m_effectShape == EffectShape::Brush || !m_autoSelectOnCreation));
+    const int hit = drawingBrush ? -1 : shapeAt(imagePoint);
+    if (hit >= 0 && m_document.shapes().at(hit).tool == Tool::Text && m_tool != Tool::Eraser &&
+        m_tool != Tool::Number && (m_freeSelect || m_tool == Tool::Text ||
+                                 event->modifiers().testFlag(snipaste::platform::primaryModifier())))
+    {
+        m_selectedShape = hit;
+        const qreal edgeWidth = 5 * m_image.width() / qMax<qreal>(1, imageRect().width());
+        if (annotation::textInteriorContains(m_document.shapes().at(hit), imagePoint, edgeWidth))
+        {
+            editTextShape(hit);
+            const QPoint local = m_textEditor->viewport()->mapFrom(this, event->position().toPoint());
+            m_textEditor->setTextCursor(m_textEditor->cursorForPosition(local));
+            event->accept();
+            return;
+        }
+        m_editingShape = true;
+        m_editingMagnifierPart = MagnifierPart::None;
+        m_start = m_current = imagePoint;
+        syncTextStyle(m_document.shapes().at(hit));
+        setCursor(Qt::SizeAllCursor);
+        update();
+        event->accept();
+        return;
+    }
     if (hit >= 0 && event->modifiers().testFlag(snipaste::platform::primaryModifier()) &&
         m_tool != Tool::Eraser && m_tool != Tool::Text && m_tool != Tool::Number)
     {
@@ -376,17 +397,19 @@ void AnnotationCanvas::mousePressEvent(QMouseEvent *event)
             duplicatedTool == Tool::Magnifier ? MagnifierPart::Target : MagnifierPart::None;
         m_start = imagePoint;
         m_current = imagePoint;
+        syncSelectedStyle();
         emit historyChanged();
         update();
         event->accept();
         return;
     }
     if (hit >= 0 &&
-        (m_freeSelect || event->modifiers().testFlag(snipaste::platform::primaryModifier()) ||
+        (hit == m_selectedShape || m_freeSelect || event->modifiers().testFlag(snipaste::platform::primaryModifier()) ||
          m_document.shapes().at(hit).tool == m_tool) &&
         m_tool != Tool::Eraser && m_tool != Tool::Text && m_tool != Tool::Number)
     {
         m_selectedShape = hit;
+        syncSelectedStyle();
         m_editingShape = true;
         m_editingMagnifierPart = MagnifierPart::None;
         if (m_document.shapes().at(hit).tool == Tool::Magnifier && m_tool == Tool::Magnifier)
@@ -439,7 +462,10 @@ void AnnotationCanvas::mousePressEvent(QMouseEvent *event)
         m_document.append(shape);
         invalidateRenderCache();
         if (m_autoSelectOnCreation)
+        {
             m_selectedShape = m_document.shapes().size() - 1;
+            syncSelectedStyle();
+        }
         recordHistory();
         updateToolCursor();
         update();
@@ -451,8 +477,36 @@ void AnnotationCanvas::mousePressEvent(QMouseEvent *event)
     }
 }
 
+void AnnotationCanvas::mouseDoubleClickEvent(QMouseEvent *event)
+{
+    if (event->button() == Qt::LeftButton && m_tool != Tool::Eraser && !isNonMovableBrush(m_tool))
+    {
+        finishTextInput();
+        const int hit = shapeAt(toImagePoint(event->position()));
+        if (hit >= 0 && m_document.shapes().at(hit).tool == Tool::Text)
+        {
+            editTextShape(hit);
+            event->accept();
+            return;
+        }
+    }
+    QWidget::mouseDoubleClickEvent(event);
+}
+
 void AnnotationCanvas::mouseMoveEvent(QMouseEvent *event)
 {
+    // The first click can open the child editor after the canvas has already
+    // acquired the mouse grab. Continue that same gesture as character
+    // selection, instead of losing the drag until the user clicks again.
+    if (m_textEditing && event->buttons().testFlag(Qt::LeftButton))
+    {
+        const QPoint local = m_textEditor->viewport()->mapFrom(this, event->position().toPoint());
+        QTextCursor cursor = m_textEditor->textCursor();
+        cursor.setPosition(m_textEditor->cursorForPosition(local).position(), QTextCursor::KeepAnchor);
+        m_textEditor->setTextCursor(cursor);
+        event->accept();
+        return;
+    }
     if (m_editingRotation && m_selectedShape >= 0 && m_selectedShape < m_document.shapes().size())
     {
         const QPointF point = toImagePoint(event->position());
@@ -471,18 +525,21 @@ void AnnotationCanvas::mouseMoveEvent(QMouseEvent *event)
     }
     if (m_resizingHandle >= 0 && m_selectedShape >= 0 && m_selectedShape < m_document.shapes().size())
     {
+        const Shape &shape = m_document.shapes().at(m_selectedShape);
+        qreal angle = shape.rotation;
+        if (shape.tool == Tool::Line || shape.tool == Tool::Arrow)
+            angle = QLineF(shape.start, shape.end).angle();
+        else if (m_resizingHandle == 1 || m_resizingHandle == 5)
+            angle += 90;
+        else if (m_resizingHandle % 2 == 0)
+            angle += (m_resizingHandle == 0 || m_resizingHandle == 4) ? 45 : 135;
+        const int sector = (qRound(angle / 45) % 4 + 4) % 4;
+        const Qt::CursorShape cursors[] = {Qt::SizeHorCursor, Qt::SizeFDiagCursor, Qt::SizeVerCursor, Qt::SizeBDiagCursor};
+        setCursor(cursors[sector]);
+
         const QPointF point = toImagePoint(event->position());
         const QPointF delta = point - m_start;
-        m_document.editShape(m_selectedShape, [&](Shape &shape) {
-            if (m_resizingHandle == 0 || m_resizingHandle == 6 || m_resizingHandle == 7)
-                shape.start.rx() += delta.x();
-            if (m_resizingHandle == 0 || m_resizingHandle == 1 || m_resizingHandle == 2)
-                shape.start.ry() += delta.y();
-            if (m_resizingHandle == 2 || m_resizingHandle == 3 || m_resizingHandle == 4)
-                shape.end.rx() += delta.x();
-            if (m_resizingHandle == 4 || m_resizingHandle == 5 || m_resizingHandle == 6)
-                shape.end.ry() += delta.y();
-        });
+        m_document.editShape(m_selectedShape, [&](Shape &shape) { annotation::resizeShape(shape, m_resizingHandle, delta); });
         invalidateRenderCache();
         m_start = point;
         emit historyChanged();
@@ -515,7 +572,10 @@ void AnnotationCanvas::mouseMoveEvent(QMouseEvent *event)
         return;
     }
     if (!m_dragging)
+    {
+        updatePointerCursor(event->position());
         return;
+    }
     const QPointF raw = toImagePoint(event->position());
     if (m_tool == Tool::Eraser)
     {
@@ -586,6 +646,8 @@ void AnnotationCanvas::mouseReleaseEvent(QMouseEvent *event)
     if ((m_editingShape || m_editingRotation || m_resizingHandle >= 0) && event->button() == Qt::LeftButton)
     {
         finishHistoryGesture();
+        syncSelectedStyle();
+        updatePointerCursor(event->position());
         update();
         event->accept();
         return;
@@ -622,9 +684,14 @@ void AnnotationCanvas::mouseReleaseEvent(QMouseEvent *event)
     }
     if (m_document.shapes().size() > shapeCountBefore)
         invalidateRenderCache();
-    if (m_autoSelectOnCreation && !isNonMovableBrush(m_tool) && m_document.shapes().size() > shapeCountBefore)
+    if (m_autoSelectOnCreation && m_document.shapes().size() > shapeCountBefore &&
+        annotation::selectable(m_document.shapes().constLast()))
+    {
         m_selectedShape = m_document.shapes().size() - 1;
+        syncSelectedStyle();
+    }
     finishHistoryGesture();
+    updatePointerCursor(event->position());
     update();
 }
 
@@ -640,23 +707,35 @@ void AnnotationCanvas::wheelEvent(QWheelEvent *event)
     }
     const int steps = qMax(1, qAbs(delta) / 120);
     const int sign = delta > 0 ? 1 : -1;
+    adjustToolSize(sign * steps);
+    event->accept();
+}
+
+void AnnotationCanvas::adjustToolSize(int steps)
+{
     if (m_tool == Tool::Number)
     {
-        setNumberSize(m_numberSize + sign * steps * 2);
+        setNumberSize(m_numberSize + steps * 2);
     }
     else if (m_tool == Tool::Text)
     {
-        setTextFontSize(m_textFontSize + sign * steps * 2);
+        setTextFontSize(m_textFontSize + steps * 2);
     }
     else
     {
-        setPenWidth(m_penWidth + sign * steps);
+        setPenWidth(m_penWidth + steps);
     }
-    event->accept();
 }
 
 void AnnotationCanvas::keyPressEvent(QKeyEvent *event)
 {
+    if (event->key() == Qt::Key_F2 && event->modifiers() == Qt::NoModifier && m_selectedShape >= 0 &&
+        m_selectedShape < m_document.shapes().size() && m_document.shapes().at(m_selectedShape).tool == Tool::Text)
+    {
+        editTextShape(m_selectedShape);
+        event->accept();
+        return;
+    }
     if (m_selectedShape >= 0 && event->modifiers().testFlag(Qt::AltModifier))
     {
         if (event->key() == Qt::Key_Left)
@@ -755,6 +834,7 @@ void AnnotationCanvas::pasteShape()
     m_document.append(std::move(pasted));
     invalidateRenderCache();
     m_selectedShape = m_document.shapes().size() - 1;
+    syncSelectedStyle();
     recordHistory();
     update();
 }

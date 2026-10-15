@@ -11,7 +11,6 @@
 #include <QFileInfo>
 #include <QKeySequence>
 #include <QMenu>
-#include <QMessageBox>
 #include <QPainter>
 #include <QPainterPath>
 #include <QStyle>
@@ -151,16 +150,7 @@ TrayController::TrayController(core::CommandRegistry &commands, core::ConfigStor
     addCommand(menu, QStringLiteral("检查更新…"), QStringLiteral("update.checkNow"));
     menu->addSeparator();
     addCommand(menu, QStringLiteral("重新启动"), QStringLiteral("app.restart"));
-    auto *quitAction = menu->addAction(QStringLiteral("退出"));
-    QObject::connect(quitAction, &QAction::triggered, this, [this] {
-        const auto answer = QMessageBox::question(nullptr,
-                                                   QStringLiteral("退出 snipaste"),
-                                                   QStringLiteral("确定要退出 snipaste 吗？"),
-                                                   QMessageBox::Yes | QMessageBox::No,
-                                                   QMessageBox::No);
-        if (answer == QMessageBox::Yes)
-            m_commands.execute(QStringLiteral("app.quit"));
-    });
+    addCommand(menu, QStringLiteral("退出"), QStringLiteral("app.quit"));
 
     const auto executeTrayAction = [this](const QString &key, const QString &fallback) {
         const QString action = m_config.value(key, fallback).toString().trimmed();

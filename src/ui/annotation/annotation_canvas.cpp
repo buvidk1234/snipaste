@@ -4,6 +4,7 @@
 #include "platform/keyboard.h"
 #include <QPlainTextEdit>
 #include <QTextDocument>
+#include <QTimer>
 #include <utility>
 
 namespace snipaste::ui
@@ -40,10 +41,16 @@ AnnotationCanvas::AnnotationCanvas(QImage image, QWidget *parent) : QWidget(pare
     m_textEditor->setToolTip(QStringLiteral("Enter 换行 · %1+Enter 完成 · Esc 取消")
                                  .arg(snipaste::platform::primaryModifierText()));
     m_textEditor->installEventFilter(this);
+    m_textEditor->viewport()->installEventFilter(this);
+    m_textEditor->setMouseTracking(true);
+    m_textEditor->viewport()->setMouseTracking(true);
     m_textEditor->hide();
     connect(m_textEditor, &QPlainTextEdit::textChanged, this, [this] {
         updateTextEditorGeometry();
-        update();
+        updateTextEditorStyle();
+        // QPlainTextEdit can scroll to the new cursor after textChanged.
+        // Reconcile the viewport once that native key/IME operation ends.
+        QTimer::singleShot(0, this, &AnnotationCanvas::updateTextEditorGeometry);
     });
     updateToolCursor();
 }
@@ -53,6 +60,7 @@ AnnotationCanvas::~AnnotationCanvas()
     // Child focus changes during QWidget destruction must not commit into
     // annotation containers whose C++ members have already been destroyed.
     m_textEditor->removeEventFilter(this);
+    m_textEditor->viewport()->removeEventFilter(this);
     m_textEditor->disconnect(this);
 }
 
@@ -60,7 +68,38 @@ void AnnotationCanvas::setTool(Tool tool)
 {
     finishTextInput();
     finishHistoryGesture();
+    if (m_selectedShape >= 0 && m_selectedShape < m_document.shapes().size())
+    {
+        const auto family = [](Tool value) {
+            if (value == Tool::Rectangle || value == Tool::RoundedRectangle || value == Tool::Ellipse)
+                return 1;
+            if (value == Tool::Line || value == Tool::Arrow)
+                return 2;
+            if (value == Tool::Mosaic || value == Tool::Blur)
+                return 3;
+            return 0;
+        };
+        const Tool selectedTool = m_document.shapes().at(m_selectedShape).tool;
+        if (selectedTool == tool || (family(tool) != 0 && family(tool) == family(selectedTool)))
+        {
+            m_tool = tool;
+            if (tool == Tool::Line)
+                m_arrowStyle = ArrowStyle::None;
+            else if (tool == Tool::Arrow && m_arrowStyle == ArrowStyle::None)
+                m_arrowStyle = ArrowStyle::End;
+            editSelectedStyle([&](Shape &shape) {
+                shape.tool = tool;
+                if (family(tool) == 2)
+                    shape.arrowStyle = m_arrowStyle;
+            });
+            syncSelectedStyle();
+            update();
+            return;
+        }
+    }
     m_selectedShape = -1;
+    m_hoveredText = -1;
+    m_hoveredShape = -1;
     m_editingShape = false;
     m_resizingHandle = -1;
     m_editingRotation = false;
@@ -76,6 +115,7 @@ void AnnotationCanvas::setTool(Tool tool)
         m_penColor = style.color.isValid() ? style.color : oldColor;
         if (style.width > 0)
             m_penWidth = style.width;
+        m_penStyle = style.penStyle;
         if (m_penColor != oldColor)
             emit penColorChanged(m_penColor);
         if (!qFuzzyCompare(m_penWidth, oldWidth))
@@ -84,6 +124,9 @@ void AnnotationCanvas::setTool(Tool tool)
             emit penStyleChanged(m_penStyle);
     }
     updateToolCursor();
+    if (m_tool == Tool::Text)
+        emit textStyleChanged();
+    emit annotationStyleChanged();
 }
 
 void AnnotationCanvas::setPenColor(const QColor &color)
@@ -96,6 +139,8 @@ void AnnotationCanvas::setPenColor(const QColor &color)
         emit penColorChanged(m_penColor);
         update();
     }
+    if (color.isValid())
+        editSelectedStyle([&](Shape &shape) { shape.color = color; });
 }
 
 void AnnotationCanvas::setPenWidth(qreal width)
@@ -109,6 +154,7 @@ void AnnotationCanvas::setPenWidth(qreal width)
         emit penWidthChanged(m_penWidth);
         update();
     }
+    editSelectedStyle([&](Shape &shape) { shape.width = clamped; });
 }
 
 void AnnotationCanvas::setPenStyle(Qt::PenStyle style)
@@ -120,25 +166,30 @@ void AnnotationCanvas::setPenStyle(Qt::PenStyle style)
         emit penStyleChanged(m_penStyle);
         update();
     }
+    editSelectedStyle([&](Shape &shape) { shape.penStyle = style; });
 }
 
 void AnnotationCanvas::setTextBackground(bool enabled)
 {
     m_textBackground = enabled;
+    editTextStyle([&](Shape &shape) { shape.textBackground = enabled; });
+    emit textStyleChanged();
     update();
 }
 
 void AnnotationCanvas::setTextBold(bool enabled)
 {
     m_textBold = enabled;
-    updateTextEditorGeometry();
+    editTextStyle([&](Shape &shape) { shape.textBold = enabled; });
+    emit textStyleChanged();
     update();
 }
 
 void AnnotationCanvas::setTextItalic(bool enabled)
 {
     m_textItalic = enabled;
-    updateTextEditorGeometry();
+    editTextStyle([&](Shape &shape) { shape.textItalic = enabled; });
+    emit textStyleChanged();
     update();
 }
 
@@ -146,55 +197,86 @@ void AnnotationCanvas::setTextFontFamily(const QString &family)
 {
     if (!family.trimmed().isEmpty())
         m_textFontFamily = family.trimmed();
-    updateTextEditorGeometry();
+    editTextStyle([&](Shape &shape) { shape.fontFamily = m_textFontFamily; });
+    emit textStyleChanged();
     update();
 }
 
 void AnnotationCanvas::setTextFontSize(qreal size)
 {
     m_textFontSize = qBound<qreal>(6.0, size, 96.0);
-    updateTextEditorGeometry();
+    editTextStyle([&](Shape &shape) { shape.fontSize = m_textFontSize; });
+    emit textStyleChanged();
     update();
 }
 
 void AnnotationCanvas::setCornerRadius(qreal radius)
 {
     m_cornerRadius = qBound<qreal>(0.0, radius, 100.0);
-    if (m_selectedShape >= 0 && m_selectedShape < m_document.shapes().size())
-        m_document.editShape(m_selectedShape, [&](Shape &shape) { shape.cornerRadius = m_cornerRadius; });
-    recordHistory();
-    invalidateRenderCache();
+    editSelectedStyle([&](Shape &shape) {
+        if (shape.tool == Tool::Rectangle || shape.tool == Tool::RoundedRectangle || shape.tool == Tool::Magnifier)
+        {
+            shape.cornerRadius = m_cornerRadius;
+            if (shape.tool != Tool::Magnifier)
+                shape.tool = m_tool = m_cornerRadius > 0 ? Tool::RoundedRectangle : Tool::Rectangle;
+        }
+    });
     update();
 }
 
 void AnnotationCanvas::setMagnification(qreal factor)
 {
     m_magnification = qBound<qreal>(1.1, factor, 8.0);
-    if (m_selectedShape >= 0 && m_selectedShape < m_document.shapes().size())
-        m_document.editShape(m_selectedShape, [&](Shape &shape) { shape.magnification = m_magnification; });
-    recordHistory();
-    invalidateRenderCache();
+    editSelectedStyle([&](Shape &shape) {
+        if (shape.tool != Tool::Magnifier || qFuzzyCompare(shape.magnification, m_magnification))
+            return;
+        const QRectF target(shape.start, shape.end);
+        const QSizeF size = target.size() * (m_magnification / shape.magnification);
+        shape.start = target.center() - QPointF(size.width(), size.height()) / 2;
+        shape.end = shape.start + QPointF(size.width(), size.height());
+        shape.magnification = m_magnification;
+    });
     update();
 }
 
 void AnnotationCanvas::setNumberStyle(int style)
 {
     m_numberStyle = qBound(0, style, 2);
-    if (m_selectedShape >= 0 && m_selectedShape < m_document.shapes().size())
-        m_document.editShape(m_selectedShape, [&](Shape &shape) { shape.numberStyle = m_numberStyle; });
-    recordHistory();
-    invalidateRenderCache();
+    editSelectedStyle([&](Shape &shape) {
+        if (shape.tool == Tool::Number)
+            shape.numberStyle = m_numberStyle;
+    });
     updateToolCursor();
+    update();
+}
+
+void AnnotationCanvas::setMagnifierCutout(bool enabled)
+{
+    m_magnifierCutout = enabled;
+    editSelectedStyle([&](Shape &shape) {
+        if (shape.tool == Tool::Magnifier)
+            shape.magnifierCutout = enabled;
+    });
+    update();
+}
+
+void AnnotationCanvas::setMagnifierConnectorStyle(int style)
+{
+    m_magnifierConnectorStyle = qBound(0, style, 2);
+    editSelectedStyle([&](Shape &shape) {
+        if (shape.tool == Tool::Magnifier)
+            shape.magnifierConnectorStyle = m_magnifierConnectorStyle;
+    });
     update();
 }
 
 void AnnotationCanvas::setNumberSize(qreal size)
 {
     m_numberSize = qBound<qreal>(12.0, size, 96.0);
-    if (m_selectedShape >= 0 && m_selectedShape < m_document.shapes().size())
-        m_document.editShape(m_selectedShape, [&](Shape &shape) { shape.numberSize = m_numberSize; });
-    recordHistory();
-    invalidateRenderCache();
+    editSelectedStyle([&](Shape &shape) {
+        if (shape.tool == Tool::Number)
+            shape.numberSize = m_numberSize;
+    });
     updateToolCursor();
     update();
 }
@@ -202,39 +284,105 @@ void AnnotationCanvas::setNumberSize(qreal size)
 void AnnotationCanvas::setShapeFilled(bool enabled)
 {
     m_shapeFilled = enabled;
-    if (m_selectedShape >= 0 && m_selectedShape < m_document.shapes().size())
-        m_document.editShape(m_selectedShape, [&](Shape &shape) { shape.filled = enabled; });
-    recordHistory();
-    invalidateRenderCache();
+    editSelectedStyle([&](Shape &shape) {
+        if (shape.tool == Tool::Rectangle || shape.tool == Tool::RoundedRectangle || shape.tool == Tool::Ellipse)
+            shape.filled = enabled;
+    });
     update();
 }
 
 void AnnotationCanvas::setArrowStyle(ArrowStyle style)
 {
+    m_startArrowHead = core::startArrowHead(style);
+    m_endArrowHead = core::endArrowHead(style);
     if (m_arrowStyle != style)
     {
         m_arrowStyle = style;
         emit arrowStyleChanged(m_arrowStyle);
         update();
     }
+    editSelectedStyle([&](Shape &shape) {
+        if (shape.tool == Tool::Line || shape.tool == Tool::Arrow)
+        {
+            shape.startArrowHead = m_startArrowHead;
+            shape.endArrowHead = m_endArrowHead;
+            shape.arrowStyle = style;
+            shape.tool = m_tool = style == ArrowStyle::None ? Tool::Line : Tool::Arrow;
+        }
+    });
+}
+
+void AnnotationCanvas::setStartArrowHead(core::ArrowHead head)
+{
+    m_startArrowHead = head;
+    const auto style = core::combineArrowHeads(m_startArrowHead, m_endArrowHead);
+    m_arrowStyle = style;
+    m_tool = (m_startArrowHead != core::ArrowHead::None || m_endArrowHead != core::ArrowHead::None)
+                 ? Tool::Arrow
+                 : Tool::Line;
+    editSelectedStyle([&](Shape &shape) {
+        if (shape.tool == Tool::Line || shape.tool == Tool::Arrow)
+        {
+            shape.startArrowHead = m_startArrowHead;
+            shape.endArrowHead = m_endArrowHead;
+            shape.arrowStyle = m_arrowStyle;
+            shape.tool = m_tool;
+        }
+    });
+    emit arrowStyleChanged(m_arrowStyle);
+    update();
+}
+
+void AnnotationCanvas::setEndArrowHead(core::ArrowHead head)
+{
+    m_endArrowHead = head;
+    const auto style = core::combineArrowHeads(m_startArrowHead, m_endArrowHead);
+    m_arrowStyle = style;
+    m_tool = (m_startArrowHead != core::ArrowHead::None || m_endArrowHead != core::ArrowHead::None)
+                 ? Tool::Arrow
+                 : Tool::Line;
+    editSelectedStyle([&](Shape &shape) {
+        if (shape.tool == Tool::Line || shape.tool == Tool::Arrow)
+        {
+            shape.startArrowHead = m_startArrowHead;
+            shape.endArrowHead = m_endArrowHead;
+            shape.arrowStyle = m_arrowStyle;
+            shape.tool = m_tool;
+        }
+    });
+    emit arrowStyleChanged(m_arrowStyle);
+    update();
 }
 
 void AnnotationCanvas::setTextOutlineColor(const QColor &color)
 {
     if (color.isValid())
         m_textOutlineColor = color;
+    editTextStyle([&](Shape &shape) { shape.textOutlineColor = m_textOutlineColor; });
+    emit textStyleChanged();
     update();
 }
 
 void AnnotationCanvas::setTextOutlineWidth(qreal width)
 {
     m_textOutlineWidth = qBound<qreal>(0.0, width, 16.0);
+    if (m_textOutlineWidth > 0 && m_textOutlineColor.alpha() == 0)
+        m_textOutlineColor = m_penColor.lightnessF() < 0.5 ? QColor(Qt::white) : QColor(Qt::black);
+    editTextStyle([&](Shape &shape) {
+        shape.textOutlineWidth = m_textOutlineWidth;
+        shape.textOutlineColor = m_textOutlineColor;
+    });
+    emit textStyleChanged();
     update();
 }
 
 void AnnotationCanvas::setEffectSize(int size)
 {
     m_effectSize = qBound(2, size, 40);
+    editSelectedStyle([&](Shape &shape) {
+        if (shape.tool == Tool::Mosaic || shape.tool == Tool::Blur)
+            shape.effectSize = m_effectSize;
+    });
     updateToolCursor();
     update();
 }
@@ -242,6 +390,10 @@ void AnnotationCanvas::setEffectSize(int size)
 void AnnotationCanvas::setEffectShape(EffectShape shape)
 {
     m_effectShape = shape;
+    editSelectedStyle([&](Shape &selected) {
+        if (selected.tool == Tool::Mosaic || selected.tool == Tool::Blur || selected.tool == Tool::Magnifier)
+            selected.effectShape = shape;
+    });
     updateToolCursor();
     update();
 }
@@ -299,6 +451,8 @@ AnnotationCanvas::Shape AnnotationCanvas::currentShape() const
     shape.penStyle = m_penStyle;
     shape.textBackground = m_textBackground;
     shape.arrowStyle = m_arrowStyle;
+    shape.startArrowHead = m_startArrowHead;
+    shape.endArrowHead = m_endArrowHead;
     shape.textOutlineColor = m_textOutlineColor;
     shape.textOutlineWidth = m_textOutlineWidth;
     shape.fontFamily = m_textFontFamily;
@@ -368,6 +522,8 @@ void AnnotationCanvas::recordHistory()
 void AnnotationCanvas::documentRestored()
 {
     m_selectedShape = -1;
+    m_hoveredText = -1;
+    m_hoveredShape = -1;
     invalidateRenderCache();
     updateToolCursor();
     emit historyChanged();
@@ -460,6 +616,7 @@ void AnnotationCanvas::resetCapture()
     m_textEditor->clear();
     m_textEditor->document()->clearUndoRedoStacks();
     m_textShape = {};
+    m_textShapeIndex = m_hoveredText = m_hoveredShape = -1;
     m_image = {};
     m_renderCache = {};
     m_effectCache.reset();

@@ -1,9 +1,40 @@
 #include "ui/annotation/annotation_toolbar_icons.h"
+#include "ui/annotation/annotation_renderer.h"
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
 namespace snipaste::ui::annotation
 {
+namespace
+{
+QIcon arrowIcon(core::ArrowHead start, core::ArrowHead end, int w, int h, bool dropdown)
+{
+    QPixmap pix(w, h);
+    pix.fill(Qt::transparent);
+    QPainter painter(&pix);
+    painter.setRenderHint(QPainter::Antialiasing);
+    Shape shape;
+    shape.tool = core::AnnotationTool::Arrow;
+    shape.arrowStyle = core::ArrowStyle::None;
+    shape.startArrowHead = start;
+    shape.endArrowHead = end;
+    shape.width = 2;
+    shape.start = {dropdown ? 5.0 : 8.0, h / 2.0};
+    shape.end = {qreal(w - (dropdown ? 18 : 8)), h / 2.0};
+    shape.color = QColor(dropdown ? QStringLiteral("#52616b") : QStringLiteral("#333333"));
+    // Native menu previews use the same path with a slightly wider head aspect.
+    painter.fillPath(arrowPath(shape, 1.0, 0.6), shape.color);
+    if (dropdown)
+    {
+        const qreal midY = h / 2.0;
+        painter.setPen(QPen(QColor(QStringLiteral("#666666")), 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        painter.drawPolyline(QPolygonF{{qreal(w - 13), midY - 2}, {qreal(w - 9), midY + 2},
+                                       {qreal(w - 5), midY - 2}});
+    }
+    return QIcon(pix);
+}
+}
+
 QIcon makeColorSwatchIcon(const QColor &color)
 {
     QPixmap pix(22, 22);
@@ -75,32 +106,17 @@ QIcon makeLineStyleDropdownIcon(Qt::PenStyle style, int w, int h)
     QPainter p(&pix);
     p.setRenderHint(QPainter::Antialiasing, true);
 
-    QPen pen(QColor(QStringLiteral("#52616b")), 2.5);
-    if (style == Qt::DashLine)
-    {
-        pen.setStyle(Qt::CustomDashLine);
-        pen.setDashPattern({4, 3});
-    }
-    else if (style == Qt::DotLine)
-    {
-        pen.setStyle(Qt::CustomDashLine);
-        pen.setDashPattern({1.5, 2.5});
-    }
-    else if (style == Qt::DashDotLine)
-    {
-        pen.setStyle(Qt::CustomDashLine);
-        pen.setDashPattern({4, 2.5, 1.5, 2.5});
-    }
-    else
-    {
-        pen.setStyle(Qt::SolidLine);
-    }
+    const qreal midY = h / 2.0;
+    const qreal startX = 6;
+    const qreal endX = w - 16;
+
+    QPen pen(QColor(QStringLiteral("#52616b")), 2.4);
+    applyLineStyle(pen, style);
     p.setPen(pen);
-    p.drawLine(QPointF(6, h / 2.0), QPointF(32, h / 2.0));
+    p.drawLine(QPointF(startX, midY), QPointF(endX, midY));
 
     p.setPen(QPen(QColor(QStringLiteral("#666666")), 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    QPolygonF chevron{QPointF(w - 14, h / 2.0 - 2), QPointF(w - 10, h / 2.0 + 2),
-                      QPointF(w - 6, h / 2.0 - 2)};
+    QPolygonF chevron{QPointF(w - 12, midY - 2), QPointF(w - 8, midY + 2), QPointF(w - 4, midY - 2)};
     p.drawPolyline(chevron);
     p.end();
     return QIcon(pix);
@@ -108,72 +124,7 @@ QIcon makeLineStyleDropdownIcon(Qt::PenStyle style, int w, int h)
 
 QIcon makeArrowStyleDropdownIcon(core::ArrowStyle style, int w, int h)
 {
-    QPixmap pix(w, h);
-    pix.fill(Qt::transparent);
-    QPainter p(&pix);
-    p.setRenderHint(QPainter::Antialiasing, true);
-
-    const qreal midY = h / 2.0;
-    const qreal startX = 6;
-    const qreal endX = 32;
-
-    p.setPen(QPen(QColor(QStringLiteral("#52616b")), 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    p.drawLine(QPointF(startX, midY), QPointF(endX, midY));
-
-    const auto drawHead = [&](const QPointF &tip, qreal dir, bool hollow) {
-        QPainterPath path;
-        path.moveTo(tip);
-        path.lineTo(tip.x() - dir * 6, tip.y() - 4);
-        path.lineTo(tip.x() - dir * 6, tip.y() + 4);
-        path.closeSubpath();
-        if (hollow)
-        {
-            p.setPen(QPen(QColor(QStringLiteral("#52616b")), 1.5));
-            p.setBrush(Qt::white);
-        }
-        else
-        {
-            p.setPen(Qt::NoPen);
-            p.setBrush(QColor(QStringLiteral("#52616b")));
-        }
-        p.drawPath(path);
-    };
-
-    switch (style)
-    {
-    case core::ArrowStyle::None:
-        break;
-    case core::ArrowStyle::Flat:
-        p.setPen(QPen(QColor(QStringLiteral("#52616b")), 2.0));
-        p.drawLine(QPointF(endX, midY - 4), QPointF(endX, midY + 4));
-        break;
-    case core::ArrowStyle::End:
-        drawHead(QPointF(endX, midY), 1.0, false);
-        break;
-    case core::ArrowStyle::Start:
-        drawHead(QPointF(startX, midY), -1.0, false);
-        break;
-    case core::ArrowStyle::Both:
-        drawHead(QPointF(startX, midY), -1.0, false);
-        drawHead(QPointF(endX, midY), 1.0, false);
-        break;
-    case core::ArrowStyle::HollowEnd:
-        drawHead(QPointF(endX, midY), 1.0, true);
-        break;
-    case core::ArrowStyle::HollowStart:
-        drawHead(QPointF(startX, midY), -1.0, true);
-        break;
-    case core::ArrowStyle::HollowBoth:
-        drawHead(QPointF(startX, midY), -1.0, true);
-        drawHead(QPointF(endX, midY), 1.0, true);
-        break;
-    }
-
-    p.setPen(QPen(QColor(QStringLiteral("#666666")), 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    QPolygonF chevron{QPointF(w - 14, midY - 2), QPointF(w - 10, midY + 2), QPointF(w - 6, midY - 2)};
-    p.drawPolyline(chevron);
-    p.end();
-    return QIcon(pix);
+    return arrowIcon(core::startArrowHead(style), core::endArrowHead(style), w, h, true);
 }
 
 QIcon makeCurveStyleDropdownIcon(int curveStyle, int w, int h)
@@ -210,33 +161,35 @@ QIcon makeLineMenuItemIcon(Qt::PenStyle style, int w, int h)
     pix.fill(Qt::transparent);
     QPainter p(&pix);
     p.setRenderHint(QPainter::Antialiasing, true);
-    QPen pen(QColor(QStringLiteral("#333333")), 2.5);
-    if (style == Qt::DashLine)
-    {
-        pen.setStyle(Qt::CustomDashLine);
-        pen.setDashPattern({4, 3});
-    }
-    else if (style == Qt::DotLine)
-    {
-        pen.setStyle(Qt::CustomDashLine);
-        pen.setDashPattern({1.5, 2.5});
-    }
-    else if (style == Qt::DashDotLine)
-    {
-        pen.setStyle(Qt::CustomDashLine);
-        pen.setDashPattern({4, 2.5, 1.5, 2.5});
-    }
-    else
-    {
-        pen.setStyle(Qt::SolidLine);
-    }
+    QPen pen(QColor(QStringLiteral("#333333")), 2.4);
+    applyLineStyle(pen, style);
     p.setPen(pen);
-    p.drawLine(QPointF(6, h / 2.0), QPointF(w - 6, h / 2.0));
+    p.drawLine(QPointF(4, h / 2.0), QPointF(w - 4, h / 2.0));
     p.end();
     return QIcon(pix);
 }
 
-QIcon makeArrowMenuItemIcon(core::ArrowStyle style, int w, int h)
+QIcon makeStartArrowDropdownIcon(core::ArrowHead style, int w, int h)
+{
+    return arrowIcon(style, core::ArrowHead::None, w, h, true);
+}
+
+QIcon makeStartArrowMenuItemIcon(core::ArrowHead style, int w, int h)
+{
+    return arrowIcon(style, core::ArrowHead::None, w, h, false);
+}
+
+QIcon makeEndArrowDropdownIcon(core::ArrowHead style, int w, int h)
+{
+    return arrowIcon(core::ArrowHead::None, style, w, h, true);
+}
+
+QIcon makeEndArrowMenuItemIcon(core::ArrowHead style, int w, int h)
+{
+    return arrowIcon(core::ArrowHead::None, style, w, h, false);
+}
+
+QIcon makeToggleArrowIcon(bool active, int w, int h)
 {
     QPixmap pix(w, h);
     pix.fill(Qt::transparent);
@@ -244,62 +197,25 @@ QIcon makeArrowMenuItemIcon(core::ArrowStyle style, int w, int h)
     p.setRenderHint(QPainter::Antialiasing, true);
 
     const qreal midY = h / 2.0;
-    const qreal startX = 6;
-    const qreal endX = w - 6;
+    const QColor color = active ? QColor(QStringLiteral("#2889ed")) : QColor(QStringLiteral("#555555"));
+    p.setPen(QPen(color, 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.drawLine(QPointF(3, midY), QPointF(w - 5, midY));
 
-    p.setPen(QPen(QColor(QStringLiteral("#333333")), 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    p.drawLine(QPointF(startX, midY), QPointF(endX, midY));
-
-    const auto drawHead = [&](const QPointF &tip, qreal dir, bool hollow) {
-        QPainterPath path;
-        path.moveTo(tip);
-        path.lineTo(tip.x() - dir * 6, tip.y() - 4);
-        path.lineTo(tip.x() - dir * 6, tip.y() + 4);
-        path.closeSubpath();
-        if (hollow)
-        {
-            p.setPen(QPen(QColor(QStringLiteral("#333333")), 1.5));
-            p.setBrush(Qt::white);
-        }
-        else
-        {
-            p.setPen(Qt::NoPen);
-            p.setBrush(QColor(QStringLiteral("#333333")));
-        }
-        p.drawPath(path);
-    };
-
-    switch (style)
-    {
-    case core::ArrowStyle::None:
-        break;
-    case core::ArrowStyle::Flat:
-        p.setPen(QPen(QColor(QStringLiteral("#333333")), 2.0));
-        p.drawLine(QPointF(endX, midY - 4), QPointF(endX, midY + 4));
-        break;
-    case core::ArrowStyle::End:
-        drawHead(QPointF(endX, midY), 1.0, false);
-        break;
-    case core::ArrowStyle::Start:
-        drawHead(QPointF(startX, midY), -1.0, false);
-        break;
-    case core::ArrowStyle::Both:
-        drawHead(QPointF(startX, midY), -1.0, false);
-        drawHead(QPointF(endX, midY), 1.0, false);
-        break;
-    case core::ArrowStyle::HollowEnd:
-        drawHead(QPointF(endX, midY), 1.0, true);
-        break;
-    case core::ArrowStyle::HollowStart:
-        drawHead(QPointF(startX, midY), -1.0, true);
-        break;
-    case core::ArrowStyle::HollowBoth:
-        drawHead(QPointF(startX, midY), -1.0, true);
-        drawHead(QPointF(endX, midY), 1.0, true);
-        break;
-    }
+    QPainterPath path;
+    path.moveTo(w - 4, midY);
+    path.lineTo(w - 9, midY - 4);
+    path.lineTo(w - 9, midY + 4);
+    path.closeSubpath();
+    p.setPen(Qt::NoPen);
+    p.setBrush(color);
+    p.drawPath(path);
     p.end();
     return QIcon(pix);
+}
+
+QIcon makeArrowMenuItemIcon(core::ArrowStyle style, int w, int h)
+{
+    return arrowIcon(core::startArrowHead(style), core::endArrowHead(style), w, h, false);
 }
 
 QIcon makeMagnifierConnectorDropdownIcon(int mode, int w, int h)

@@ -6,6 +6,7 @@
 #include "ui/paste/paste_manager.h"
 #include "ui/paste/paste_window.h"
 #include "ui/snip/snip_overlay.h"
+#include "ui/recognition/ocr_overlay.h"
 #include "ui/snip/scroll_capture_panel.h"
 #include "ui/snip/scroll_capture_preview.h"
 #include "ui/clipboard_output.h"
@@ -571,10 +572,15 @@ void UiRegressionTest::preferencesProfessionalReferencePages()
     tabs->setCurrentIndex(7);
     QTest::qWait(20);
     QVERIFY(save(QStringLiteral("preferences-about.png")));
-    QVERIFY(dialog.findChild<QLabel *>(QStringLiteral("aboutLogo")));
-    QVERIFY(dialog.findChild<QPushButton *>(QStringLiteral("aboutOpenSourceButton")));
-    QVERIFY(dialog.findChild<QPushButton *>(QStringLiteral("aboutActivationButton")));
-    QVERIFY(dialog.findChild<QScrollArea *>(QStringLiteral("aboutSupportBrowser")));
+    QCOMPARE(dialog.windowTitle(), QStringLiteral("Snipaste 首选项"));
+    QVERIFY(dialog.findChild<QLabel *>(QStringLiteral("aboutName")));
+    QVERIFY(dialog.findChild<QLabel *>(QStringLiteral("aboutVersion")));
+    QVERIFY(!tabs->currentWidget()->findChild<QPushButton *>());
+    QVERIFY(!dialog.findChild<QLabel *>(QStringLiteral("aboutLogo")));
+    QVERIFY(!dialog.findChild<QLabel *>(QStringLiteral("aboutCopyright")));
+    QVERIFY(!dialog.findChild<QLabel *>(QStringLiteral("aboutBuiltWithQt")));
+    QVERIFY(!dialog.findChild<QLabel *>(QStringLiteral("aboutContact")));
+    QVERIFY(!dialog.findChild<QScrollArea *>(QStringLiteral("aboutSupportBrowser")));
     auto *customHotkey = dialog.findChild<QKeySequenceEdit *>(QStringLiteral("hotkeys/custom"));
     auto *trayCommand = dialog.findChild<QLineEdit *>(QStringLiteral("trayCommand0"));
     QVERIFY(customHotkey && trayCommand);
@@ -1262,7 +1268,15 @@ void UiRegressionTest::proSizeRefreshAndOutput()
     QTest::mouseClick(overlay->findChild<QToolButton *>(QStringLiteral("文字识别")), Qt::LeftButton);
     QCOMPARE(ocr.count(), 1);
     QVERIFY(!qvariant_cast<QImage>(ocr.first().first()).isNull());
+    QVERIFY(overlay->isVisible());
+    auto *ocrOverlay = overlay->findChild<ui::OcrOverlay *>();
+    QVERIFY(ocrOverlay && ocrOverlay->isVisible());
+    QTest::keyClick(ocrOverlay, Qt::Key_Escape);
+    QVERIFY(overlay->isVisible());
+    QVERIFY(overlay->findChild<QFrame *>(QStringLiteral("captureToolbar"))->isVisible());
+    overlay->close();
     QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    QVERIFY(overlay.isNull());
 }
 
 void UiRegressionTest::proHistoryAndSelectionShortcuts()
@@ -1547,6 +1561,7 @@ void UiRegressionTest::annotationStylesAndEffectsSurviveUndo()
     QVERIFY(rotated != first);
     QTest::keyClick(&canvas, Qt::Key_Left, Qt::AltModifier);
     QCOMPARE(canvas.renderedImage(), first);
+    QTest::keyClick(&canvas, Qt::Key_Escape); // Edit defaults after deselecting the existing shape.
     canvas.setPenColor(Qt::blue);
     canvas.setPenWidth(8);
     QCOMPARE(canvas.renderedImage(), first); // Styling a new tool must not recolor old marks.
@@ -1937,7 +1952,7 @@ void UiRegressionTest::brushesContinueOverExistingStrokes()
     ui::AnnotationCanvas canvas(source);
     canvas.resize(source.size());
     canvas.show();
-    canvas.setAutoSelectOnCreation(true);
+    canvas.setAutoSelectOnCreation(false); // Exercise continuous drawing without selecting the new region.
     canvas.setTool(ui::AnnotationCanvas::Tool(tool));
     canvas.setEffectShape(ui::AnnotationCanvas::EffectShape(shape));
     canvas.setPenWidth(24);

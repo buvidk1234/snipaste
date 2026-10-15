@@ -1,4 +1,5 @@
 #pragma once
+#include "core/annotation/annotation_types.h"
 #include <QColor>
 #include <QFrame>
 #include <QPointer>
@@ -27,6 +28,8 @@ class AnnotationOptions final : public QFrame
     QWidget *createMarkerPage();
     QWidget *createMosaicPage();
     QWidget *createTextPage();
+    void syncTextControls();
+    void syncStyleControls();
     QWidget *createNumberPage();
     QWidget *createMagnifierPage();
     QWidget *createEraserPage();
@@ -52,5 +55,9 @@ class AnnotationOptions final : public QFrame
     QColor m_currentAnnotationColor = QColor(QStringLiteral("#ed1c24"));
     QToolButton *m_lineStyleButton = nullptr;
     QToolButton *m_arrowStyleButton = nullptr;
+    QToolButton *m_startArrowButton = nullptr;
+    QToolButton *m_endArrowButton = nullptr;
+    QToolButton *m_toggleArrowButton = nullptr;
+    core::ArrowStyle m_lastArrowStyle = core::ArrowStyle::End;
 };
 } // namespace snipaste::ui

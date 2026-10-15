@@ -8,8 +8,13 @@
 #include "ui/tray/tray_controller.h"
 #include "ui/update/update_controller.h"
 #include <QObject>
+#include <memory>
 class QApplication;
 class QCommandLineParser;
+namespace snipaste::ui
+{
+class PreferencesDialog;
+}
 namespace snipaste::platform
 {
 class SingleInstance;
@@ -22,6 +27,7 @@ class ApplicationController final : public QObject
 {
   public:
     ApplicationController(QApplication &app, core::ConfigStore &config, platform::SingleInstance &instance);
+    ~ApplicationController() override;
     void start(const QStringList &arguments);
     bool dispatchArguments(const QStringList &arguments, bool quitAfterFlow = true);
 
@@ -46,5 +52,6 @@ class ApplicationController final : public QObject
     ui::TrayController m_tray;
     QString m_lastPastedFileClipboard;
     QString m_pasteStatePath;
+    std::unique_ptr<ui::PreferencesDialog> m_preferences;
 };
 } // namespace snipaste::app

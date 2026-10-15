@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.28)
 
 project(snipaste
-    VERSION 0.1.1
+    VERSION 0.1.2
     DESCRIPTION "Open source screenshot, pin and annotation tool"
     LANGUAGES CXX
 )
@@ -12,13 +12,7 @@ if(SNIPASTE_RELEASE_VERSION STREQUAL "")
 endif()
 set(SNIPASTE_UPDATE_REPOSITORY "buvidk1234/snipaste" CACHE STRING "GitHub repository hosting update releases")
 
-if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja")
-    # CMake can misdecode the localized MSVC /showIncludes prefix when the
-    # configure process uses UTF-8.  Keep Ninja's dependency scanner quiet
-    # while retaining compiler dependency tracking for the Chinese toolchain.
-    set(CMAKE_CXX_CL_SHOWINCLUDES_PREFIX "注意: 包含文件:  ")
-    set(CMAKE_CL_SHOWINCLUDES_PREFIX "注意: 包含文件:  ")
-endif()
+include(cmake/MsvcNinjaDependencies.cmake)
 
 if(APPLE)
     # Carbon, AppKit, CoreGraphics, Accessibility and Vision are exposed
@@ -41,6 +35,9 @@ endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+# The project uses headers, not C++20 modules. Avoid a separate compiler
+# dependency-scan invocation for each translation unit.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
@@ -61,6 +58,7 @@ set(SNIPASTE_CORE_SOURCES
     src/core/scroll_stitcher.cpp
     src/core/scroll_frame_matcher.cpp
     src/core/recognition/ocr_service.cpp
+    src/core/recognition/ocr_image.cpp
     src/core/recognition/barcode_service.cpp
     src/core/update/release_info.cpp
     src/core/update/github_update_client.cpp
@@ -80,6 +78,7 @@ set(SNIPASTE_UI_SOURCES
     src/ui/annotation/annotation_options_effects.cpp
     src/ui/annotation/annotation_options_text.cpp
     src/ui/annotation/annotation_options.cpp
+    src/ui/annotation/annotation_options_sync.cpp
     src/ui/annotation/annotation_toolbar_icons.cpp
     src/ui/paste/paste_manager_persistence.cpp
     src/ui/paste/paste_window_state.cpp
@@ -97,6 +96,9 @@ set(SNIPASTE_UI_SOURCES
     src/ui/paste/paste_manager.cpp
     src/ui/annotation/annotation_dialog.cpp
     src/ui/annotation/annotation_canvas.cpp
+    src/ui/annotation/annotation_canvas_style.cpp
+    src/ui/annotation/annotation_canvas_selection.cpp
+    src/ui/annotation/annotation_selection_geometry.cpp
     src/ui/annotation/annotation_canvas_interaction.cpp
     src/ui/annotation/annotation_canvas_render.cpp
     src/ui/annotation/annotation_renderer.cpp
@@ -119,6 +121,8 @@ set(SNIPASTE_UI_SOURCES
     src/ui/snip/snip_toolbar.cpp
     src/ui/snip/snip_controls.cpp
     src/ui/snip/snip_selection.cpp
+    src/ui/snip/snip_ocr.cpp
+    src/ui/recognition/ocr_overlay.cpp
     src/ui/snip/window_capture_overlay.cpp
     src/ui/snip/scroll_capture_panel.cpp
     src/ui/snip/scroll_capture_preview.cpp
@@ -160,6 +164,7 @@ set(SNIPASTE_CORE_HEADERS
     src/core/scroll_frame_matcher.h
     src/core/scroll_capture_stability.h
     src/core/recognition/ocr_service.h
+    src/core/recognition/ocr_image.h
     src/core/recognition/barcode_service.h
     src/core/update/release_info.h
     src/core/update/github_update_client.h
@@ -198,6 +203,7 @@ set(SNIPASTE_UI_HEADERS
     src/ui/preferences/preferences_dialog.h
     src/ui/preferences/appearance_settings.h
     src/ui/snip/snip_overlay.h
+    src/ui/recognition/ocr_overlay.h
     src/ui/snip/capture_icons.h
     src/ui/snip/window_capture_overlay.h
     src/ui/snip/scroll_capture_panel.h
@@ -206,6 +212,7 @@ set(SNIPASTE_UI_HEADERS
     src/ui/update/update_controller.h
     src/ui/update/update_installer.h
     src/ui/annotation/annotation_canvas.h
+    src/ui/annotation/annotation_selection_geometry.h
     src/ui/annotation/annotation_renderer.h
     src/ui/annotation/annotation_effect_cache.h
     src/ui/annotation/annotation_stroke_preview.h
@@ -218,13 +225,6 @@ if(APPLE)
         src/platform/macos/system.h
     )
 endif()
-
-set(SNIPASTE_HEADERS
-    ${SNIPASTE_APP_HEADERS}
-    ${SNIPASTE_CORE_HEADERS}
-    ${SNIPASTE_PLATFORM_HEADERS}
-    ${SNIPASTE_UI_HEADERS}
-)
 
 set(SNIPASTE_APP_SOURCES
     src/app/application_arguments.cpp
@@ -310,20 +310,6 @@ target_include_directories(snipaste_app PUBLIC src)
 target_link_libraries(snipaste_app PUBLIC snipaste_ui)
 qt_add_executable(snipaste src/app/main.cpp)
 
-if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja")
-    # Localized /showIncludes output can disagree with Ninja's detected prefix.
-    # Keep explicit project-header dependencies so an incremental build never
-    # mixes object files compiled against different class layouts.
-    set(snipaste_header_dependencies)
-    foreach(header IN LISTS SNIPASTE_HEADERS)
-        list(APPEND snipaste_header_dependencies "${CMAKE_CURRENT_SOURCE_DIR}/${header}")
-    endforeach()
-    set_property(SOURCE src/app/main.cpp ${SNIPASTE_APP_SOURCES} ${SNIPASTE_CORE_SOURCES}
-        ${SNIPASTE_PLATFORM_SOURCES} ${SNIPASTE_UI_SOURCES} tests/ui_regression_test.cpp
-        tests/snip_performance_probe.cpp tests/annotation_drawing_probe.cpp tests/annotation_render_test.cpp
-        APPEND PROPERTY OBJECT_DEPENDS "${snipaste_header_dependencies}")
-endif()
-
 if(WIN32)
     # This is a tray application. Do not create a console window when launched
     # by double-clicking the executable in Explorer.
@@ -396,10 +382,6 @@ if(SNIPASTE_BUILD_TESTS)
     qt_add_executable(snipaste_application_tests tests/application_controller_test.cpp)
     target_link_libraries(snipaste_application_tests PRIVATE snipaste_app Qt6::Test)
     snipaste_apply_compile_options(snipaste_application_tests)
-    if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja")
-        set_property(SOURCE tests/application_controller_test.cpp
-            APPEND PROPERTY OBJECT_DEPENDS "${snipaste_header_dependencies}")
-    endif()
     add_test(NAME application_controller COMMAND snipaste_application_tests)
     set_tests_properties(application_controller PROPERTIES
         ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
@@ -435,6 +417,39 @@ if(SNIPASTE_BUILD_TESTS)
     )
     target_include_directories(snipaste_ui_tests PRIVATE src)
     target_link_libraries(snipaste_ui_tests PRIVATE snipaste_ui Qt6::Test)
+    qt_add_executable(snipaste_ocr_tests tests/ocr_overlay_test.cpp)
+    target_link_libraries(snipaste_ocr_tests PRIVATE snipaste_ui Qt6::Test)
+    snipaste_apply_compile_options(snipaste_ocr_tests)
+    add_test(NAME ocr_overlay COMMAND snipaste_ocr_tests
+        -o "${CMAKE_CURRENT_BINARY_DIR}/ocr-test-results.txt,txt")
+    set_tests_properties(ocr_overlay PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
+        TIMEOUT 60)
+    if(WIN32)
+        set_property(TEST ocr_overlay APPEND PROPERTY ENVIRONMENT "QT_QPA_FONTDIR=$ENV{WINDIR}/Fonts")
+    endif()
+    qt_add_executable(snipaste_annotation_selection_tests tests/annotation_selection_test.cpp)
+    target_link_libraries(snipaste_annotation_selection_tests PRIVATE snipaste_ui Qt6::Test)
+    snipaste_apply_compile_options(snipaste_annotation_selection_tests)
+    add_test(NAME annotation_selection COMMAND snipaste_annotation_selection_tests
+        -o "${CMAKE_CURRENT_BINARY_DIR}/annotation-selection-test-results.txt,txt")
+    set_tests_properties(annotation_selection PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
+        TIMEOUT 60)
+    qt_add_executable(snipaste_annotation_text_tests tests/annotation_text_test.cpp)
+    target_link_libraries(snipaste_annotation_text_tests PRIVATE snipaste_ui Qt6::Test)
+    snipaste_apply_compile_options(snipaste_annotation_text_tests)
+    add_test(NAME annotation_text COMMAND snipaste_annotation_text_tests
+        -o "${CMAKE_CURRENT_BINARY_DIR}/annotation-text-test-results.txt,txt")
+    set_tests_properties(annotation_text PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
+        TIMEOUT 60)
+    if(WIN32)
+        set_property(TEST annotation_text APPEND PROPERTY ENVIRONMENT "QT_QPA_FONTDIR=$ENV{WINDIR}/Fonts")
+    endif()
     qt_add_executable(snipaste_annotation_render_tests tests/annotation_render_test.cpp)
     target_link_libraries(snipaste_annotation_render_tests PRIVATE snipaste_ui Qt6::Test)
     snipaste_apply_compile_options(snipaste_annotation_render_tests)
@@ -463,12 +478,6 @@ if(SNIPASTE_BUILD_TESTS)
         target_link_libraries(snipaste_capture_probe PRIVATE snipaste_platform)
         if(MSVC)
             snipaste_apply_compile_options(snipaste_capture_probe)
-            # The probe calls the public capture-target API directly.  Keep
-            # its object file tied to the same project headers as the main
-            # targets so removed/changed overloads cannot leave a stale
-            # Release object behind during an incremental build.
-            set_property(SOURCE tests/capture_target_probe.cpp
-                APPEND PROPERTY OBJECT_DEPENDS "${snipaste_header_dependencies}")
         endif()
     endif()
     if(MSVC)

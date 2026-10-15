@@ -1,9 +1,12 @@
 #include "core/recognition/ocr_service.h"
+#include "core/recognition/ocr_image.h"
 
 #include <QDir>
+#include <QPainter>
 #include <QProcess>
 #include <QStandardPaths>
 #include <QTemporaryFile>
+#include <QTransform>
 
 #include <exception>
 
@@ -75,6 +78,91 @@ QString tesseractLanguage(const QString &language)
 }
 
 #ifdef Q_OS_WIN
+struct WindowsOcrImage {
+    QImage pixels;
+    QSize contentSize;
+    int padding = 16;
+};
+
+WindowsOcrImage prepareWindowsOcrImage(const QImage &source, int maxDimension)
+{
+    WindowsOcrImage prepared;
+    QImage image = source.convertToFormat(QImage::Format_RGB32);
+    const int available = maxDimension - 2 * prepared.padding;
+    const qreal scale = qMin<qreal>(1, qreal(available) / qMax(image.width(), image.height()));
+    const QSize target(qMax(1, qRound(image.width() * scale)), qMax(1, qRound(image.height() * scale)));
+    if (target != image.size())
+        image = image.scaled(target, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    image.setDevicePixelRatio(1);
+    prepared.contentSize = image.size();
+    prepared.pixels = QImage(image.width() + prepared.padding * 2,
+                             image.height() + prepared.padding * 2, QImage::Format_RGB32);
+    prepared.pixels.fill(Qt::white);
+    QPainter painter(&prepared.pixels);
+    painter.drawImage(prepared.padding, prepared.padding, image);
+    return prepared;
+}
+
+OcrResult recognizeWindowsImage(const QImage &image, int maxDimension,
+                               const winrt::Windows::Media::Ocr::OcrEngine &engine)
+{
+    const auto prepared = prepareWindowsOcrImage(image, maxDimension);
+    const QImage &rgba = prepared.pixels;
+    const auto writer = winrt::Windows::Storage::Streams::DataWriter();
+    const auto *begin = reinterpret_cast<const uint8_t *>(rgba.constBits());
+    writer.WriteBytes(winrt::array_view<const uint8_t>(begin, begin + rgba.sizeInBytes()));
+    const auto bitmap = winrt::Windows::Graphics::Imaging::SoftwareBitmap::CreateCopyFromBuffer(
+        writer.DetachBuffer(), winrt::Windows::Graphics::Imaging::BitmapPixelFormat::Bgra8,
+        rgba.width(), rgba.height(), winrt::Windows::Graphics::Imaging::BitmapAlphaMode::Ignore);
+    const auto ocr = engine.RecognizeAsync(bitmap).get();
+    QTransform orientation;
+    if (const auto angle = ocr.TextAngle()) {
+        // Windows reports word rectangles in its deskewed coordinate space.
+        // Apply the reported rotation about the OCR bitmap's center before
+        // removing padding or mapping back to the original source pixels.
+        orientation.translate(rgba.width() / 2.0, rgba.height() / 2.0);
+        orientation.rotate(angle.Value());
+        orientation.translate(-rgba.width() / 2.0, -rgba.height() / 2.0);
+    }
+    OcrResult result;
+    const qreal sx = qreal(image.width()) / prepared.contentSize.width();
+    const qreal sy = qreal(image.height()) / prepared.contentSize.height();
+    int lineIndex = 0;
+    for (const auto &line : ocr.Lines()) {
+        const QString text = QString::fromWCharArray(line.Text().c_str());
+        if (text.isEmpty())
+            continue;
+        if (!result.text.isEmpty())
+            result.text += QChar('\n');
+        const qsizetype lineStart = result.text.size();
+        result.text += text;
+        qsizetype searchFrom = 0;
+        for (const auto &word : line.Words()) {
+            const QString wordText = QString::fromWCharArray(word.Text().c_str());
+            if (wordText.isEmpty())
+                continue;
+            const qsizetype offset = text.indexOf(wordText, searchFrom);
+            if (offset < 0)
+                continue;
+            const auto rect = word.BoundingRect();
+            const QRectF positioned = orientation.mapRect(QRectF(rect.X, rect.Y, rect.Width, rect.Height));
+            const QRectF bounds((positioned.x() - prepared.padding) * sx,
+                                (positioned.y() - prepared.padding) * sy,
+                                positioned.width() * sx, positioned.height() * sy);
+            result.boxes.append({bounds.intersected(QRectF(image.rect())),
+                                 lineStart + offset, wordText.size(), lineIndex});
+            searchFrom = offset + wordText.size();
+        }
+        ++lineIndex;
+    }
+    if (result.text.isEmpty())
+        result.text = QString::fromWCharArray(ocr.Text().c_str()).trimmed();
+    result.success = !result.text.isEmpty();
+    if (!result.success)
+        result.error = QStringLiteral("没有识别到文字");
+    return result;
+}
+
 OcrResult recognizeWithWindowsOcr(const QImage &image, const QString &language)
 {
     // QtConcurrent runs this function on a worker thread. That thread does
@@ -93,32 +181,7 @@ OcrResult recognizeWithWindowsOcr(const QImage &image, const QString &language)
 
     OcrResult result;
     try {
-        QImage rgba = image.convertToFormat(QImage::Format_RGB32);
-        const uint32_t maxDimension = winrt::Windows::Media::Ocr::OcrEngine::MaxImageDimension();
-        if (maxDimension > 0
-            && (rgba.width() > static_cast<int>(maxDimension)
-                || rgba.height() > static_cast<int>(maxDimension))) {
-            rgba = rgba.scaled(static_cast<int>(maxDimension),
-                               static_cast<int>(maxDimension),
-                               Qt::KeepAspectRatio,
-                               Qt::SmoothTransformation);
-        }
-        if (rgba.isNull() || rgba.width() <= 0 || rgba.height() <= 0) {
-            result.error = QStringLiteral("无法转换 OCR 图像");
-        } else {
-            const auto writer = winrt::Windows::Storage::Streams::DataWriter();
-            const auto *begin = reinterpret_cast<const uint8_t *>(rgba.constBits());
-            const auto *end = begin + rgba.sizeInBytes();
-            writer.WriteBytes(winrt::array_view<const uint8_t>(begin, end));
-            const auto buffer = writer.DetachBuffer();
-
-            const auto bitmap = winrt::Windows::Graphics::Imaging::SoftwareBitmap::CreateCopyFromBuffer(
-                buffer,
-                winrt::Windows::Graphics::Imaging::BitmapPixelFormat::Bgra8,
-                rgba.width(),
-                rgba.height(),
-                winrt::Windows::Graphics::Imaging::BitmapAlphaMode::Ignore);
-
+        {
             const QString requestedLanguage = normalizedOcrLanguage(language);
             auto engine = winrt::Windows::Media::Ocr::OcrEngine{nullptr};
             if (!requestedLanguage.isEmpty()) {
@@ -167,17 +230,25 @@ OcrResult recognizeWithWindowsOcr(const QImage &image, const QString &language)
                 }
             }
             if (!engine) {
-                result.error = QStringLiteral(
-                    "Windows 未安装可用的 OCR 语言包。请在 Windows 设置中安装中文或英文语言包，"
-                    "或将 Tesseract 加入 PATH。");
+                if (result.error.isEmpty())
+                    result.error = QStringLiteral(
+                        "Windows 未安装可用的 OCR 语言包。请在 Windows 设置中安装中文或英文语言包，"
+                        "或将 Tesseract 加入 PATH。");
             } else {
-                const auto ocr = engine.RecognizeAsync(bitmap).get();
-                const QString text = QString::fromWCharArray(ocr.Text().c_str()).trimmed();
-                if (text.isEmpty())
-                    result.error = QStringLiteral("没有识别到文字");
-                else {
-                    result.success = true;
-                    result.text = text;
+                const auto limit = winrt::Windows::Media::Ocr::OcrEngine::MaxImageDimension();
+                const int maxDimension = limit > 0 ? int(limit) : 2600;
+                const QImage source = image.convertToFormat(QImage::Format_RGB32);
+                result = recognizeWindowsImage(source, maxDimension, engine);
+                const QImage enhanced = detail::enhanceOcrContrast(source);
+                if (enhanced.cacheKey() != source.cacheKey()) {
+                    // Retain the original pass for high-contrast words. A
+                    // second system-OCR pass only repairs dim text regions.
+                    try {
+                        const auto recovered = recognizeWindowsImage(enhanced, maxDimension, engine);
+                        result = detail::mergeLowContrastText(source, result, recovered);
+                    } catch (const winrt::hresult_error &) {
+                        // An optional retry cannot discard a usable result.
+                    }
                 }
             }
         }
@@ -189,8 +260,12 @@ OcrResult recognizeWithWindowsOcr(const QImage &image, const QString &language)
                            .arg(QString::fromLocal8Bit(error.what()));
     }
 
-    if (initializedApartment)
+    if (initializedApartment) {
+        // Cached activation factories must not outlive the last COM apartment.
+        // The next OCR request can run after this worker's apartment is gone.
+        winrt::clear_factory_cache();
         winrt::uninit_apartment();
+    }
     return result;
 }
 #endif
@@ -213,7 +288,7 @@ OcrResult recognizeWithTesseract(const QImage &image, const QString &language)
     QProcess process;
     process.setProgram(executable);
     process.setArguments({inputFile.fileName(), QStringLiteral("stdout"),
-                          QStringLiteral("-l"), tesseractLanguage(language)});
+                          QStringLiteral("-l"), tesseractLanguage(language), QStringLiteral("tsv")});
     process.start();
     if (!process.waitForStarted(1000))
         return {false, {}, QStringLiteral("无法启动 Tesseract OCR")};
@@ -228,13 +303,48 @@ OcrResult recognizeWithTesseract(const QImage &image, const QString &language)
                 error.isEmpty() ? QStringLiteral("Tesseract OCR 执行失败") : error};
     }
 
-    const QString text = QString::fromLocal8Bit(process.readAllStandardOutput()).trimmed();
-    if (text.isEmpty())
-        return {false, {}, QStringLiteral("没有识别到文字")};
-    return {true, text, {}};
+    return OcrService::parseTesseractTsv(process.readAllStandardOutput());
 }
 
 } // namespace
+
+OcrResult OcrService::parseTesseractTsv(const QByteArray &data)
+{
+    OcrResult result;
+    QByteArray previousLine;
+    int lineIndex = -1;
+    for (const QByteArray &row : data.split('\n')) {
+        const auto columns = row.trimmed().split('\t');
+        if (columns.size() < 12 || columns[0] != "5")
+            continue;
+        const QString word = QString::fromUtf8(columns[11]).trimmed();
+        bool xOk = false, yOk = false, widthOk = false, heightOk = false;
+        const int x = columns[6].toInt(&xOk), y = columns[7].toInt(&yOk);
+        const int width = columns[8].toInt(&widthOk), height = columns[9].toInt(&heightOk);
+        if (word.isEmpty() || !xOk || !yOk || !widthOk || !heightOk || width <= 0 || height <= 0)
+            continue;
+        const QByteArray line = columns[1] + '/' + columns[2] + '/' + columns[3] + '/' + columns[4];
+        if (line != previousLine) {
+            if (!result.text.isEmpty())
+                result.text += QChar('\n');
+            previousLine = line;
+            ++lineIndex;
+        } else {
+            // Tesseract separates CJK words too; those separators are not
+            // spaces in the source language.
+            const auto cjk = [](QChar ch) { return ch.unicode() >= 0x2e80 && ch.unicode() <= 0x9fff; };
+            if (!cjk(result.text.back()) || !cjk(word.front()))
+                result.text += QChar(' ');
+        }
+        const qsizetype start = result.text.size();
+        result.text += word;
+        result.boxes.append({QRectF(x, y, width, height), start, word.size(), lineIndex});
+    }
+    result.success = !result.text.isEmpty();
+    if (!result.success)
+        result.error = QStringLiteral("没有识别到文字");
+    return result;
+}
 
 OcrResult OcrService::recognize(const QImage &image,
                                 const QString &engine,

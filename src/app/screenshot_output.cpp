@@ -14,7 +14,6 @@
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QFutureWatcher>
 #include <QMessageBox>
 #include <QProcess>
 #include <QStandardPaths>
@@ -22,7 +21,6 @@
 #include <QTimer>
 #include <QToolTip>
 #include <QUuid>
-#include <QtConcurrent/QtConcurrentRun>
 
 namespace snipaste::app
 {
@@ -249,36 +247,4 @@ void ScreenshotOutput::execute(const QImage &image, const QString &spec)
         if (isExec(raw.trimmed()))
             runOutput(raw.trimmed());
 }
-void ScreenshotOutput::recognizeText(const QImage &image)
-{
-    const QString ocrEngine =
-        m_config.value(QStringLiteral("output/ocrEngine"), QStringLiteral("系统自带")).toString();
-    const QString ocrLanguage =
-        m_config.value(QStringLiteral("output/ocrLanguage"), QStringLiteral("系统默认")).toString();
-    const bool playSound = m_config.value(QStringLiteral("output/ocrSound"), true).toBool();
-    const QString soundFile =
-        m_config.value(QStringLiteral("capture/soundFile"), QStringLiteral("sound/snip.wav")).toString();
-    auto *watcher = new QFutureWatcher<snipaste::core::OcrResult>(qApp);
-    QObject::connect(watcher, &QFutureWatcher<snipaste::core::OcrResult>::finished, watcher,
-                     [watcher, playSound, soundFile] {
-                         const snipaste::core::OcrResult result = watcher->result();
-                         watcher->deleteLater();
-                         if (result.success)
-                         {
-                             QApplication::clipboard()->setText(result.text);
-                             if (playSound)
-                                 playConfiguredSound(soundFile);
-                             QMessageBox::information(nullptr, QStringLiteral("OCR \u7ed3\u679c"),
-                                                      result.text);
-                         }
-                         else
-                         {
-                             QMessageBox::warning(nullptr, QStringLiteral("OCR \u5931\u8d25"), result.error);
-                         }
-                     });
-    watcher->setFuture(QtConcurrent::run([image, ocrEngine, ocrLanguage] {
-        return snipaste::core::OcrService::recognize(image, ocrEngine, ocrLanguage);
-    }));
-}
-
 } // namespace snipaste::app

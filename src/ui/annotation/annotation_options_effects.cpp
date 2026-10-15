@@ -102,6 +102,7 @@ QWidget *AnnotationOptions::createMosaicPage()
     });
 
     auto *sliderEffect = new TickSlider(Qt::Horizontal, pageMosaic);
+    sliderEffect->setObjectName(QStringLiteral("annotationEffectSize"));
     sliderEffect->setRange(2, 40);
     sliderEffect->setValue(6);
     sliderEffect->setFixedSize(80, 24);
@@ -143,6 +144,7 @@ QWidget *AnnotationOptions::createMagnifierPage()
     magShapeGroup->setExclusive(true);
 
     auto *btnMagRect = new QToolButton(pageMagnifier);
+    btnMagRect->setObjectName(QStringLiteral("annotationMagnifierRectangle"));
     btnMagRect->setIcon(captureIcon(CaptureIcon::Rectangle));
     btnMagRect->setFixedSize(24, 24);
     btnMagRect->setCheckable(true);
@@ -153,6 +155,7 @@ QWidget *AnnotationOptions::createMagnifierPage()
     layoutMagnifier->addWidget(btnMagRect);
 
     auto *btnMagEllipse = new QToolButton(pageMagnifier);
+    btnMagEllipse->setObjectName(QStringLiteral("annotationMagnifierEllipse"));
     btnMagEllipse->setIcon(captureIcon(CaptureIcon::Ellipse));
     btnMagEllipse->setFixedSize(24, 24);
     btnMagEllipse->setCheckable(true);
@@ -190,6 +193,7 @@ QWidget *AnnotationOptions::createMagnifierPage()
     layoutMagnifier->addWidget(makeSeparator(pageMagnifier));
 
     auto *btnMagCutout = new QToolButton(pageMagnifier);
+    btnMagCutout->setObjectName(QStringLiteral("annotationMagnifierCutout"));
     btnMagCutout->setIcon(captureIcon(CaptureIcon::MagnifierCutout));
     btnMagCutout->setFixedSize(24, 24);
     btnMagCutout->setCheckable(true);
@@ -220,6 +224,7 @@ QWidget *AnnotationOptions::createMagnifierPage()
     layoutMagnifier->addWidget(dotLabel);
 
     auto *sliderMagZoom = new TickSlider(Qt::Horizontal, pageMagnifier);
+    sliderMagZoom->setObjectName(QStringLiteral("annotationMagnification"));
     sliderMagZoom->setRange(120, 400);
     sliderMagZoom->setValue(200);
     sliderMagZoom->setFixedSize(66, 24);
@@ -227,6 +232,7 @@ QWidget *AnnotationOptions::createMagnifierPage()
     layoutMagnifier->addWidget(sliderMagZoom);
 
     auto *labelZoomVal = new QLabel(QStringLiteral("2"), pageMagnifier);
+    labelZoomVal->setObjectName(QStringLiteral("annotationMagnificationValue"));
     labelZoomVal->setFixedSize(30, 24);
     labelZoomVal->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
     labelZoomVal->setStyleSheet(QStringLiteral("QLabel { color: #222222; font-size: 11px; font-family: "

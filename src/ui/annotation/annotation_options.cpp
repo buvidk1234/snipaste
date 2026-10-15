@@ -58,37 +58,43 @@ QToolButton *AnnotationOptions::makeWidthPreset(QWidget *parent, int initialWidt
 
 QToolButton *AnnotationOptions::makeLineStyleDropdown(QWidget *parent)
 {
-
     auto *btn = new QToolButton(parent);
     btn->setObjectName(QStringLiteral("annotationLineStyle"));
     btn->setStyleSheet(dropdownButtonStyle());
-    btn->setFixedSize(54, 24);
-    btn->setToolTip(QStringLiteral("线条样式（实线、虚线、点线、点划线）"));
+    btn->setFixedSize(72, 24);
+    btn->setToolTip(QStringLiteral("线条样式"));
     btn->setPopupMode(QToolButton::InstantPopup);
-    btn->setIcon(makeLineStyleDropdownIcon(Qt::SolidLine));
-    btn->setIconSize(QSize(50, 20));
+    btn->setIcon(makeLineStyleDropdownIcon(Qt::SolidLine, 68, 20));
+    btn->setIconSize(QSize(68, 20));
     m_lineStyleButton = btn;
 
     auto *menu = new QMenu(btn);
-    menu->setStyleSheet(QStringLiteral("QMenu { background: white; border: 1px solid #c4c9cf; padding: 2px; }"
-                                       "QMenu::item { padding: 4px 8px; }"
-                                       "QMenu::item:selected { background: #d6e8fa; }"));
+    menu->setStyleSheet(
+        QStringLiteral("QMenu { background: #ffffff; border: 1px solid #7f7f7f; border-radius: 1px; padding: 2px; icon-size: 64px; }"
+                       "QMenu::item { min-width: 66px; max-width: 66px; height: 26px; margin: 1px 0px; padding: 0px; border: 1px solid transparent; border-radius: 2px; }"
+                       "QMenu::item:hover { background: #cde8ff; border: 1px solid #2889ed; }"
+                       "QMenu::item:selected { background: #a3d2ff; border: 1px solid #1c85e8; }"
+                       "QMenu::indicator { width: 0px; height: 0px; }"));
+    menu->setFixedWidth(72);
     const QList<QPair<QString, Qt::PenStyle>> styles{
         {QStringLiteral("实线"), Qt::SolidLine},
         {QStringLiteral("虚线"), Qt::DashLine},
         {QStringLiteral("点线"), Qt::DotLine},
         {QStringLiteral("点划线"), Qt::DashDotLine},
+        {QStringLiteral("双点划线"), Qt::DashDotDotLine},
     };
     for (const auto &s : styles)
     {
-        auto *action = menu->addAction(makeLineMenuItemIcon(s.second), QString());
+        auto *action = menu->addAction(makeLineMenuItemIcon(s.second, 64, 22), QString());
         action->setCheckable(true);
+        action->setData(int(s.second));
+        action->setToolTip(s.first);
         if (s.second == Qt::SolidLine)
             action->setChecked(true);
         connect(action, &QAction::triggered, this, [this, btn, menu, action, s] {
             if (m_canvas)
                 m_canvas->setPenStyle(s.second);
-            btn->setIcon(makeLineStyleDropdownIcon(s.second));
+            btn->setIcon(makeLineStyleDropdownIcon(s.second, 68, 20));
             for (auto *other : menu->actions())
                 other->setChecked(other == action);
         });
@@ -367,17 +373,11 @@ void AnnotationOptions::setCanvas(AnnotationCanvas *canvas)
     connect(m_canvas, &AnnotationCanvas::penWidthChanged, this,
             &AnnotationOptions::updateDynamicWidthButtons);
     connect(m_canvas, &AnnotationCanvas::penColorChanged, this, &AnnotationOptions::updateAllColorWatchers);
-    connect(m_canvas, &AnnotationCanvas::penStyleChanged, this, [this](Qt::PenStyle style) {
-        if (m_lineStyleButton)
-            m_lineStyleButton->setIcon(makeLineStyleDropdownIcon(style));
-    });
-    connect(m_canvas, &AnnotationCanvas::arrowStyleChanged, this, [this](AnnotationCanvas::ArrowStyle style) {
-        if (m_arrowStyleButton)
-            m_arrowStyleButton->setIcon(makeArrowStyleDropdownIcon(style));
-    });
-    m_canvas->setPenColor(m_currentAnnotationColor);
-    updateDynamicWidthButtons(m_canvas->penWidth());
-    updateAllColorWatchers(m_currentAnnotationColor);
+    connect(m_canvas, &AnnotationCanvas::textStyleChanged, this, &AnnotationOptions::syncTextControls);
+    connect(m_canvas, &AnnotationCanvas::annotationStyleChanged, this, &AnnotationOptions::syncStyleControls);
+    connect(m_canvas, &AnnotationCanvas::penStyleChanged, this, &AnnotationOptions::syncStyleControls);
+    connect(m_canvas, &AnnotationCanvas::arrowStyleChanged, this, &AnnotationOptions::syncStyleControls);
+    syncStyleControls();
 }
 void AnnotationOptions::closePopups()
 {

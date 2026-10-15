@@ -28,11 +28,19 @@ using snipaste::platform::pasteClipboardAsKeyboardInput;
 void ApplicationController::registerUtilityCommands()
 {
     m_commands.registerCommand({QStringLiteral("preferences.open"), QStringLiteral("首选项"), [this] {
-                                    ui::PreferencesDialog dialog(m_config);
-                                    dialog.setUpdateCheckHandler(
+                                    if (m_preferences && m_preferences->isVisible())
+                                    {
+                                        m_preferences->showNormal();
+                                        m_preferences->raise();
+                                        m_preferences->activateWindow();
+                                        return;
+                                    }
+                                    m_preferences = std::make_unique<ui::PreferencesDialog>(m_config);
+                                    m_preferences->setUpdateCheckHandler(
                                         [this](QWidget *parent) { m_updates.checkNow(parent); });
-                                    if (dialog.exec() == QDialog::Accepted)
-                                        applySettings();
+                                    QObject::connect(m_preferences.get(), &QDialog::accepted, this,
+                                                     [this] { applySettings(); });
+                                    m_preferences->show();
                                 }});
     m_commands.registerCommand({
         QStringLiteral("history.clear"),

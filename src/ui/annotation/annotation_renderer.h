@@ -5,12 +5,19 @@
 #include <span>
 
 class QPainter;
+class QPen;
+class QTextDocument;
 
 namespace snipaste::ui::annotation {
 
 using Shape = core::AnnotationShape;
 class EffectCache;
+void applyLineStyle(QPen &pen, Qt::PenStyle style);
+// Unrotated filled footprint, shared by canvas, hit testing and menu previews.
+QPainterPath arrowPath(const Shape &shape, qreal scale = 1.0, qreal headAspect = 0.5);
 QRectF shapeBounds(const Shape &shape);
+void configureTextDocument(QTextDocument &document, const Shape &shape, qreal scale = 1.0);
+QRectF textBoxRect(const Shape &shape);
 QRectF magnifierTargetRect(const Shape &shape);
 QPainterPath effectMask(const Shape &shape);
 

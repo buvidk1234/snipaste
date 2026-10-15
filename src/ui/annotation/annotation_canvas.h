@@ -10,6 +10,7 @@
 #include <QString>
 #include <QVector>
 #include <QWidget>
+#include <functional>
 #include <memory>
 
 class QKeyEvent;
@@ -47,6 +48,7 @@ class AnnotationCanvas final : public QWidget
     qreal penWidth() const { return m_penWidth; }
     void setPenColor(const QColor &color);
     void setPenWidth(qreal width);
+    void adjustToolSize(int steps);
     void setPenStyle(Qt::PenStyle style);
     void setTextBackground(bool enabled);
     void setShapeFilled(bool enabled);
@@ -58,22 +60,18 @@ class AnnotationCanvas final : public QWidget
     void setCornerRadius(qreal radius);
     qreal cornerRadius() const { return m_cornerRadius; }
     void setMagnification(qreal factor);
-    void setMagnifierCutout(bool enable)
-    {
-        m_magnifierCutout = enable;
-        update();
-    }
+    void setMagnifierCutout(bool enable);
     bool magnifierCutout() const { return m_magnifierCutout; }
-    void setMagnifierConnectorStyle(int style)
-    {
-        m_magnifierConnectorStyle = style;
-        update();
-    }
+    void setMagnifierConnectorStyle(int style);
     int magnifierConnectorStyle() const { return m_magnifierConnectorStyle; }
     void setNumberStyle(int style);
     void setNumberSize(qreal size);
     void setArrowStyle(ArrowStyle style);
     ArrowStyle arrowStyle() const { return m_arrowStyle; }
+    void setStartArrowHead(core::ArrowHead head);
+    core::ArrowHead startArrowHead() const { return m_startArrowHead; }
+    void setEndArrowHead(core::ArrowHead head);
+    core::ArrowHead endArrowHead() const { return m_endArrowHead; }
     void setTextOutlineColor(const QColor &color);
     void setTextOutlineWidth(qreal width);
     QColor textOutlineColor() const { return m_textOutlineColor; }
@@ -90,19 +88,29 @@ class AnnotationCanvas final : public QWidget
     // Re-apply the cursor after the parent capture overlay has switched
     // mouse ownership from the selection handles to the annotation canvas.
     void refreshToolCursor() { updateToolCursor(); }
+    void updatePointerCursor(const QPointF &position);
+    bool ownsPointerAt(const QPointF &position) const;
     void setCaptureImage(QImage image, QPointF annotationOffset = {}, QSizeF logicalSize = {});
     // Reset session state and release image buffers, keeping the text editor
     // and tool preferences ready for the next capture.
     void resetCapture();
-    bool isDrawing() const { return m_dragging || m_textEditing; }
+    bool isDrawing() const
+    {
+        return m_dragging || m_textEditing || m_editingShape || m_editingRotation || m_resizingHandle >= 0;
+    }
     void finishTextInput(bool commit = true);
     QImage renderedImage(bool includePendingText = true) const;
     QImage fullRenderedImage(bool includePendingText = true) const;
+    // Background shared by the canvas and its parent during text editing.
+    QImage displayImage() const;
+    core::AnnotationShape annotationStyle() const { return currentShape(); }
     void undo();
     void redo();
     void clearAnnotations();
     bool canUndo() const { return m_document.canUndo(); }
     bool canRedo() const { return m_document.canRedo(); }
+    const core::AnnotationDocument &document() const { return m_document; }
+    int selectedShapeIndex() const { return m_selectedShape; }
 
   signals:
     void historyChanged();
@@ -110,14 +118,20 @@ class AnnotationCanvas final : public QWidget
     void penColorChanged(const QColor &color);
     void penStyleChanged(Qt::PenStyle style);
     void arrowStyleChanged(ArrowStyle style);
+    void textStyleChanged();
+    void textSelected();
+    void selectionChanged();
+    void annotationStyleChanged();
 
   protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
+    void mouseDoubleClickEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
+    void leaveEvent(QEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
 
@@ -143,7 +157,15 @@ class AnnotationCanvas final : public QWidget
     void updateToolCursor();
     Shape currentShape() const;
     void beginTextInput(const QPointF &position);
+    void editTextShape(int index);
+    void showTextEditor();
+    void syncTextStyle(const Shape &shape);
+    void syncSelectedStyle();
+    bool editSelectedStyle(const std::function<void(Shape &)> &edit);
+    void editTextStyle(const std::function<void(Shape &)> &edit);
+    void updateTextEditorStyle();
     void updateTextEditorGeometry();
+    bool handleTextEditorPointer(QObject *watched, QEvent *event);
     int shapeAt(const QPointF &point) const;
     void translateMagnifierPart(Shape &shape, MagnifierPart part, const QPointF &delta) const;
     void rotateSelected(qreal degrees);
@@ -154,6 +176,8 @@ class AnnotationCanvas final : public QWidget
     void finishHistoryGesture();
     void documentRestored();
     void invalidateRenderCache();
+    QImage renderDocument(int hiddenTextIndex = -1) const;
+    QImage renderShapes(const QVector<Shape> &shapes) const;
     void updateImageRegion(const QRectF &imageRegion);
     void paintBackground(QPainter &painter, const QImage &display, const QRectF &frame) const;
     bool usesScaledBackground() const;
@@ -174,6 +198,7 @@ class AnnotationCanvas final : public QWidget
     std::unique_ptr<annotation::StrokePreview> m_strokePreview;
     mutable bool m_renderCacheValid = false;
     mutable quint64 m_renderCacheRevision = 0;
+    mutable int m_renderCacheHiddenText = -1;
     // Only the visible, scaled preview is cached, with a 16 MiB upper bound.
     // Native-pixel canvases continue to paint the shared source directly.
     mutable QImage m_previewBackground;
@@ -192,7 +217,13 @@ class AnnotationCanvas final : public QWidget
     int m_selectedShape = -1;
     QPlainTextEdit *m_textEditor = nullptr;
     Shape m_textShape;
+    int m_textShapeIndex = -1;
+    int m_hoveredText = -1;
+    int m_hoveredShape = -1;
     bool m_textEditing = false;
+    bool m_movingTextBox = false;
+    int m_textBoxHandle = -1;
+    QPointF m_textBoxPointer;
     QVector<QPointF> m_currentPoints;
     QColor m_penColor = QColor(237, 28, 36);
     qreal m_penWidth = 2.0;
@@ -200,6 +231,8 @@ class AnnotationCanvas final : public QWidget
     bool m_textBackground = false;
     bool m_shapeFilled = false;
     ArrowStyle m_arrowStyle = ArrowStyle::End;
+    core::ArrowHead m_startArrowHead = core::ArrowHead::None;
+    core::ArrowHead m_endArrowHead = core::ArrowHead::Classic;
     QColor m_textOutlineColor = QColor(0, 0, 0, 0);
     qreal m_textOutlineWidth = 0.0;
     QString m_textFontFamily = QStringLiteral("Microsoft YaHei UI");
