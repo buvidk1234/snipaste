@@ -55,7 +55,9 @@ UpdateController::UpdateController(core::ConfigStore &config, QObject *parent)
         if (!m_install) {
             QDesktopServices::openUrl(QUrl::fromLocalFile(directory));
             QMessageBox::information(m_parent, QStringLiteral("下载完成"),
-                                      QStringLiteral("新版已下载并通过校验，请解压安装：\n%1").arg(archive));
+                (archive.endsWith(QStringLiteral(".exe"), Qt::CaseInsensitive)
+                     ? QStringLiteral("新版已下载并通过校验，请运行安装包：\n%1")
+                     : QStringLiteral("新版已下载并通过校验，请解压安装：\n%1")).arg(archive));
             return;
         }
         QString status, error;
@@ -190,7 +192,7 @@ void UpdateController::handleResult(const core::ReleaseResult &result)
     if (!result.release.assetUrl.isEmpty()) {
         dialog.setInformativeText(m_install ? QStringLiteral("下载校验完成后，程序会退出、安装更新并重启。")
                                              : reason);
-        download = dialog.addButton(m_install ? QStringLiteral("下载并重启") : QStringLiteral("下载新版"),
+        download = dialog.addButton(m_install ? QStringLiteral("立即更新") : QStringLiteral("下载新版"),
                                      QMessageBox::AcceptRole);
     } else {
         dialog.setInformativeText(QStringLiteral("此版本暂未提供当前平台的安装包。"));

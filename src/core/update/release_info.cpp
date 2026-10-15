@@ -137,29 +137,35 @@ ReleaseResult selectGitHubRelease(const QByteArray &json, const QString &current
         platforms.append(QStringLiteral("macos-universal"));
     const auto assets = selected.value(QStringLiteral("assets")).toArray();
     for (const QString &target : platforms) {
-        const QString expected = QStringLiteral("snipaste-%1-%2.zip").arg(version, target);
-        for (const auto &item : assets) {
-            const auto asset = item.toObject();
-            const QUrl url(asset.value(QStringLiteral("browser_download_url")).toString());
-            if (asset.value(QStringLiteral("name")).toString() != expected
-                || !isReleaseUrl(url, repository, QStringLiteral("download/")))
-                continue;
-            result.release.assetName = expected;
-            result.release.assetUrl = url;
-            result.release.assetSize = asset.value(QStringLiteral("size")).toInteger();
-            const QString digest = asset.value(QStringLiteral("digest")).toString();
-            static const QRegularExpression sha(QStringLiteral("^sha256:([0-9a-fA-F]{64})$"));
-            const auto match = sha.match(digest);
-            if (match.hasMatch())
-                result.release.sha256 = match.captured(1).toLatin1().toLower();
-            for (const auto &candidate : assets) {
-                const auto checksum = candidate.toObject();
-                const QUrl checksumUrl(checksum.value(QStringLiteral("browser_download_url")).toString());
-                if (checksum.value(QStringLiteral("name")).toString() == expected + QStringLiteral(".sha256")
-                    && isReleaseUrl(checksumUrl, repository, QStringLiteral("download/")))
-                    result.release.checksumUrl = checksumUrl;
+        const QString baseName = QStringLiteral("snipaste-%1-%2").arg(version, target);
+        QStringList packages;
+        if (target.startsWith(QStringLiteral("windows-")))
+            packages.append(baseName + QStringLiteral("-setup.exe"));
+        packages.append(baseName + QStringLiteral(".zip"));
+        for (const QString &expected : packages) {
+            for (const auto &item : assets) {
+                const auto asset = item.toObject();
+                const QUrl url(asset.value(QStringLiteral("browser_download_url")).toString());
+                if (asset.value(QStringLiteral("name")).toString() != expected
+                    || !isReleaseUrl(url, repository, QStringLiteral("download/")))
+                    continue;
+                result.release.assetName = expected;
+                result.release.assetUrl = url;
+                result.release.assetSize = asset.value(QStringLiteral("size")).toInteger();
+                const QString digest = asset.value(QStringLiteral("digest")).toString();
+                static const QRegularExpression sha(QStringLiteral("^sha256:([0-9a-fA-F]{64})$"));
+                const auto match = sha.match(digest);
+                if (match.hasMatch())
+                    result.release.sha256 = match.captured(1).toLatin1().toLower();
+                for (const auto &candidate : assets) {
+                    const auto checksum = candidate.toObject();
+                    const QUrl checksumUrl(checksum.value(QStringLiteral("browser_download_url")).toString());
+                    if (checksum.value(QStringLiteral("name")).toString() == expected + QStringLiteral(".sha256")
+                        && isReleaseUrl(checksumUrl, repository, QStringLiteral("download/")))
+                        result.release.checksumUrl = checksumUrl;
+                }
+                return result;
             }
-            return result;
         }
     }
     return result;

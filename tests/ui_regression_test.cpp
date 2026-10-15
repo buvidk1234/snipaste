@@ -3,6 +3,8 @@
 #include "ui/annotation/annotation_canvas.h"
 #include "ui/annotation/image_region.h"
 #include "ui/preferences/preferences_dialog.h"
+#include "ui/update/update_controller.h"
+#include "ui/update/update_installer.h"
 #include "ui/paste/paste_manager.h"
 #include "ui/paste/paste_window.h"
 #include "ui/snip/snip_overlay.h"
@@ -40,6 +42,7 @@
 #include <QListWidget>
 #include <QDateTime>
 #include <QMenu>
+#include <QMessageBox>
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
@@ -74,6 +77,7 @@ class UiRegressionTest : public QObject
     Q_OBJECT
 private slots:
     void preferencesUpdateCheckUsesCurrentSettings();
+    void updaterOffersInAppInstallationForLocalBuild();
     void preferencesCloseSavesWithoutQuitting();
     void preferencesPendingCallbacksAreCancelled();
     void preferencesProfessionalReferencePages();
@@ -158,6 +162,40 @@ private slots:
     void pastePersistenceReusesPixelsAndHandlesFailure();
     void independentWidthPresetsAndCornerRadius();
 };
+
+void UiRegressionTest::updaterOffersInAppInstallationForLocalBuild()
+{
+#ifdef Q_OS_WIN
+    QString error;
+    QCOMPARE(ui::updateInstallationDirectory(&error), QCoreApplication::applicationDirPath());
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QTemporaryDir directory;
+    core::ConfigStore config(directory.filePath(QStringLiteral("config.ini")));
+    ui::UpdateController controller(config);
+    auto *client = controller.findChild<core::GitHubUpdateClient *>();
+    QVERIFY(client);
+    core::ReleaseResult result;
+    result.hasRelease = result.newer = true;
+    result.release.version = QStringLiteral("99.0.0");
+    result.release.assetUrl = QUrl(QStringLiteral("https://github.com/test/snipaste/releases/download/v99.0.0/setup.exe"));
+    bool offersInstall = false;
+    QString explanation;
+    QTimer::singleShot(0, [&] {
+        if (auto *dialog = qobject_cast<QMessageBox *>(QApplication::activeModalWidget())) {
+            for (const auto *button : dialog->buttons())
+                offersInstall |= button->text() == QStringLiteral("立即更新");
+            explanation = dialog->informativeText();
+            dialog->reject();
+        }
+    });
+    client->checked(result);
+    QVERIFY(offersInstall);
+    QVERIFY(explanation.contains(QStringLiteral("重启")));
+    QVERIFY(!explanation.contains(QStringLiteral("解压")));
+#else
+    QSKIP("Windows local-build update regression");
+#endif
+}
 
 void UiRegressionTest::preferencesUpdateCheckUsesCurrentSettings()
 {

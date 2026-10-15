@@ -10,6 +10,7 @@
 #include <QJsonObject>
 #include <QProcess>
 #include <QSaveFile>
+#include <QSettings>
 #include <QTemporaryFile>
 
 // Keep the resource initializer in the global namespace when linking a static library.
@@ -26,12 +27,6 @@ QString updateInstallationDirectory(QString *error)
     QString writableDirectory;
 #ifdef Q_OS_WIN
     destination = QCoreApplication::applicationDirPath();
-    if (!QFileInfo::exists(destination + QStringLiteral("/Qt6Core.dll"))
-        || QFileInfo::exists(destination + QStringLiteral("/CMakeCache.txt"))) {
-        if (error)
-            *error = QStringLiteral("开发构建请下载新版后解压运行。");
-        return {};
-    }
     writableDirectory = destination;
 #elif defined(Q_OS_MACOS)
     const QString executable = QCoreApplication::applicationFilePath();
@@ -84,7 +79,7 @@ bool launchUpdateInstaller(const QString &archive, const QString &temporaryDirec
         *error = QStringLiteral("无法准备更新安装程序。");
         return false;
     }
-    const QJsonObject settings{
+    QJsonObject settings{
         {QStringLiteral("archive"), archive},
         {QStringLiteral("destination"), destination},
         {QStringLiteral("sha256"), QString::fromLatin1(hash.result().toHex())},
@@ -94,6 +89,13 @@ bool launchUpdateInstaller(const QString &archive, const QString &temporaryDirec
         {QStringLiteral("arguments"), QJsonArray{QStringLiteral("--snipaste-restart"),
                                                QStringLiteral("--config"), configPath}},
     };
+#ifdef Q_OS_WIN
+    const QSettings registration(QStringLiteral("HKEY_CURRENT_USER\\Software\\snipaste-open-source"),
+                                 QSettings::NativeFormat);
+    settings.insert(QStringLiteral("portable"),
+                    QDir::cleanPath(registration.value(QStringLiteral("InstallDir")).toString())
+                        .compare(QDir::cleanPath(destination), Qt::CaseInsensitive) != 0);
+#endif
     const QString manifest = QDir(temporaryDirectory).filePath(QStringLiteral("install.json"));
     QSaveFile file(manifest);
     const QByteArray data = QJsonDocument(settings).toJson();

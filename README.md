@@ -10,11 +10,13 @@
 - **F3**：将剪贴板中的图片或文字贴到屏幕。
 - **Shift + F3**：隐藏或显示所有贴图。
 - **右键托盘图标**：打开菜单，调整首选项、管理贴图或退出程序。
-- **检查更新**：在托盘菜单或“首选项 → 更新”中手动检查，也可设置启动时和定期检查。
+- **检查更新**：在托盘菜单或“首选项 → 更新”中检查，点击“立即更新”后自动下载、校验、安装并重启，无需手动解压。也可设置启动时和定期检查。
 
 ### Windows
 
-便携版解压后，直接运行 `snipaste.exe`。
+普通用户推荐下载 `snipaste-版本号-windows-x64-setup.exe`，按向导安装。安装包自带 Qt，无需管理员权限，并提供开始菜单入口和卸载功能。
+
+ZIP 便携版继续提供，解压后直接运行 `snipaste.exe`。两种版本都支持程序内更新。
 
 从源码运行需要 Qt 6、CMake、Ninja、MSVC 和 Windows SDK。在项目根目录打开 PowerShell，执行：
 
@@ -24,6 +26,9 @@
 
 # 生成便携版 ZIP，输出到 dist/ 目录
 .\scripts\windows\run-dev.ps1 -Configuration Release -Package
+
+# 生成 EXE 安装包和 ZIP（需要安装 NSIS 3，或设置 NSIS_ROOT）
+.\scripts\windows\package.ps1 -Installer
 ```
 
 脚本默认使用 `D:/Qt/6.12.0/msvc2022_64`；Qt 安装在其他位置时，先设置 `QT_ROOT` 环境变量。

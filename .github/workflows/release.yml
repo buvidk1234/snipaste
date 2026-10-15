@@ -128,7 +128,20 @@ jobs:
         shell: pwsh
         env:
           RELEASE_VERSION: ${{ needs.version.outputs.version }}
-        run: ./scripts/windows/package.ps1 -BuildDirectory build/release -QtRoot $env:QT_ROOT_DIR -Version $env:RELEASE_VERSION
+        run: |
+          $nsisZip = Join-Path $env:RUNNER_TEMP 'nsis-3.13.zip'
+          Invoke-WebRequest 'https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.13/nsis-3.13.zip' -OutFile $nsisZip
+          if ((Get-FileHash $nsisZip -Algorithm SHA256).Hash -ne 'ba63dffc4410ee89193e1cb5a41989991bd77c61068da17e3156d136b7b0b3d8') { throw 'NSIS checksum mismatch.' }
+          $env:NSIS_ROOT = Join-Path $env:RUNNER_TEMP 'nsis-3.13'
+          # The ZIP already contains the nsis-3.13 top-level directory.
+          Expand-Archive $nsisZip -DestinationPath $env:RUNNER_TEMP
+          if (-not (Test-Path -LiteralPath (Join-Path $env:NSIS_ROOT 'makensis.exe') -PathType Leaf)) {
+            throw "NSIS compiler was not found after extraction: $env:NSIS_ROOT"
+          }
+          ./scripts/windows/package.ps1 -BuildDirectory build/release -QtRoot $env:QT_ROOT_DIR -Version $env:RELEASE_VERSION -Installer
+          $env:SNIPASTE_TEST_SETUP = (Resolve-Path "dist/snipaste-$env:RELEASE_VERSION-windows-x64-setup.exe").Path
+          python tests/update_installer_test.py WindowsInstallerTest.test_exe_installs_and_updates_portable_without_registration
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Package macOS
         if: runner.os == 'macOS'
         env:
@@ -140,6 +153,8 @@ jobs:
           path: |
             dist/*.zip
             dist/*.zip.sha256
+            dist/*-setup.exe
+            dist/*-setup.exe.sha256
           if-no-files-found: error
 
   publish:
@@ -160,11 +175,13 @@ jobs:
           prerelease: ${{ contains(needs.version.outputs.version, '-') }}
           generate_release_notes: ${{ needs.version.outputs.repository == github.repository }}
           body: |
-            Windows: unzip the windows-x64 package and run snipaste.exe.
+            Windows: run the windows-x64-setup.exe installer. A portable ZIP is also available.
             macOS: unzip the macos-universal package and move snipaste.app to Applications.
-            Both packages include the Qt runtime and SHA-256 checksums.
+            All packages include the Qt runtime and SHA-256 checksums. In-app updates download, install and restart automatically.
           files: |
             dist/*.zip
             dist/*.zip.sha256
+            dist/*-setup.exe
+            dist/*-setup.exe.sha256
           fail_on_unmatched_files: true
           token: ${{ secrets.RELEASE_TOKEN || github.token }}

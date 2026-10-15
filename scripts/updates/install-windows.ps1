@@ -28,7 +28,8 @@ try {
         -not (Split-Path -Path $taskRoot -Leaf).StartsWith('snipaste-update-') -or
         -not $archive.StartsWith($taskRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or
         $destination -eq [IO.Path]::GetPathRoot($destination) -or
-        -not (Test-Path -LiteralPath (Join-Path $destination 'snipaste.exe') -PathType Leaf)) {
+        (-not $settings.newInstall -and
+         -not (Test-Path -LiteralPath (Join-Path $destination 'snipaste.exe') -PathType Leaf))) {
         throw 'Invalid update paths.'
     }
     # Get-FileHash is a module function that may be unavailable when Windows
@@ -47,48 +48,62 @@ try {
     if ($archiveHash -ne $settings.sha256) {
         throw 'The downloaded archive checksum has changed.'
     }
-    New-Item -ItemType Directory -Path $staging -Force | Out-Null
-    $staging = [IO.Path]::GetFullPath($staging)
-    $zip = [IO.Compression.ZipFile]::OpenRead($archive)
-    try {
-        foreach ($entry in $zip.Entries) {
-            $entryTarget = [IO.Path]::GetFullPath((Join-Path $staging $entry.FullName))
-            if (-not $entryTarget.StartsWith($staging + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or
-                $entry.FullName -match '(^|[/\\])\.\.([/\\]|$)' -or
-                $entry.FullName -match ':') {
-                throw 'The update archive contains an unsafe path.'
+    $isSetup = [IO.Path]::GetExtension($archive) -ieq '.exe'
+    if (-not $isSetup) {
+        New-Item -ItemType Directory -Path $staging -Force | Out-Null
+        $staging = [IO.Path]::GetFullPath($staging)
+        $zip = [IO.Compression.ZipFile]::OpenRead($archive)
+        try {
+            foreach ($entry in $zip.Entries) {
+                $entryTarget = [IO.Path]::GetFullPath((Join-Path $staging $entry.FullName))
+                if (-not $entryTarget.StartsWith($staging + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or
+                    $entry.FullName -match '(^|[/\\])\.\.([/\\]|$)' -or
+                    $entry.FullName -match ':') {
+                    throw 'The update archive contains an unsafe path.'
+                }
             }
+        } finally {
+            $zip.Dispose()
         }
-    } finally {
-        $zip.Dispose()
-    }
-    [IO.Compression.ZipFile]::ExtractToDirectory($archive, $staging)
-    if (-not (Test-Path -LiteralPath (Join-Path $staging 'snipaste.exe') -PathType Leaf) -or
-        -not (Test-Path -LiteralPath (Join-Path $staging 'Qt6Core.dll') -PathType Leaf)) {
-        throw 'The update archive is not a Windows portable package.'
+        [IO.Compression.ZipFile]::ExtractToDirectory($archive, $staging)
+        if (-not (Test-Path -LiteralPath (Join-Path $staging 'snipaste.exe') -PathType Leaf) -or
+            -not (Test-Path -LiteralPath (Join-Path $staging 'Qt6Core.dll') -PathType Leaf)) {
+            throw 'The update archive is not a Windows portable package.'
+        }
     }
     Write-Status 'ready'
     # Wait by polling so the helper also works when the parent exits before it starts.
     $deadline = [DateTime]::UtcNow.AddSeconds(120)
-    while (Get-Process -Id ([int]$settings.processId) -ErrorAction SilentlyContinue) {
+    while ($settings.processId -gt 0 -and (Get-Process -Id ([int]$settings.processId) -ErrorAction SilentlyContinue)) {
         if ([DateTime]::UtcNow -gt $deadline) { throw 'The application did not exit in time.' }
         Start-Sleep -Milliseconds 250
     }
-    foreach ($file in Get-ChildItem -LiteralPath $staging -Recurse -File) {
-        $relative = $file.FullName.Substring($staging.Length + 1)
-        $target = [IO.Path]::GetFullPath((Join-Path $destination $relative))
-        if (-not $target.StartsWith($destination + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
-            throw 'The installation target is outside the application folder.'
+    if ($isSetup) {
+        $setup = New-Object Diagnostics.ProcessStartInfo
+        $setup.FileName = $archive
+        $setup.UseShellExecute = $false
+        # NSIS requires /D to be last and its path must not be quoted.
+        $setup.Arguments = '/S ' + $(if ($settings.portable) { '/PORTABLE ' } else { '' }) + '/D=' + $destination
+        $process = [Diagnostics.Process]::Start($setup)
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0) { throw "Windows setup failed (exit $($process.ExitCode))." }
+    } else {
+        foreach ($file in Get-ChildItem -LiteralPath $staging -Recurse -File) {
+            $relative = $file.FullName.Substring($staging.Length + 1)
+            $target = [IO.Path]::GetFullPath((Join-Path $destination $relative))
+            if (-not $target.StartsWith($destination + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'The installation target is outside the application folder.'
+            }
+            $saved = Join-Path $backup $relative
+            $existed = Test-Path -LiteralPath $target -PathType Leaf
+            if ($existed) {
+                New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($saved)) -Force | Out-Null
+                Copy-Item -LiteralPath $target -Destination $saved
+            }
+            $changed.Add(@{ target = $target; saved = $saved; existed = $existed })
+            New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($target)) -Force | Out-Null
+            Copy-Item -LiteralPath $file.FullName -Destination $target -Force
         }
-        $saved = Join-Path $backup $relative
-        $existed = Test-Path -LiteralPath $target -PathType Leaf
-        if ($existed) {
-            New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($saved)) -Force | Out-Null
-            Copy-Item -LiteralPath $target -Destination $saved
-        }
-        $changed.Add(@{ target = $target; saved = $saved; existed = $existed })
-        New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($target)) -Force | Out-Null
-        Copy-Item -LiteralPath $file.FullName -Destination $target -Force
     }
     $success = $true
     Write-Status 'installed'
@@ -109,6 +124,8 @@ if ($settings.restart -and (Test-Path -LiteralPath (Join-Path $destination 'snip
     $start.FileName = Join-Path $destination 'snipaste.exe'
     $start.WorkingDirectory = $destination
     $start.UseShellExecute = $false
+    $start.EnvironmentVariables.Remove('QT_PLUGIN_PATH')
+    $start.EnvironmentVariables.Remove('QT_QPA_PLATFORM_PLUGIN_PATH')
     $start.Arguments = ($settings.arguments | ForEach-Object { Quote-Argument ([string]$_) }) -join ' '
     [Diagnostics.Process]::Start($start) | Out-Null
 }

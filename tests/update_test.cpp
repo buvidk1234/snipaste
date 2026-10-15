@@ -92,6 +92,7 @@ private slots:
     void rejectsInvalidVersions();
     void selectsStableAndBeta();
     void selectsMatchingAssetsAndRejectsForeignUrls();
+    void prefersWindowsInstallerAndKeepsZipFallback();
     void handlesEmptyAndInvalidCatalogs();
     void networkCheckAndDuplicateRequests();
     void networkErrorsAndCancellation();
@@ -99,6 +100,32 @@ private slots:
     void downloadsUsingChecksumFile();
     void discardsCorruptDownload();
 };
+
+void UpdateTest::prefersWindowsInstallerAndKeepsZipFallback()
+{
+    auto published = release(QStringLiteral("0.2.0"));
+    auto assets = published.value(QStringLiteral("assets")).toArray();
+    auto installer = asset(QStringLiteral("0.2.0"), QStringLiteral("windows-x64"));
+    const QString name = QStringLiteral("snipaste-0.2.0-windows-x64-setup.exe");
+    const QString url = QStringLiteral("https://github.com/%1/releases/download/v0.2.0/%2").arg(repository, name);
+    installer.insert(QStringLiteral("name"), name);
+    installer.insert(QStringLiteral("browser_download_url"), url);
+    assets.append(installer); // The ZIP appears first in GitHub's asset list.
+    assets.append(QJsonObject{{QStringLiteral("name"), name + QStringLiteral(".sha256")},
+                              {QStringLiteral("browser_download_url"), url + QStringLiteral(".sha256")}});
+    published.insert(QStringLiteral("assets"), assets);
+    const auto catalog = QJsonDocument(QJsonArray{published}).toJson();
+    const auto selected = selectGitHubRelease(catalog, QStringLiteral("0.1.0"), false,
+                                               QStringLiteral("windows-x64"), repository);
+    QCOMPARE(selected.release.assetName, name);
+    QCOMPARE(selected.release.checksumUrl, QUrl(url + QStringLiteral(".sha256")));
+    const auto mac = selectGitHubRelease(catalog, QStringLiteral("0.1.0"), false,
+                                         QStringLiteral("macos-arm64"), repository);
+    QVERIFY(mac.release.assetName.endsWith(QStringLiteral("macos-universal.zip")));
+    const auto legacy = selectGitHubRelease(QJsonDocument(QJsonArray{release(QStringLiteral("0.2.0"))}).toJson(),
+                                            QStringLiteral("0.1.0"), false, QStringLiteral("windows-x64"), repository);
+    QCOMPARE(legacy.release.assetName, QStringLiteral("snipaste-0.2.0-windows-x64.zip"));
+}
 
 void UpdateTest::versions_data()
 {

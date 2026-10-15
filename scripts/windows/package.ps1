@@ -2,7 +2,8 @@
 param(
     [string]$BuildDirectory,
     [string]$QtRoot = $env:QT_ROOT,
-    [string]$Version
+    [string]$Version,
+    [switch]$Installer
 )
 $ErrorActionPreference = 'Stop'
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
@@ -63,3 +64,6 @@ $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvar
 "$hash *$name.zip" | Set-Content -LiteralPath "$archive.sha256" -Encoding ASCII
 Write-Output "Package: $archive"
 Write-Output "SHA256: $hash"
+if ($Installer) {
+    & (Join-Path $PSScriptRoot 'build-installer.ps1') -PackageDirectory $stage -Archive $archive -Version $Version
+}
