@@ -13,6 +13,7 @@
 #include "ui/history/screenshot_history_dialog.h"
 #include "core/command/command_registry.h"
 #include "platform/keyboard.h"
+#include "platform/screen_capture.h"
 
 #include <QApplication>
 #include <QBackingStore>
@@ -47,6 +48,7 @@
 #include <QScreen>
 #include <QSignalSpy>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QSpinBox>
 #include <QStackedLayout>
 #include <QGroupBox>
@@ -74,6 +76,7 @@ private slots:
     void overlayCopyButtonHonorsCopyAsFileMode();
     void scrollCapturePanelUsesFloatingToolbar();
     void scrollCapturePreviewShowsStitchedImage();
+    void screenCaptureMapsNativePixelEdges();
     void trayContextMenuMatchesReference();
     void hotCornerDwellState();
     void toolbarOnlyAfterSelection();
@@ -279,9 +282,7 @@ void UiRegressionTest::scrollCapturePanelUsesFloatingToolbar()
     QVERIFY(panel.findChild<QToolButton *>(QStringLiteral("scrollCaptureCancel")));
     QVERIFY(panel.findChild<QToolButton *>(QStringLiteral("scrollCaptureCurrent")));
     QVERIFY(panel.findChild<QToolButton *>(QStringLiteral("scrollCaptureAuto")));
-    auto *preview = panel.findChild<QLabel *>(QStringLiteral("scrollCapturePreview"));
-    QVERIFY(preview);
-    QVERIFY(!preview->isVisible());
+    QVERIFY(!panel.findChild<QLabel *>(QStringLiteral("scrollCapturePreview")));
 
     const QString artifactDir = qEnvironmentVariable("SNIPASTE_TEST_ARTIFACTS");
     if (!artifactDir.isEmpty()) {
@@ -307,21 +308,79 @@ void UiRegressionTest::scrollCapturePreviewShowsStitchedImage()
     p.drawText(20, 550, QStringLiteral("Preview Item 2"));
     p.end();
 
-    preview.setImage(testFrame);
-    QCOMPARE(preview.image().size(), testFrame.size());
+    for (int y = 400; y < 600; ++y)
+        for (int x = 0; x < 300; ++x)
+            testFrame.setPixelColor(x, y, QColor(x % 256, (y * 7) % 256, (x + y) % 256));
+    core::VerticalScrollStitcher capture;
+    QVERIFY(capture.append(testFrame));
+    preview.setCapture(capture);
+    QCOMPARE(preview.imageSize(), testFrame.size());
 
     auto *scrollArea = preview.findChild<QScrollArea *>(QStringLiteral("scrollCaptureScrollArea"));
     QVERIFY(scrollArea);
-    auto *label = preview.findChild<QLabel *>(QStringLiteral("scrollCapturePreviewImage"));
-    QVERIFY(label);
-    QVERIFY(!label->pixmap().isNull());
+    auto *imageWidget = preview.findChild<QWidget *>(QStringLiteral("scrollCapturePreviewImage"));
+    QVERIFY(imageWidget);
+    QTRY_VERIFY(!imageWidget->grab().isNull());
+
+    const QString recovery = QStringLiteral("没有匹配到重叠内容；请向上滚回已采集区域，再缓慢向下继续。");
+    preview.setStatus(recovery);
+    auto *status = preview.findChild<QLabel *>(QStringLiteral("scrollCaptureStatus"));
+    QVERIFY(status);
+    QCOMPARE(status->text(), recovery);
+    QTRY_VERIFY(status->isVisible());
+    QTRY_VERIFY(status->height() >= status->heightForWidth(status->width()));
 
     const QString artifactDir = qEnvironmentVariable("SNIPASTE_TEST_ARTIFACTS");
     if (!artifactDir.isEmpty()) {
         QDir().mkpath(artifactDir);
         QVERIFY(preview.grab().save(QDir(artifactDir).filePath(QStringLiteral("scroll-capture-preview.png"))));
     }
+    QImage nextFrame(300, 600, QImage::Format_RGB32);
+    nextFrame.fill(QColor(10, 80, 190));
+    QPainter nextPainter(&nextFrame);
+    nextPainter.drawImage(0, 0, testFrame.copy(0, 400, 300, 200));
+    nextPainter.end();
+    QVERIFY(capture.append(nextFrame));
+    preview.setCapture(capture);
+    QCOMPARE(preview.imageSize(), QSize(300, 1000));
+    // Releasing the capture source must not invalidate the visible snapshot.
+    capture.clear();
+    QTRY_VERIFY(scrollArea->verticalScrollBar()->maximum() > 0);
+    QTRY_COMPARE(scrollArea->verticalScrollBar()->value(), scrollArea->verticalScrollBar()->maximum());
+    const QImage viewport = scrollArea->viewport()->grab().toImage();
+    QCOMPARE(viewport.pixelColor(viewport.rect().center()), QColor(10, 80, 190));
     preview.close();
+    preview.clear();
+    QVERIFY(preview.imageSize().isEmpty());
+}
+
+void UiRegressionTest::screenCaptureMapsNativePixelEdges()
+{
+    const QRect screen(-1920, -80, 1920, 1080);
+    struct Mapping {
+        QSize pixels;
+        QRect inner;
+        QRect clippedTopLeft;
+        QRect clippedBottomRight;
+    };
+    const Mapping mappings[] = {
+        {{1920, 1080}, {1, 3, 127, 61}, {0, 0, 90, 71}, {1901, 1061, 19, 19}},
+        {{2400, 1350}, {1, 4, 159, 76}, {0, 0, 113, 89}, {2376, 1326, 24, 24}},
+        {{2880, 1620}, {2, 5, 190, 91}, {0, 0, 135, 107}, {2852, 1592, 28, 28}},
+        {{3840, 2160}, {2, 6, 254, 122}, {0, 0, 180, 142}, {3802, 2122, 38, 38}}
+    };
+    for (const auto &mapping : mappings) {
+        const auto map = [&](const QRect &local) {
+            return platform::screenCapturePixelRect(screen, mapping.pixels, local.translated(screen.topLeft()));
+        };
+        QCOMPARE(platform::screenCapturePixelRect(screen, mapping.pixels, screen), QRect(QPoint(), mapping.pixels));
+        QCOMPARE(map(QRect(1, 3, 127, 61)), mapping.inner);
+        QCOMPARE(map(QRect(-10, -9, 100, 80)), mapping.clippedTopLeft);
+        QCOMPARE(map(QRect(1901, 1061, 100, 80)), mapping.clippedBottomRight);
+        QVERIFY(map(QRect(2000, 1200, 5, 5)).isEmpty());
+    }
+    QVERIFY(platform::screenCapturePixelRect({}, QSize(100, 100), QRect(0, 0, 1, 1)).isEmpty());
+    QVERIFY(platform::captureScreenRegion(nullptr, QRect(0, 0, 1, 1)).isNull());
 }
 
 void UiRegressionTest::preferencesCloseSavesWithoutQuitting()

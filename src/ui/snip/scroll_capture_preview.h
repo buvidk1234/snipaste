@@ -3,10 +3,14 @@
 #include <QImage>
 #include <QWidget>
 
-class QLabel;
 class QScrollArea;
+class QLabel;
+
+namespace snipaste::core { class VerticalScrollStitcher; }
 
 namespace snipaste::ui {
+
+class ScrollCaptureImage;
 
 class ScrollCapturePreview final : public QWidget
 {
@@ -15,17 +19,18 @@ class ScrollCapturePreview final : public QWidget
 public:
     explicit ScrollCapturePreview(QWidget *parent = nullptr);
 
-    void setImage(const QImage &image);
+    void setCapture(const core::VerticalScrollStitcher &capture);
+    void setStatus(const QString &status);
     void clear();
-    QImage image() const { return m_stitchedImage; }
+    QSize imageSize() const;
 
 protected:
     void paintEvent(QPaintEvent *event) override;
 
 private:
     QScrollArea *m_scrollArea = nullptr;
-    QLabel *m_imageLabel = nullptr;
-    QImage m_stitchedImage;
+    ScrollCaptureImage *m_imageWidget = nullptr;
+    QLabel *m_status = nullptr;
 };
 
 } // namespace snipaste::ui

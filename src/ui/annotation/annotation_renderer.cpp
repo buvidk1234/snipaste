@@ -1,4 +1,5 @@
 #include "ui/annotation/annotation_renderer.h"
+#include "ui/annotation/annotation_effect_cache.h"
 #include "ui/annotation/image_region.h"
 
 #include <QFontMetricsF>
@@ -8,11 +9,27 @@
 #include <QTransform>
 #include <cmath>
 #include <limits>
+#include <utility>
 
 namespace snipaste::ui::annotation {
 using Tool = core::AnnotationTool;
 using ArrowStyle = core::ArrowStyle;
 using EffectShape = core::EffectShape;
+
+namespace {
+QPen shapePen(const Shape &shape, qreal scale)
+{
+    QColor color = shape.color;
+    if (shape.tool == Tool::Marker)
+        color.setAlpha(190);
+    QPen pen(color);
+    pen.setWidthF(qMax<qreal>(1.0, shape.width * scale));
+    pen.setCapStyle(Qt::RoundCap);
+    pen.setJoinStyle(Qt::RoundJoin);
+    pen.setStyle(shape.penStyle);
+    return pen;
+}
+} // namespace
 
 QRectF magnifierTargetRect(const Shape &shape)
 {
@@ -89,6 +106,22 @@ void AnnotationRenderer::applyErasedClip(QPainter &painter, const Shape &shape) 
     painter.setClipPath(keep, Qt::IntersectClip);
 }
 
+void AnnotationRenderer::drawStroke(QPainter &painter, const Shape &shape,
+                                    std::span<const QPointF> points, qreal scale) const
+{
+    const QPen pen = shapePen(shape, scale);
+    painter.setPen(pen);
+    painter.setBrush(Qt::NoBrush);
+    if (points.size() > 1)
+        painter.drawPolyline(points.data(), int(points.size()));
+    else if (points.size() == 1) {
+        const qreal radius = qMax<qreal>(0.5, shape.width * scale / 2.0);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(pen.color());
+        painter.drawEllipse(points.front(), radius, radius);
+    }
+}
+
 void AnnotationRenderer::drawShape(QPainter &painter, const Shape &shape, qreal scale) const
 {
     if (!shape.erasedPath.isEmpty()) {
@@ -112,16 +145,13 @@ void AnnotationRenderer::drawShape(QPainter &painter, const Shape &shape, qreal 
         painter.restore();
         return;
     }
-    QColor color = shape.color;
-    if (shape.tool == Tool::Marker)
-        color.setAlpha(190);
-    QPen pen(color);
-    pen.setWidthF(qMax<qreal>(1.0, shape.width * scale));
-    pen.setCapStyle(Qt::RoundCap);
-    pen.setJoinStyle(Qt::RoundJoin);
-    painter.setPen(pen);
+    if (shape.tool == Tool::Pen || shape.tool == Tool::Marker) {
+        drawStroke(painter, shape, {shape.points.constData(), size_t(shape.points.size())}, scale);
+        return;
+    }
+    QPen pen = shapePen(shape, scale);
+    const QColor color = pen.color();
     painter.setBrush(Qt::NoBrush);
-    pen.setStyle(shape.penStyle);
     painter.setPen(pen);
 
     if (shape.tool == Tool::Mosaic || shape.tool == Tool::Blur) {
@@ -271,17 +301,6 @@ void AnnotationRenderer::drawShape(QPainter &painter, const Shape &shape, qreal 
         painter.drawLine(shape.start, shape.end);
         return;
     }
-    if (shape.tool == Tool::Pen || shape.tool == Tool::Marker) {
-        if (shape.points.size() > 1)
-            painter.drawPolyline(shape.points.constData(), shape.points.size());
-        else if (shape.points.size() == 1) {
-            const qreal radius = qMax<qreal>(0.5, shape.width * scale / 2.0);
-            painter.setPen(Qt::NoPen);
-            painter.setBrush(color);
-            painter.drawEllipse(shape.points.constFirst(), radius, radius);
-        }
-        return;
-    }
     if (shape.tool == Tool::Arrow) {
         const QPointF delta = shape.end - shape.start;
         const qreal length = std::hypot(delta.x(), delta.y());
@@ -429,19 +448,13 @@ QPainterPath effectMask(const Shape &shape)
     return stroker.createStroke(stroke);
 }
 
-void AnnotationRenderer::drawEffect(QPainter &painter,
-                                  const QImage &sourceFrame,
-                                  const Shape &shape) const
+static EffectPixels filterEffect(const QImage &sourceFrame, const Shape &shape)
 {
-    if ((shape.tool != Tool::Mosaic && shape.tool != Tool::Blur)
-        || sourceFrame.isNull())
-        return;
-
     const QPainterPath mask = effectMask(shape);
     const QRect effectRect = mask.boundingRect().toAlignedRect()
         .intersected(sourceFrame.rect());
     if (effectRect.isEmpty())
-        return;
+        return {};
 
     // Both effects use the same selected pixels and the same shape mask.  The
     // only difference is the filter applied to the cropped source image.
@@ -500,20 +513,49 @@ void AnnotationRenderer::drawEffect(QPainter &painter,
                                   Qt::SmoothTransformation);
     }
 
+    return {effectRect, mask, std::move(filtered)};
+}
+
+void AnnotationRenderer::drawEffect(QPainter &painter, const QImage &sourceFrame,
+                                    const Shape &shape) const
+{
+    drawEffect(painter, sourceFrame, shape, nullptr, -1);
+}
+
+void AnnotationRenderer::drawEffect(QPainter &painter, const QImage &sourceFrame,
+                                    const Shape &shape, EffectCache *cache, qsizetype index) const
+{
+    if ((shape.tool != Tool::Mosaic && shape.tool != Tool::Blur) || sourceFrame.isNull())
+        return;
+    EffectPixels generated;
+    const EffectPixels *pixels = cache ? cache->find(index) : nullptr;
+    if (!pixels)
+    {
+        generated = filterEffect(sourceFrame, shape);
+        pixels = &generated;
+    }
+    if (pixels->image.isNull())
+        return;
+
     painter.save();
     painter.setRenderHint(QPainter::Antialiasing, false);
     applyErasedClip(painter, shape);
-    painter.setClipPath(mask, Qt::IntersectClip);
-    painter.drawImage(effectRect.topLeft(), filtered);
+    painter.setClipPath(pixels->mask, Qt::IntersectClip);
+    painter.drawImage(pixels->rect.topLeft(), pixels->image);
     painter.restore();
+    if (cache && !generated.image.isNull())
+        cache->store(index, std::move(generated));
 }
 
-QImage AnnotationRenderer::render(const QImage &image, const QVector<Shape> &shapes) const
+QImage AnnotationRenderer::render(const QImage &image, const QVector<Shape> &shapes, EffectCache *cache) const
 {
+    if (cache)
+        cache->beginFrame(image, shapes, m_imageSize);
     QImage result = image.convertToFormat(QImage::Format_ARGB32_Premultiplied);
     QPainter painter(&result);
     painter.setRenderHint(QPainter::Antialiasing, true);
-    for (const Shape &shape : shapes) {
+    for (qsizetype index = 0; index < shapes.size(); ++index) {
+        const Shape &shape = shapes.at(index);
         if (shape.tool == Tool::Magnifier) {
             const QRectF target = magnifierTargetRect(shape);
             if (target.width() < 2.0 || target.height() < 2.0)
@@ -557,7 +599,7 @@ QImage AnnotationRenderer::render(const QImage &image, const QVector<Shape> &sha
             // drawEffect snapshots its affected rectangle before drawing.
             // Passing the image by reference avoids copying the whole desktop
             // just to produce that small crop from an active paint device.
-            drawEffect(painter, result, shape);
+            drawEffect(painter, result, shape, cache, index);
             continue;
         }
         drawShape(painter, shape, 1.0);

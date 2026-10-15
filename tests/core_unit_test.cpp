@@ -5,13 +5,16 @@
 #include "core/history/screenshot_history_writer.h"
 #include "core/paste/paste_state_store.h"
 #include "core/scroll_stitcher.h"
+#include "core/scroll_capture_stability.h"
 
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QPainter>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
+#include <algorithm>
 #include <atomic>
 
 using namespace snipaste::core;
@@ -31,6 +34,18 @@ class CoreUnitTest final : public QObject
     void historyWriterCoalescesPendingImages();
     void configLookupCachePreservesCompatibility();
     void stitchesVerticalScrollFrames();
+    void scrollStripsPreservePixelsAndSnapshots();
+    void scrollStripsHandleLimitsAndNormalization();
+    void scrollMatchesSmallAndFastMovements_data();
+    void scrollMatchesSmallAndFastMovements();
+    void scrollRejectsGapsAndRecovers();
+    void scrollBottomDoesNotDuplicatePixels();
+    void scrollRejectsAmbiguousContent();
+    void scrollMatchesSparsePageContent();
+    void scrollMatchesContentBetweenSampleColumns();
+    void scrollMatchesLowContrastContent();
+    void scrollMatchesWithSmallPixelChanges();
+    void scrollCaptureWaitsForStableFrames();
     void annotationGesturesAndHistory();
     void annotationTranslationPreservesRedo();
     void pasteRestoreSharesSourcePixels();
@@ -385,6 +400,272 @@ void CoreUnitTest::stitchesVerticalScrollFrames()
     QCOMPARE(stitcher.image().size(), QSize(12, 24));
     QCOMPARE(stitcher.image().pixelColor(0, 23), source.pixelColor(0, 23));
     QVERIFY(!stitcher.append(second));
+}
+
+namespace {
+QImage scrollSource(QSize size)
+{
+    QImage image(size, QImage::Format_RGB32);
+    for (int y = 0; y < size.height(); ++y) {
+        auto *row = reinterpret_cast<QRgb *>(image.scanLine(y));
+        for (int x = 0; x < size.width(); ++x) {
+            quint32 value = quint32(x * 719 + y * 51787);
+            value = (value ^ (value >> 16)) * 0x7feb352du;
+            value = (value ^ (value >> 15)) * 0x846ca68bu;
+            value ^= value >> 16;
+            row[x] = qRgb(value >> 24, (value >> 16) & 255, (value >> 8) & 255);
+        }
+    }
+    return image;
+}
+}
+
+void CoreUnitTest::scrollStripsPreservePixelsAndSnapshots()
+{
+    const QImage source = scrollSource(QSize(64, 211));
+    VerticalScrollStitcher stitcher;
+    QVERIFY(!stitcher.append({}));
+    QVERIFY(stitcher.append(source.copy(0, 0, 64, 60)));
+    const QImage first = stitcher.image();
+    for (int offset : {19, 36, 57, 80, 103, 130, 151}) {
+        QVERIFY(stitcher.append(source.copy(0, offset, 64, 60)));
+        QCOMPARE(stitcher.size(), QSize(64, offset + 60));
+        QCOMPARE(stitcher.image(), source.copy(0, 0, 64, offset + 60));
+        // The preview paints strips without invoking image(). Verify both
+        // whole-image painting and a viewport across strip boundaries.
+        for (const QRect area : {stitcher.image().rect(), QRect(7, offset - 3, 31, 11)}) {
+            QImage actual(area.size(), QImage::Format_RGB32);
+            actual.fill(Qt::magenta);
+            QPainter painter(&actual);
+            painter.translate(-area.topLeft());
+            stitcher.draw(painter, area);
+            painter.end();
+            QCOMPARE(actual, source.copy(area));
+        }
+    }
+    QCOMPARE(first, source.copy(0, 0, 64, 60));
+    const VerticalScrollStitcher snapshot = stitcher;
+    const QImage result = stitcher.takeImage();
+    QCOMPARE(result, source);
+    QVERIFY(stitcher.size().isEmpty());
+    QVERIFY(stitcher.image().isNull());
+    QCOMPARE(stitcher.frameCount(), 0);
+    QCOMPARE(snapshot.image(), source);
+    QVERIFY(stitcher.append(source.copy(0, 0, 64, 60)));
+    stitcher.clear();
+    QCOMPARE(result, source);
+}
+
+void CoreUnitTest::scrollStripsHandleLimitsAndNormalization()
+{
+    const QImage source = scrollSource(QSize(64, 140));
+    VerticalScrollStitcher stitcher(91);
+    QImage first = source.copy(0, 0, 64, 60).convertToFormat(QImage::Format_ARGB32);
+    first.setDevicePixelRatio(1.5);
+    QVERIFY(stitcher.append(first));
+    QCOMPARE(stitcher.image().devicePixelRatio(), 1.0);
+    QVERIFY(!stitcher.append(first));
+    // Preserve the last one or two rows too, including a partial final scroll.
+    QVERIFY(stitcher.append(source.copy(0, 1, 64, 60)));
+    QVERIFY(stitcher.append(source.copy(0, 21, 64, 60)));
+    QCOMPARE(stitcher.image(), source.copy(0, 0, 64, 81));
+    QVERIFY(stitcher.append(source.copy(0, 44, 64, 60)));
+    QCOMPARE(stitcher.image(), source.copy(0, 0, 64, 91));
+    const QImage capped = stitcher.image();
+    QVERIFY(!stitcher.append(source.copy(0, 70, 64, 60)));
+    QCOMPARE(stitcher.image(), capped);
+    VerticalScrollStitcher small(11);
+    QVERIFY(small.append(first));
+    QCOMPARE(small.image(), source.copy(0, 0, 64, 11));
+    VerticalScrollStitcher minimum(0);
+    QVERIFY(minimum.append(first));
+    QCOMPARE(minimum.size(), QSize(64, 1));
+
+    QImage transparent(64, 60, QImage::Format_ARGB32_Premultiplied);
+    transparent.fill(QColor(80, 160, 240, 120));
+    VerticalScrollStitcher alpha;
+    QVERIFY(alpha.append(transparent));
+    QVERIFY(!alpha.append(source.copy(0, 0, 32, 60)));
+    QCOMPARE(alpha.lastResult(), VerticalScrollStitcher::AppendResult::SizeChanged);
+    QCOMPARE(alpha.image(), transparent.convertToFormat(QImage::Format_RGB32));
+}
+
+void CoreUnitTest::scrollMatchesSmallAndFastMovements_data()
+{
+    QTest::addColumn<int>("offset");
+    for (int offset = 1; offset <= 68; ++offset)
+        QTest::newRow(qPrintable(QString::number(offset))) << offset;
+}
+
+void CoreUnitTest::scrollMatchesSmallAndFastMovements()
+{
+    QFETCH(int, offset);
+    const QImage source = scrollSource(QSize(96, 240));
+    VerticalScrollStitcher stitcher;
+    QVERIFY(stitcher.append(source.copy(0, 0, 96, 80)));
+    QVERIFY(stitcher.append(source.copy(0, offset, 96, 80)));
+    QCOMPARE(stitcher.lastResult(), VerticalScrollStitcher::AppendResult::Added);
+    QCOMPARE(stitcher.lastOverlap(), 80 - offset);
+    QCOMPARE(stitcher.image(), source.copy(0, 0, 96, 80 + offset));
+}
+
+void CoreUnitTest::scrollRejectsGapsAndRecovers()
+{
+    const QImage source = scrollSource(QSize(96, 400));
+    VerticalScrollStitcher stitcher;
+    QVERIFY(stitcher.append(source.copy(0, 0, 96, 80)));
+    const QImage before = stitcher.image();
+    // A jump larger than the viewport has missing pixels that no matcher
+    // can reconstruct. Never append the entire unrelated frame.
+    QVERIFY(!stitcher.append(source.copy(0, 180, 96, 80)));
+    QCOMPARE(stitcher.lastResult(), VerticalScrollStitcher::AppendResult::NoMatch);
+    QCOMPARE(stitcher.image(), before);
+    QCOMPARE(stitcher.frameCount(), 1);
+    QVERIFY(!stitcher.append(source.copy(0, 0, 96, 80)));
+    QCOMPARE(stitcher.lastResult(), VerticalScrollStitcher::AppendResult::Unchanged);
+    QVERIFY(stitcher.append(source.copy(0, 40, 96, 80)));
+    QCOMPARE(stitcher.image(), source.copy(0, 0, 96, 120));
+    QVERIFY(!stitcher.append(source.copy(0, 40, 96, 79)));
+    QCOMPARE(stitcher.lastResult(), VerticalScrollStitcher::AppendResult::SizeChanged);
+}
+
+void CoreUnitTest::scrollBottomDoesNotDuplicatePixels()
+{
+    const QImage source = scrollSource(QSize(96, 161));
+    VerticalScrollStitcher stitcher;
+    QVERIFY(stitcher.append(source.copy(0, 0, 96, 80)));
+    for (int offset : {40, 79, 80, 81})
+        QVERIFY(stitcher.append(source.copy(0, offset, 96, 80)));
+    QCOMPARE(stitcher.image(), source);
+    QImage bottom = source.copy(0, 81, 96, 80);
+    // A tiny blinking indicator must not append another entire viewport.
+    bottom.setPixelColor(3, 3, Qt::red);
+    for (int i = 0; i < 20; ++i) {
+        QVERIFY(!stitcher.append(bottom));
+        QCOMPARE(stitcher.lastResult(), VerticalScrollStitcher::AppendResult::Unchanged);
+        QCOMPARE(stitcher.image(), source);
+    }
+    QCOMPARE(stitcher.frameCount(), 5);
+}
+
+void CoreUnitTest::scrollRejectsAmbiguousContent()
+{
+    const QImage tile = scrollSource(QSize(96, 8));
+    QImage repeated(96, 160, QImage::Format_RGB32);
+    QPainter painter(&repeated);
+    for (int y = 0; y < repeated.height(); y += 8)
+        painter.drawImage(0, y, tile);
+    painter.end();
+    VerticalScrollStitcher stitcher;
+    QVERIFY(stitcher.append(repeated.copy(0, 0, 96, 80)));
+    QVERIFY(!stitcher.append(repeated.copy(0, 2, 96, 80)));
+    QCOMPARE(stitcher.lastResult(), VerticalScrollStitcher::AppendResult::Ambiguous);
+    QCOMPARE(stitcher.size(), QSize(96, 80));
+    QImage blank(96, 80, QImage::Format_RGB32);
+    blank.fill(Qt::white);
+    QVERIFY(!stitcher.append(blank));
+    QCOMPARE(stitcher.size(), QSize(96, 80));
+
+    // A large blank area and a blinking mark supply no reliable alignment.
+    // Do not repeatedly verify full-width blank pixels for every overlap.
+    QImage emptyPage(1920, 1080, QImage::Format_RGB32);
+    emptyPage.fill(Qt::white);
+    VerticalScrollStitcher lowDetail;
+    QVERIFY(lowDetail.append(emptyPage));
+    emptyPage.setPixelColor(3, 500, Qt::black);
+    QVERIFY(!lowDetail.append(emptyPage));
+    QCOMPARE(lowDetail.size(), QSize(1920, 1080));
+}
+
+void CoreUnitTest::scrollCaptureWaitsForStableFrames()
+{
+    const QImage source = scrollSource(QSize(96, 240));
+    ScrollCaptureStability stability;
+    for (int i = 0; i < 8; ++i)
+        QVERIFY(!stability.observe(source.copy(0, i * 11, 96, 80), i * 40));
+    const QImage stopped = source.copy(0, 90, 96, 80);
+    QVERIFY(!stability.observe(stopped, 320));
+    QVERIFY(!stability.observe(stopped, 360));
+    QVERIFY(stability.observe(stopped, 400));
+    stability.reset();
+    QVERIFY(!stability.observe(stopped, 440));
+    QVERIFY(!stability.observe({}, 480));
+    QVERIFY(!stability.observe(stopped, 520));
+    QVERIFY(stability.observe(stopped, 600));
+}
+
+void CoreUnitTest::scrollMatchesSparsePageContent()
+{
+    // Most page pixels are blank. A low global mean error alone must not
+    // make unrelated blank margins look like a reliable overlap.
+    QImage page(480, 1000, QImage::Format_RGB32);
+    page.fill(Qt::white);
+    QPainter painter(&page);
+    for (int line = 0; line < 70; ++line) {
+        for (int word = 0; word < 7; ++word) {
+            const int width = 8 + (line * 17 + word * 13) % 38;
+            painter.fillRect(17 + word * 62, line * 14 + 3, width, 3 + line % 4, Qt::black);
+        }
+    }
+    painter.end();
+    for (int step : {1, 2, 17, 64, 127, 153}) {
+        VerticalScrollStitcher stitcher;
+        QVERIFY(stitcher.append(page.copy(0, 0, 480, 180)));
+        QVERIFY2(stitcher.append(page.copy(0, step, 480, 180)), qPrintable(QString::number(step)));
+        QCOMPARE(stitcher.lastOverlap(), 180 - step);
+        QCOMPARE(stitcher.image(), page.copy(0, 0, 480, 180 + step));
+    }
+}
+
+void CoreUnitTest::scrollMatchesContentBetweenSampleColumns()
+{
+    QImage page(1920, 240, QImage::Format_RGB32);
+    page.fill(Qt::white);
+    // A single-pixel column that never intersects the 64 sample columns.
+    // It is the only evidence of movement, and must not be called unchanged.
+    for (int y = 0; y < page.height(); ++y)
+        page.setPixel(3, y, qRgb(y, 0, 0));
+    for (int step : {1, 2, 17, 64, 68}) {
+        VerticalScrollStitcher stitcher;
+        QVERIFY(stitcher.append(page.copy(0, 0, page.width(), 80)));
+        const QImage before = stitcher.image();
+        QVERIFY(!stitcher.append(page.copy(0, 140, page.width(), 80)));
+        QCOMPARE(stitcher.lastResult(), VerticalScrollStitcher::AppendResult::NoMatch);
+        QCOMPARE(stitcher.image(), before);
+        QVERIFY(stitcher.append(page.copy(0, step, page.width(), 80)));
+        QCOMPARE(stitcher.lastOverlap(), 80 - step);
+        QCOMPARE(stitcher.image(), page.copy(0, 0, page.width(), 80 + step));
+    }
+}
+
+void CoreUnitTest::scrollMatchesLowContrastContent()
+{
+    // Each row is distinct, but neighboring pixels are too similar to
+    // produce strong edge features for the tolerant matcher.
+    QImage page(320, 240, QImage::Format_RGB32);
+    for (int y = 0; y < page.height(); ++y) {
+        auto *row = reinterpret_cast<QRgb *>(page.scanLine(y));
+        std::fill_n(row, page.width(), qRgb(y, y, y));
+    }
+    for (int step : {1, 2, 17, 64, 68}) {
+        VerticalScrollStitcher stitcher;
+        QVERIFY(stitcher.append(page.copy(0, 0, page.width(), 80)));
+        QVERIFY(stitcher.append(page.copy(0, step, page.width(), 80)));
+        QCOMPARE(stitcher.lastOverlap(), 80 - step);
+        QCOMPARE(stitcher.image(), page.copy(0, 0, page.width(), 80 + step));
+    }
+}
+
+void CoreUnitTest::scrollMatchesWithSmallPixelChanges()
+{
+    const QImage source = scrollSource(QSize(96, 160));
+    VerticalScrollStitcher stitcher;
+    QVERIFY(stitcher.append(source.copy(0, 0, 96, 80)));
+    QImage moved = source.copy(0, 23, 96, 80);
+    moved.setPixelColor(3, 10, Qt::red);
+    QVERIFY(stitcher.append(moved));
+    QCOMPARE(stitcher.lastOverlap(), 57);
+    QCOMPARE(stitcher.image(), source.copy(0, 0, 96, 103));
 }
 
 QTEST_MAIN(CoreUnitTest)

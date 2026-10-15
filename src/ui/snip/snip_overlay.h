@@ -2,8 +2,10 @@
 
 #include "core/history/screenshot_history.h"
 #include "core/scroll_stitcher.h"
+#include "core/scroll_capture_stability.h"
 
 #include <QColor>
+#include <QElapsedTimer>
 #include <QImage>
 #include <QList>
 #include <QPointer>
@@ -183,9 +185,11 @@ class SnipOverlay final : public QWidget
     void barcodeSelection();
     void startScrollCapture();
     void captureScrollFrame();
+    void pollScrollCaptureFrame(quint64 generation);
+    void completeScrollCaptureFrame(const QImage &frame, bool settled);
     // A manual wheel/scrollbar gesture in the target application is observed
-    // outside Qt's event loop.  Debounce it before sampling the viewport so a
-    // single gesture contributes one settled frame to the stitcher.
+    // outside Qt's event loop. Sample until the viewport has settled; new
+    // input also invalidates an in-flight stability observation.
     Q_INVOKABLE void scheduleManualScrollCapture();
     void stopScrollInputMonitoring();
     void requestAutoScroll(bool enabled);
@@ -375,6 +379,10 @@ class SnipOverlay final : public QWidget
     bool m_scrollAutoRunning = false;
     bool m_scrollCaptureBusy = false;
     int m_scrollCaptureCount = 0;
+    int m_scrollUnchangedAttempts = 0;
+    quint64 m_scrollCaptureGeneration = 0;
+    QElapsedTimer m_scrollSettleElapsed;
+    core::ScrollCaptureStability m_scrollStability;
     QTimer *m_scrollManualTimer = nullptr;
 };
 

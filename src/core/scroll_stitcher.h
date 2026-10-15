@@ -1,6 +1,9 @@
 #pragma once
 
 #include <QImage>
+#include <QVector>
+
+class QPainter;
 
 namespace snipaste::core {
 
@@ -10,27 +13,41 @@ namespace snipaste::core {
 class VerticalScrollStitcher final
 {
 public:
+    enum class AppendResult { Added, Unchanged, NoMatch, Ambiguous, SizeChanged, HeightLimit, InvalidFrame };
     explicit VerticalScrollStitcher(int maximumHeight = 24000);
 
     void clear();
-    // Returns true when the frame added new content.  An unchanged viewport
-    // is ignored so automatic scrolling can use the return value as an end
-    // signal.
+    // False also includes rejected/ambiguous frames. Callers must inspect
+    // lastResult() before treating a non-appended frame as end of scrolling.
     bool append(const QImage &frame);
 
-    const QImage &image() const { return m_image; }
+    // Flatten only for consumers that need a contiguous export. Copies of
+    // the returned image remain valid when more frames are appended.
+    const QImage &image() const;
+    QImage takeImage();
+    QSize size() const { return m_size; }
+    // Draw native-pixel strips through the caller's transform and clip.
+    // A scrolling preview can paint its viewport without flattening the image.
+    void draw(QPainter &painter, const QRectF &exposed) const;
     int frameCount() const { return m_frameCount; }
     int lastOverlap() const { return m_lastOverlap; }
+    AppendResult lastResult() const { return m_lastResult; }
 
 private:
-    static int overlapError(const QImage &base, const QImage &frame, int overlap);
-    static bool sameFrame(const QImage &left, const QImage &right);
+    const uchar *scanLine(int y) const;
 
-    QImage m_image;
-    QImage m_lastFrame;
+    struct Strip {
+        int top;
+        QImage pixels;
+    };
+    mutable QVector<Strip> m_strips;
+    QSize m_size;
+    QSize m_viewportSize;
+    mutable QImage m_image;
     int m_maximumHeight = 24000;
     int m_frameCount = 0;
     int m_lastOverlap = 0;
+    AppendResult m_lastResult = AppendResult::InvalidFrame;
 };
 
 } // namespace snipaste::core

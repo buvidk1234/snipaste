@@ -158,17 +158,10 @@ ScrollCapturePanel::ScrollCapturePanel(QWidget *parent)
     m_auto->setCheckable(true);
     m_auto->setVisible(false);
 
-    m_preview = new QLabel(this);
-    m_preview->setObjectName(QStringLiteral("scrollCapturePreview"));
-    m_preview->setVisible(false);
 
     m_title = new QLabel(QStringLiteral("滚动截图"), this);
     m_title->setObjectName(QStringLiteral("scrollCaptureTitle"));
     m_title->setVisible(false);
-
-    m_status = new QLabel(QStringLiteral("滚动截图中"), this);
-    m_status->setObjectName(QStringLiteral("scrollCaptureStatus"));
-    m_status->setVisible(false);
 
     connect(m_edit, &QToolButton::clicked, this, &ScrollCapturePanel::editRequested);
     connect(m_save, &QToolButton::clicked, this, &ScrollCapturePanel::saveRequested);
@@ -180,20 +173,9 @@ ScrollCapturePanel::ScrollCapturePanel(QWidget *parent)
     adjustSize();
 }
 
-void ScrollCapturePanel::setPreview(const QImage &image)
-{
-    if (image.isNull()) {
-        m_preview->clear();
-        return;
-    }
-    m_preview->setPixmap(QPixmap::fromImage(image).scaled(QSize(180, 52),
-                                                           Qt::KeepAspectRatio,
-                                                           Qt::SmoothTransformation));
-}
-
 void ScrollCapturePanel::setStatus(const QString &status)
 {
-    m_status->setText(status);
+    emit statusChanged(status);
 }
 
 void ScrollCapturePanel::setAutoRunning(bool running)

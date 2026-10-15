@@ -32,39 +32,37 @@ void releaseCaptureResources(void *info)
     delete resources;
 }
 
-} // namespace
-#endif
-
-namespace snipaste::platform {
-
-QImage captureScreen(QScreen *screen)
+QRect nativeScreenRect(QScreen *screen)
 {
-    if (!screen)
-        return {};
-
-#ifdef Q_OS_WIN
     HMONITOR monitor = nullptr;
     if (const auto *native = screen->nativeInterface<QNativeInterface::QWindowsScreen>())
         monitor = native->handle();
     if (!monitor)
-        return screen->grabWindow(0).toImage();
+        return {};
 
     MONITORINFO info{sizeof(MONITORINFO)};
     if (!GetMonitorInfoW(monitor, &info))
-        return screen->grabWindow(0).toImage();
+        return {};
 
-    const int width = info.rcMonitor.right - info.rcMonitor.left;
-    const int height = info.rcMonitor.bottom - info.rcMonitor.top;
+    return QRect(info.rcMonitor.left, info.rcMonitor.top,
+                 info.rcMonitor.right - info.rcMonitor.left,
+                 info.rcMonitor.bottom - info.rcMonitor.top);
+}
+
+QImage captureNativeRect(const QRect &rect)
+{
+    const int width = rect.width();
+    const int height = rect.height();
     if (width <= 0 || height <= 0)
         return {};
 
     HDC desktop = GetDC(nullptr);
     if (!desktop)
-        return screen->grabWindow(0).toImage();
+        return {};
     HDC memory = CreateCompatibleDC(desktop);
     if (!memory) {
         ReleaseDC(nullptr, desktop);
-        return screen->grabWindow(0).toImage();
+        return {};
     }
 
     BITMAPINFO bitmapInfo{};
@@ -82,12 +80,12 @@ QImage captureScreen(QScreen *screen)
             DeleteObject(bitmap);
         DeleteDC(memory);
         ReleaseDC(nullptr, desktop);
-        return screen->grabWindow(0).toImage();
+        return {};
     }
 
     HGDIOBJ previous = SelectObject(memory, bitmap);
     const BOOL copied = BitBlt(memory, 0, 0, width, height, desktop,
-                               info.rcMonitor.left, info.rcMonitor.top,
+                               rect.left(), rect.top(),
                                SRCCOPY | CAPTUREBLT);
     GdiFlush();
 
@@ -110,12 +108,64 @@ QImage captureScreen(QScreen *screen)
     DeleteObject(bitmap);
     DeleteDC(memory);
     ReleaseDC(nullptr, desktop);
-    return screen->grabWindow(0).toImage();
-#else
+    return {};
+}
+
+} // namespace
+#endif
+
+namespace snipaste::platform {
+
+QImage captureScreen(QScreen *screen)
+{
+    if (!screen)
+        return {};
+#ifdef Q_OS_WIN
+    QImage native = captureNativeRect(nativeScreenRect(screen));
+    if (!native.isNull())
+        return native;
+#endif
     QImage result = screen->grabWindow(0).toImage();
     result.setDevicePixelRatio(1.0);
     return result;
+}
+
+QRect screenCapturePixelRect(const QRect &screenGeometry, const QSize &pixelSize,
+                            const QRect &globalLogicalRegion)
+{
+    if (screenGeometry.isEmpty() || pixelSize.isEmpty() || globalLogicalRegion.isEmpty())
+        return {};
+    const QRect local = globalLogicalRegion.translated(-screenGeometry.topLeft());
+    const qreal scaleX = qreal(pixelSize.width()) / screenGeometry.width();
+    const qreal scaleY = qreal(pixelSize.height()) / screenGeometry.height();
+    const int left = qRound(local.left() * scaleX);
+    const int top = qRound(local.top() * scaleY);
+    const int right = qRound((qreal(local.left()) + local.width()) * scaleX);
+    const int bottom = qRound((qreal(local.top()) + local.height()) * scaleY);
+    return QRect(left, top, qMax(1, right - left), qMax(1, bottom - top))
+        .intersected(QRect(QPoint(), pixelSize));
+}
+
+QImage captureScreenRegion(QScreen *screen, const QRect &globalLogicalRegion)
+{
+    if (!screen || globalLogicalRegion.isEmpty())
+        return {};
+#ifdef Q_OS_WIN
+    const QRect monitor = nativeScreenRect(screen);
+    if (!monitor.isEmpty()) {
+        const QRect pixels = screenCapturePixelRect(screen->geometry(), monitor.size(), globalLogicalRegion);
+        if (pixels.isEmpty())
+            return {};
+        QImage native = captureNativeRect(pixels.translated(monitor.topLeft()));
+        if (!native.isNull())
+            return native;
+    }
 #endif
+    // Keep Qt's capture path as a fallback; apply the same native-pixel edge
+    // mapping even if its backing image has a different device pixel ratio.
+    const QImage desktop = captureScreen(screen);
+    const QRect pixels = screenCapturePixelRect(screen->geometry(), desktop.size(), globalLogicalRegion);
+    return pixels.isEmpty() ? QImage() : desktop.copy(pixels);
 }
 
 } // namespace snipaste::platform

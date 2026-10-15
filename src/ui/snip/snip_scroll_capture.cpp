@@ -108,19 +108,16 @@ void uninstallScrollInputHook(SnipOverlay *overlay)
 }
 #endif
 
-#ifdef Q_OS_WIN
 QString captureStatus(const snipaste::core::VerticalScrollStitcher &stitcher)
 {
-    const QImage &image = stitcher.image();
-    if (image.isNull())
+    const QSize size = stitcher.size();
+    if (size.isEmpty())
         return QStringLiteral("等待采集");
     return QStringLiteral("已采集 %1 次，长图 %2 × %3 px")
         .arg(stitcher.frameCount())
-        .arg(image.width())
-        .arg(image.height());
+        .arg(size.width())
+        .arg(size.height());
 }
-
-#endif
 
 } // namespace
 
@@ -155,13 +152,14 @@ void SnipOverlay::startScrollCapture()
     m_scrollOriginalCursor = QCursor::pos();
     m_scrollStitcher.clear();
     m_scrollCaptureCount = 0;
+    m_scrollUnchangedAttempts = 0;
     m_scrollAutoRunning = false;
     m_scrollCaptureBusy = false;
     m_scrollCaptureActive = true;
 
     m_scrollManualTimer = new QTimer(this);
     m_scrollManualTimer->setSingleShot(true);
-    m_scrollManualTimer->setInterval(180);
+    m_scrollManualTimer->setInterval(60);
     connect(m_scrollManualTimer, &QTimer::timeout,
             this, &SnipOverlay::captureScrollFrame);
 
@@ -182,6 +180,8 @@ void SnipOverlay::startScrollCapture()
 
     // Right-side live preview panel
     m_scrollPreview = new ScrollCapturePreview();
+    connect(m_scrollPanel, &ScrollCapturePanel::statusChanged,
+            m_scrollPreview, &ScrollCapturePreview::setStatus);
 
     // Hide normal selection toolbars and border resize handles
     m_toolbar->hide();
@@ -282,15 +282,23 @@ void SnipOverlay::scheduleManualScrollCapture()
 #ifndef Q_OS_WIN
     return;
 #else
-    if (!m_scrollCaptureActive || m_scrollAutoRunning || m_scrollCaptureBusy
+    if (!m_scrollCaptureActive || m_scrollAutoRunning
         || !m_scrollManualTimer || !m_scrollPanel)
         return;
-    m_scrollManualTimer->start();
+    if (m_scrollCaptureBusy) {
+        // Input during an in-flight capture must delay acceptance, rather
+        // than disappear and leave a frame from the middle of a gesture.
+        m_scrollStability.reset();
+    } else if (!m_scrollManualTimer->isActive()) {
+        m_scrollManualTimer->start();
+    }
 #endif
 }
 
 void SnipOverlay::stopScrollInputMonitoring()
 {
+    ++m_scrollCaptureGeneration;
+    m_scrollStability.reset();
 #ifdef Q_OS_WIN
     uninstallScrollInputHook(this);
 #endif
@@ -312,20 +320,7 @@ QImage SnipOverlay::captureScrollViewport() const
     if (!screen)
         return {};
 
-    const QImage desktop = platform::captureScreen(screen);
-    if (desktop.isNull())
-        return {};
-
-    const QRect local = m_scrollGlobalSelection.translated(-screen->geometry().topLeft());
-    const qreal scaleX = qreal(desktop.width()) / qMax(1, screen->geometry().width());
-    const qreal scaleY = qreal(desktop.height()) / qMax(1, screen->geometry().height());
-    const int left = qRound(local.left() * scaleX);
-    const int top = qRound(local.top() * scaleY);
-    const int right = qRound((local.left() + local.width()) * scaleX);
-    const int bottom = qRound((local.top() + local.height()) * scaleY);
-    const QRect pixels(left, top, qMax(1, right - left), qMax(1, bottom - top));
-    const QRect clipped = pixels.intersected(desktop.rect());
-    return clipped.isEmpty() ? QImage() : desktop.copy(clipped);
+    return platform::captureScreenRegion(screen, m_scrollGlobalSelection);
 #endif
 }
 
@@ -344,39 +339,87 @@ void SnipOverlay::captureScrollFrame()
 
     m_scrollCaptureBusy = true;
     m_scrollPanel->setBusy(true);
+    m_scrollStability.reset();
+    m_scrollSettleElapsed.start();
+    const quint64 generation = ++m_scrollCaptureGeneration;
 
     const HWND target = reinterpret_cast<HWND>(m_scrollWindow);
     SetForegroundWindow(target);
     BringWindowToTop(target);
-    QTimer::singleShot(80, this, [this] {
-        if (!m_scrollCaptureActive || !m_scrollPanel)
-            return;
-        const QImage frame = captureScrollViewport();
-        const bool added = !frame.isNull() && m_scrollStitcher.append(frame);
-        if (!frame.isNull())
-            ++m_scrollCaptureCount;
-
-        m_scrollCaptureBusy = false;
-        const QImage &stitched = m_scrollStitcher.image();
-        if (m_scrollPreview)
-            m_scrollPreview->setImage(stitched);
-        m_scrollPanel->setPreview(stitched);
-        m_scrollPanel->setStatus(captureStatus(m_scrollStitcher));
-        m_scrollPanel->setBusy(false);
-
-        SetForegroundWindow(reinterpret_cast<HWND>(m_scrollWindow));
-        BringWindowToTop(reinterpret_cast<HWND>(m_scrollWindow));
-
-        if (m_scrollAutoRunning) {
-            if (!added && m_scrollCaptureCount > 1) {
-                requestAutoScroll(false);
-                m_scrollPanel->setStatus(QStringLiteral("内容没有继续变化，已暂停自动滚动。"));
-            } else {
-                QTimer::singleShot(120, this, &SnipOverlay::autoScrollStep);
-            }
-        }
-    });
+    QTimer::singleShot(40, this, [this, generation] { pollScrollCaptureFrame(generation); });
 #endif
+}
+
+void SnipOverlay::pollScrollCaptureFrame(quint64 generation)
+{
+    if (generation != m_scrollCaptureGeneration || !m_scrollCaptureActive || !m_scrollPanel)
+        return;
+    const QImage frame = captureScrollViewport();
+    const qint64 elapsed = m_scrollSettleElapsed.elapsed();
+    if (frame.isNull() || m_scrollStability.observe(frame, elapsed)) {
+        completeScrollCaptureFrame(frame, true);
+    } else if (elapsed >= 1000) {
+        completeScrollCaptureFrame({}, false);
+    } else {
+        QTimer::singleShot(40, this, [this, generation] { pollScrollCaptureFrame(generation); });
+    }
+}
+
+void SnipOverlay::completeScrollCaptureFrame(const QImage &frame, bool settled)
+{
+    if (!m_scrollCaptureActive || !m_scrollPanel)
+        return;
+    m_scrollCaptureBusy = false;
+    m_scrollStability.reset();
+    m_scrollPanel->setBusy(false);
+    if (!settled || frame.isNull()) {
+        requestAutoScroll(false);
+        m_scrollPanel->setStatus(settled ? QStringLiteral("采集画面失败，请重试。")
+                                        : QStringLiteral("画面仍在滚动或变化，请停稳后重试；已有长图已保留。"));
+        return;
+    }
+    ++m_scrollCaptureCount;
+    const bool added = m_scrollStitcher.append(frame);
+    if (added && m_scrollPreview)
+        m_scrollPreview->setCapture(m_scrollStitcher);
+    m_scrollPanel->setStatus(captureStatus(m_scrollStitcher));
+
+    using Result = core::VerticalScrollStitcher::AppendResult;
+    const auto result = m_scrollStitcher.lastResult();
+    if (result == Result::Added) {
+        m_scrollUnchangedAttempts = 0;
+    } else if (result == Result::Unchanged) {
+        ++m_scrollUnchangedAttempts;
+        if (m_scrollAutoRunning && m_scrollUnchangedAttempts >= 3) {
+            requestAutoScroll(false);
+            m_scrollPanel->setStatus(QStringLiteral("内容连续未变化，已暂停；若页面继续加载，可再次开启自动滚动。"));
+        }
+    } else {
+        requestAutoScroll(false);
+        if (result == Result::HeightLimit) {
+            m_scrollPanel->setStatus(QStringLiteral("已达到长图高度上限，请完成或保存。"));
+        } else if (result == Result::SizeChanged) {
+            m_scrollPanel->setStatus(QStringLiteral("采集区域尺寸发生变化，请重新开始滚动截图。"));
+        } else if (result == Result::Ambiguous) {
+            m_scrollPanel->setStatus(QStringLiteral("内容重复或特征不足，无法可靠拼接；已有长图已保留。"));
+        } else {
+            m_scrollPanel->setStatus(QStringLiteral("没有匹配到重叠内容；请向上滚回已采集区域，再缓慢向下继续。"));
+        }
+    }
+    if (!m_scrollAutoRunning)
+        return;
+    const quint64 generation = m_scrollCaptureGeneration;
+    const bool retryViewport = result == Result::Unchanged;
+    QTimer::singleShot(140, this, [this, generation, retryViewport] {
+        if (generation != m_scrollCaptureGeneration || !m_scrollAutoRunning)
+            return;
+        // At the bottom, re-sample without sending more wheel input. This
+        // allows a short scroll animation or delayed repaint to complete.
+        if (retryViewport)
+            captureScrollFrame();
+        else
+            autoScrollStep();
+    });
 }
 
 void SnipOverlay::requestAutoScroll(bool enabled)
@@ -387,13 +430,19 @@ void SnipOverlay::requestAutoScroll(bool enabled)
     if (!m_scrollCaptureActive || !m_scrollPanel)
         return;
     m_scrollAutoRunning = enabled;
+    if (enabled)
+        m_scrollUnchangedAttempts = 0;
     if (enabled && m_scrollManualTimer)
         m_scrollManualTimer->stop();
     m_scrollPanel->setAutoRunning(enabled);
     if (enabled) {
         m_scrollPanel->setStatus(QStringLiteral("自动滚动中；可点击“停止自动”暂停。"));
-        if (!m_scrollCaptureBusy)
-            autoScrollStep();
+        if (!m_scrollCaptureBusy) {
+            if (m_scrollStitcher.size().isEmpty())
+                captureScrollFrame();
+            else
+                autoScrollStep();
+        }
     } else if (!m_scrollCaptureBusy) {
         m_scrollPanel->setStatus(captureStatus(m_scrollStitcher));
     }
@@ -436,7 +485,7 @@ bool SnipOverlay::sendScrollStep() const
     INPUT input{};
     input.type = INPUT_MOUSE;
     input.mi.dwFlags = MOUSEEVENTF_WHEEL;
-    input.mi.mouseData = static_cast<DWORD>(-WHEEL_DELTA * 4);
+    input.mi.mouseData = static_cast<DWORD>(-WHEEL_DELTA);
     return SendInput(1, &input, sizeof(INPUT)) == 1;
 #endif
 }
@@ -455,19 +504,23 @@ void SnipOverlay::cleanupScrollCapture()
         m_scrollPanel = nullptr;
     }
     if (m_scrollPreview) {
+        m_scrollPreview->clear();
         m_scrollPreview->hide();
         m_scrollPreview->deleteLater();
         m_scrollPreview = nullptr;
     }
     restoreScrollCaptureCursor();
     m_scrollWindow = 0;
+    m_scrollStitcher.clear();
 }
 
 void SnipOverlay::finishScrollCapture()
 {
     if (!m_scrollCaptureActive)
         return;
-    const QImage result = m_scrollStitcher.image();
+    if (m_scrollPreview)
+        m_scrollPreview->clear();
+    const QImage result = m_scrollStitcher.takeImage();
     if (result.isNull()) {
         cancelScrollCapture();
         return;
@@ -488,7 +541,9 @@ void SnipOverlay::editScrollCapture()
 {
     if (!m_scrollCaptureActive)
         return;
-    const QImage result = m_scrollStitcher.image();
+    if (m_scrollPreview)
+        m_scrollPreview->clear();
+    const QImage result = m_scrollStitcher.takeImage();
     if (result.isNull()) {
         cancelScrollCapture();
         return;
@@ -506,7 +561,9 @@ void SnipOverlay::saveScrollCapture()
 {
     if (!m_scrollCaptureActive)
         return;
-    const QImage result = m_scrollStitcher.image();
+    if (m_scrollPreview)
+        m_scrollPreview->clear();
+    const QImage result = m_scrollStitcher.takeImage();
     if (result.isNull()) {
         cancelScrollCapture();
         return;

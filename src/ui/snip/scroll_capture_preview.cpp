@@ -1,16 +1,54 @@
 #include "ui/snip/scroll_capture_preview.h"
+#include "core/scroll_stitcher.h"
 
 #include <QFrame>
 #include <QGraphicsDropShadowEffect>
 #include <QLabel>
+#include <QPaintEvent>
 #include <QPainter>
-#include <QPixmap>
 #include <QScrollBar>
 #include <QScrollArea>
 #include <QTimer>
 #include <QVBoxLayout>
 
 namespace snipaste::ui {
+
+class ScrollCaptureImage final : public QWidget
+{
+public:
+    explicit ScrollCaptureImage(QWidget *parent) : QWidget(parent) {}
+
+    void setCapture(const core::VerticalScrollStitcher &capture, int width)
+    {
+        // Implicitly shared strip pixels; the preview owns a stable snapshot
+        // without retaining a second contiguous copy of the long screenshot.
+        m_capture = capture;
+        const QSize source = m_capture.size();
+        m_scale = source.isEmpty() ? 1.0 : qreal(width) / source.width();
+        setFixedSize(source.isEmpty() ? QSize(0, 0)
+                                     : QSize(width, qMax(1, qRound(source.height() * m_scale))));
+        update();
+    }
+
+    QSize imageSize() const { return m_capture.size(); }
+
+protected:
+    void paintEvent(QPaintEvent *event) override
+    {
+        if (m_capture.size().isEmpty())
+            return;
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform);
+        painter.scale(m_scale, m_scale);
+        const QRectF exposed = QRectF(QPointF(event->rect().topLeft()) / m_scale,
+                                     QSizeF(event->rect().size()) / m_scale).adjusted(-1, -1, 1, 1);
+        m_capture.draw(painter, exposed);
+    }
+
+private:
+    core::VerticalScrollStitcher m_capture;
+    qreal m_scale = 1.0;
+};
 
 ScrollCapturePreview::ScrollCapturePreview(QWidget *parent)
     : QWidget(parent)
@@ -63,33 +101,26 @@ ScrollCapturePreview::ScrollCapturePreview(QWidget *parent)
     m_scrollArea->setFrameShape(QFrame::NoFrame);
     m_scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    m_scrollArea->setWidgetResizable(true);
+    m_scrollArea->setWidgetResizable(false);
+    m_scrollArea->setAlignment(Qt::AlignTop | Qt::AlignHCenter);
 
-    m_imageLabel = new QLabel(m_scrollArea);
-    m_imageLabel->setObjectName(QStringLiteral("scrollCapturePreviewImage"));
-    m_imageLabel->setAlignment(Qt::AlignTop | Qt::AlignHCenter);
-    m_imageLabel->setStyleSheet(QStringLiteral("background: transparent;"));
-    m_scrollArea->setWidget(m_imageLabel);
-
+    m_imageWidget = new ScrollCaptureImage(m_scrollArea);
+    m_imageWidget->setObjectName(QStringLiteral("scrollCapturePreviewImage"));
+    m_scrollArea->setWidget(m_imageWidget);
     layout->addWidget(m_scrollArea);
+
+    m_status = new QLabel(this);
+    m_status->setObjectName(QStringLiteral("scrollCaptureStatus"));
+    m_status->setWordWrap(true);
+    m_status->setAlignment(Qt::AlignCenter);
+    m_status->setStyleSheet(QStringLiteral("color: #5b6470; font-size: 12px; padding: 6px;"));
+    layout->addWidget(m_status);
+    clear();
 }
 
-void ScrollCapturePreview::setImage(const QImage &image)
+void ScrollCapturePreview::setCapture(const core::VerticalScrollStitcher &capture)
 {
-    m_stitchedImage = image;
-    if (image.isNull()) {
-        clear();
-        return;
-    }
-
-    const int availableW = qMax(80, width() - 14);
-    const qreal scale = qreal(availableW) / qMax(1, image.width());
-    const int targetH = qMax(1, qRound(image.height() * scale));
-
-    QPixmap pm = QPixmap::fromImage(
-        image.scaled(QSize(availableW, targetH), Qt::KeepAspectRatio, Qt::SmoothTransformation));
-    m_imageLabel->setPixmap(pm);
-    m_imageLabel->setFixedSize(availableW, targetH);
+    m_imageWidget->setCapture(capture, qMax(80, width() - 14));
 
     QTimer::singleShot(10, this, [this] {
         if (m_scrollArea && m_scrollArea->verticalScrollBar()) {
@@ -101,11 +132,18 @@ void ScrollCapturePreview::setImage(const QImage &image)
 
 void ScrollCapturePreview::clear()
 {
-    m_stitchedImage = QImage();
-    if (m_imageLabel) {
-        m_imageLabel->clear();
-        m_imageLabel->setFixedSize(0, 0);
-    }
+    m_imageWidget->setCapture(core::VerticalScrollStitcher{}, 0);
+    setStatus(QStringLiteral("等待采集"));
+}
+
+void ScrollCapturePreview::setStatus(const QString &status)
+{
+    m_status->setText(status);
+}
+
+QSize ScrollCapturePreview::imageSize() const
+{
+    return m_imageWidget->imageSize();
 }
 
 void ScrollCapturePreview::paintEvent(QPaintEvent *event)

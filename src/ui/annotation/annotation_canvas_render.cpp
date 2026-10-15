@@ -1,12 +1,16 @@
 #include "ui/annotation/annotation_canvas.h"
 #include "ui/annotation/annotation_renderer.h"
+#include "ui/annotation/annotation_effect_cache.h"
+#include "ui/annotation/annotation_stroke_preview.h"
+#include <QPaintEvent>
 #include <QPainter>
 #include <QPlainTextEdit>
+#include <algorithm>
 
 namespace snipaste::ui
 {
 
-void AnnotationCanvas::paintEvent(QPaintEvent *)
+void AnnotationCanvas::paintEvent(QPaintEvent *event)
 {
     const QImage display = fullRenderedImage(false);
 
@@ -39,7 +43,17 @@ void AnnotationCanvas::paintEvent(QPaintEvent *)
             preview.end = source.bottomRight();
             preview.sourceRect = {};
         }
-        annotation::AnnotationRenderer(m_image.size()).drawShape(painter, preview, 1.0);
+        const annotation::AnnotationRenderer renderer(m_image.size());
+        if ((m_tool == Tool::Pen || m_tool == Tool::Marker) && preview.points.size() > 128 && scale > 0)
+        {
+            if (!m_strokePreview)
+                m_strokePreview = std::make_unique<annotation::StrokePreview>();
+            const QRectF localVisible = QRectF(event->rect()).translated(-localFrame.topLeft());
+            const QRectF visible(localVisible.topLeft() / scale, localVisible.size() / scale);
+            m_strokePreview->draw(renderer, painter, preview, visible);
+        }
+        else
+            renderer.drawShape(painter, preview, 1.0);
     }
     if (!(m_tool == Tool::Eraser && m_disableEraserEditing) && m_selectedShape >= 0 &&
         m_selectedShape < m_document.shapes().size())
@@ -104,13 +118,24 @@ QImage AnnotationCanvas::fullRenderedImage(bool includePendingText) const
         m_renderCacheRevision = m_document.revision();
     }
     if (m_document.shapes().isEmpty() && (!includePendingText || !m_textEditing))
+    {
+        m_effectCache.reset();
         return m_image;
+    }
     const bool cacheable = !includePendingText || !m_textEditing;
     if (cacheable && m_renderCacheValid)
         return m_renderCache;
 
     const annotation::AnnotationRenderer renderer(m_image.size());
-    QImage result = renderer.render(m_image, m_document.shapes());
+    const auto &shapes = m_document.shapes();
+    const bool hasEffects = std::any_of(shapes.cbegin(), shapes.cend(), [](const Shape &shape) {
+        return shape.tool == Tool::Mosaic || shape.tool == Tool::Blur;
+    });
+    if (hasEffects && !m_effectCache)
+        m_effectCache = std::make_unique<annotation::EffectCache>();
+    else if (!hasEffects)
+        m_effectCache.reset();
+    QImage result = renderer.render(m_image, shapes, m_effectCache.get());
     if (includePendingText && m_textEditing)
     {
         Shape pending = m_textShape;
@@ -130,6 +155,8 @@ QImage AnnotationCanvas::fullRenderedImage(bool includePendingText) const
 
 void AnnotationCanvas::invalidateRenderCache()
 {
+    if (m_document.shapes().isEmpty())
+        m_effectCache.reset();
     m_renderCacheValid = false;
     // Undo/redo retains vector shapes, not this raster. Release the stale
     // frame before rebuilding so it does not overlap with the next full-size

@@ -1,6 +1,5 @@
 #pragma once
 
-#include <QImage>
 #include <QWidget>
 
 class QLabel;
@@ -15,12 +14,12 @@ class ScrollCapturePanel final : public QWidget
 public:
     explicit ScrollCapturePanel(QWidget *parent = nullptr);
 
-    void setPreview(const QImage &image);
     void setStatus(const QString &status);
     void setAutoRunning(bool running);
     void setBusy(bool busy);
 
 signals:
+    void statusChanged(const QString &status);
     void editRequested();
     void saveRequested();
     void finishRequested();
@@ -33,9 +32,7 @@ protected:
     void keyPressEvent(QKeyEvent *event) override;
 
 private:
-    QLabel *m_preview = nullptr;
     QLabel *m_title = nullptr;
-    QLabel *m_status = nullptr;
     QToolButton *m_edit = nullptr;
     QToolButton *m_save = nullptr;
     QToolButton *m_cancel = nullptr;

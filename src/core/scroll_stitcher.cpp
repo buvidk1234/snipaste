@@ -1,8 +1,10 @@
 #include "core/scroll_stitcher.h"
+#include "core/scroll_frame_matcher.h"
 
 #include <QPainter>
 #include <QtGlobal>
 #include <algorithm>
+#include <cstring>
 
 namespace snipaste::core {
 
@@ -15,13 +17,6 @@ QImage normalized(const QImage &image)
     return result;
 }
 
-int channelDistance(const QRgb left, const QRgb right)
-{
-    return qAbs(qRed(left) - qRed(right))
-        + qAbs(qGreen(left) - qGreen(right))
-        + qAbs(qBlue(left) - qBlue(right));
-}
-
 } // namespace
 
 VerticalScrollStitcher::VerticalScrollStitcher(int maximumHeight)
@@ -31,148 +26,118 @@ VerticalScrollStitcher::VerticalScrollStitcher(int maximumHeight)
 
 void VerticalScrollStitcher::clear()
 {
+    m_strips = {};
+    m_size = {};
+    m_viewportSize = {};
     m_image = {};
-    m_lastFrame = {};
     m_frameCount = 0;
     m_lastOverlap = 0;
+    m_lastResult = AppendResult::InvalidFrame;
 }
 
-bool VerticalScrollStitcher::sameFrame(const QImage &left, const QImage &right)
+const QImage &VerticalScrollStitcher::image() const
 {
-    if (left.size() != right.size())
-        return false;
-    if (left.isNull() || right.isNull())
-        return left.isNull() && right.isNull();
-
-    const int width = left.width();
-    const int height = left.height();
-    const int xStep = qMax(1, width / 12);
-    const int yStep = qMax(1, height / 12);
-    qint64 error = 0;
-    int samples = 0;
-    for (int y = 0; y < height; y += yStep) {
-        for (int x = 0; x < width; x += xStep) {
-            error += channelDistance(left.pixel(x, y), right.pixel(x, y));
-            ++samples;
-        }
+    if (!m_image.isNull() || m_strips.isEmpty())
+        return m_image;
+    if (m_strips.size() == 1) {
+        m_image = m_strips.first().pixels;
+        return m_image;
     }
-    return samples > 0 && error / samples <= 2;
+    QImage combined(m_size, QImage::Format_RGB32);
+    if (combined.isNull())
+        return m_image;
+    for (const auto &strip : m_strips) {
+        const qsizetype rowBytes = qsizetype(m_size.width()) * sizeof(QRgb);
+        for (int y = 0; y < strip.pixels.height(); ++y)
+            std::memcpy(combined.scanLine(strip.top + y), strip.pixels.constScanLine(y), rowBytes);
+    }
+    // Compact the stored representation too, so image() does not leave
+    // both a full export cache and all original pixel strips resident.
+    m_strips = {{0, combined}};
+    m_image = std::move(combined);
+    return m_image;
 }
 
-int VerticalScrollStitcher::overlapError(const QImage &base,
-                                         const QImage &frame,
-                                         int overlap)
+QImage VerticalScrollStitcher::takeImage()
 {
-    if (overlap <= 0 || base.width() != frame.width()
-        || overlap > base.height() || overlap > frame.height()) {
-        return 255 * 3;
-    }
+    QImage result = image();
+    clear();
+    return result;
+}
 
-    const int xStep = qMax(1, frame.width() / 16);
-    const int yStep = qMax(1, overlap / 18);
-    qint64 error = 0;
-    int samples = 0;
-    for (int y = 0; y < overlap; y += yStep) {
-        const int baseY = base.height() - overlap + y;
-        for (int x = 0; x < frame.width(); x += xStep) {
-            error += channelDistance(base.pixel(x, baseY), frame.pixel(x, y));
-            ++samples;
-        }
+void VerticalScrollStitcher::draw(QPainter &painter, const QRectF &exposed) const
+{
+    for (const auto &strip : m_strips) {
+        if (strip.top >= exposed.bottom())
+            break;
+        if (strip.top + strip.pixels.height() > exposed.top())
+            painter.drawImage(QPoint(0, strip.top), strip.pixels);
     }
-    return samples > 0 ? int(error / samples) : 255 * 3;
+}
+
+const uchar *VerticalScrollStitcher::scanLine(int y) const
+{
+    const auto next = std::upper_bound(m_strips.cbegin(), m_strips.cend(), y,
+                                      [](int row, const Strip &strip) { return row < strip.top; });
+    const auto &strip = *(next - 1);
+    return strip.pixels.constScanLine(y - strip.top);
 }
 
 bool VerticalScrollStitcher::append(const QImage &source)
 {
-    if (source.isNull() || source.width() <= 0 || source.height() <= 0)
+    m_lastResult = AppendResult::InvalidFrame;
+    if (source.isNull())
         return false;
-
     QImage frame = normalized(source);
-    if (m_image.isNull()) {
+    if (frame.isNull())
+        return false;
+    if (m_strips.isEmpty()) {
+        m_viewportSize = frame.size();
         if (frame.height() > m_maximumHeight)
             frame = frame.copy(0, 0, frame.width(), m_maximumHeight);
-        m_image = frame;
-        m_lastFrame = frame;
+        if (frame.isNull())
+            return false;
+        m_strips.append({0, frame});
+        m_size = frame.size();
         m_frameCount = 1;
         m_lastOverlap = 0;
+        m_lastResult = AppendResult::Added;
         return true;
     }
-
-    if (sameFrame(m_lastFrame, frame)) {
-        m_lastFrame = frame;
+    if (frame.size() != m_viewportSize) {
+        m_lastResult = AppendResult::SizeChanged;
         return false;
     }
-
-    if (frame.width() != m_image.width())
-        frame = frame.scaled(QSize(m_image.width(),
-                                   qMax(1, qRound(qreal(frame.height())
-                                                  * m_image.width() / frame.width()))),
-                              Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-
-    const int maxOverlap = qMin(m_image.height(), frame.height() - 1);
-    const int minOverlap = qMax(1, qMin(maxOverlap, frame.height() / 12));
-    int bestOverlap = 0;
-    int bestError = 255 * 3;
-    // Prefer the largest matching overlap.  A user may scroll by a small
-    // amount, so checking from large to small also avoids a short accidental
-    // match inside a repeated text row.
-    for (int overlap = maxOverlap; overlap >= minOverlap; overlap -= 2) {
-        const int error = overlapError(m_image, frame, overlap);
-        if (error < bestError) {
-            bestError = error;
-            bestOverlap = overlap;
-            if (error == 0)
-                break;
-        }
-    }
-
-    // The coarse pass is strided to keep a tall capture cheap, but the real
-    // scroll distance may land between sampled rows. Refine the best
-    // neighborhood so an eight-pixel overlap is not missed when the coarse
-    // pass visited seven and nine.
-    if (bestOverlap > 0) {
-        const int first = qMax(minOverlap, bestOverlap - 2);
-        const int last = qMin(maxOverlap, bestOverlap + 2);
-        for (int overlap = first; overlap <= last; ++overlap) {
-            const int error = overlapError(m_image, frame, overlap);
-            if (error < bestError) {
-                bestError = error;
-                bestOverlap = overlap;
-                if (error == 0)
-                    break;
-            }
-        }
-    }
-
-    if (bestError > 28)
-        bestOverlap = 0;
-
-    const int addedHeight = frame.height() - bestOverlap;
-    if (addedHeight <= 2) {
-        m_lastFrame = frame;
-        m_lastOverlap = bestOverlap;
+    if (m_size.height() >= m_maximumHeight) {
+        m_lastResult = AppendResult::HeightLimit;
         return false;
     }
-    const int available = m_maximumHeight - m_image.height();
-    if (available <= 0) {
-        m_lastFrame = frame;
-        m_lastOverlap = bestOverlap;
+    const auto match = matchScrollFrame(frame, m_size.height(), [this](int y) {
+        return reinterpret_cast<const QRgb *>(scanLine(y));
+    });
+    using Status = ScrollFrameMatch::Status;
+    switch (match.status) {
+    case Status::Unchanged:
+        m_lastResult = AppendResult::Unchanged;
         return false;
+    case Status::NoMatch:
+        m_lastResult = AppendResult::NoMatch;
+        return false;
+    case Status::Ambiguous:
+        m_lastResult = AppendResult::Ambiguous;
+        return false;
+    case Status::Matched:
+        break;
     }
-
-    const int copyHeight = qMin(available, addedHeight);
-    QImage combined(m_image.width(), m_image.height() + copyHeight,
-                    QImage::Format_RGB32);
-    combined.fill(Qt::black);
-    QPainter painter(&combined);
-    painter.drawImage(0, 0, m_image);
-    painter.drawImage(0, m_image.height(), frame.copy(0, bestOverlap,
-                                                      frame.width(), copyHeight));
-    painter.end();
-
-    m_image = std::move(combined);
-    m_lastFrame = frame;
-    m_lastOverlap = bestOverlap;
+    const int copyHeight = qMin(m_maximumHeight - m_size.height(), frame.height() - match.overlap);
+    QImage strip = frame.copy(0, match.overlap, frame.width(), copyHeight);
+    if (strip.isNull())
+        return false;
+    m_strips.append({m_size.height(), std::move(strip)});
+    m_size.rheight() += copyHeight;
+    m_image = {};
+    m_lastOverlap = match.overlap;
+    m_lastResult = AppendResult::Added;
     ++m_frameCount;
     return true;
 }

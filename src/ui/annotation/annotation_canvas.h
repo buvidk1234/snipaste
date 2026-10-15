@@ -10,6 +10,7 @@
 #include <QString>
 #include <QVector>
 #include <QWidget>
+#include <memory>
 
 class QKeyEvent;
 class QMouseEvent;
@@ -19,6 +20,11 @@ class QWheelEvent;
 
 namespace snipaste::ui
 {
+namespace annotation
+{
+class EffectCache;
+class StrokePreview;
+}
 
 class AnnotationCanvas final : public QWidget
 {
@@ -164,6 +170,8 @@ class AnnotationCanvas final : public QWidget
     // preview.  Keep one rasterized copy so pointer moves do not redraw every
     // existing shape (effects can be particularly expensive).
     mutable QImage m_renderCache;
+    mutable std::unique_ptr<annotation::EffectCache> m_effectCache;
+    std::unique_ptr<annotation::StrokePreview> m_strokePreview;
     mutable bool m_renderCacheValid = false;
     mutable quint64 m_renderCacheRevision = 0;
     // Only the visible, scaled preview is cached, with a 16 MiB upper bound.

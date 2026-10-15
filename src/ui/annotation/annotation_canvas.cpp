@@ -1,4 +1,6 @@
 #include "ui/annotation/annotation_canvas.h"
+#include "ui/annotation/annotation_effect_cache.h"
+#include "ui/annotation/annotation_stroke_preview.h"
 #include "platform/keyboard.h"
 #include <QPlainTextEdit>
 #include <QTextDocument>
@@ -271,6 +273,7 @@ void AnnotationCanvas::setCaptureImage(QImage image, QPointF annotationOffset, Q
         point += annotationOffset;
     image.setDevicePixelRatio(1);
     m_image = std::move(image);
+    m_effectCache.reset();
     invalidateRenderCache();
     if (logicalSize.isValid() && logicalSize.width() > 0.0 && logicalSize.height() > 0.0)
     {
@@ -459,6 +462,8 @@ void AnnotationCanvas::resetCapture()
     m_textShape = {};
     m_image = {};
     m_renderCache = {};
+    m_effectCache.reset();
+    m_strokePreview.reset();
     m_renderCacheValid = false;
     m_previewBackground = {};
     m_previewSourceKey = 0;

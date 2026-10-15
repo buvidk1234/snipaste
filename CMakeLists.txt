@@ -59,6 +59,7 @@ set(SNIPASTE_CORE_SOURCES
     src/core/history/screenshot_history.cpp
     src/core/history/screenshot_history_writer.cpp
     src/core/scroll_stitcher.cpp
+    src/core/scroll_frame_matcher.cpp
     src/core/recognition/ocr_service.cpp
     src/core/recognition/barcode_service.cpp
     src/core/update/release_info.cpp
@@ -99,6 +100,8 @@ set(SNIPASTE_UI_SOURCES
     src/ui/annotation/annotation_canvas_interaction.cpp
     src/ui/annotation/annotation_canvas_render.cpp
     src/ui/annotation/annotation_renderer.cpp
+    src/ui/annotation/annotation_effect_cache.cpp
+    src/ui/annotation/annotation_stroke_preview.cpp
     src/ui/annotation/image_region.cpp
     src/ui/history/screenshot_history_dialog.cpp
     src/ui/preferences/preferences_dialog.cpp
@@ -154,6 +157,8 @@ set(SNIPASTE_CORE_HEADERS
     src/core/history/screenshot_history.h
     src/core/history/screenshot_history_writer.h
     src/core/scroll_stitcher.h
+    src/core/scroll_frame_matcher.h
+    src/core/scroll_capture_stability.h
     src/core/recognition/ocr_service.h
     src/core/recognition/barcode_service.h
     src/core/update/release_info.h
@@ -202,6 +207,8 @@ set(SNIPASTE_UI_HEADERS
     src/ui/update/update_installer.h
     src/ui/annotation/annotation_canvas.h
     src/ui/annotation/annotation_renderer.h
+    src/ui/annotation/annotation_effect_cache.h
+    src/ui/annotation/annotation_stroke_preview.h
 )
 
 if(APPLE)
@@ -313,7 +320,7 @@ if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja")
     endforeach()
     set_property(SOURCE src/app/main.cpp ${SNIPASTE_APP_SOURCES} ${SNIPASTE_CORE_SOURCES}
         ${SNIPASTE_PLATFORM_SOURCES} ${SNIPASTE_UI_SOURCES} tests/ui_regression_test.cpp
-        tests/snip_performance_probe.cpp tests/annotation_drawing_probe.cpp
+        tests/snip_performance_probe.cpp tests/annotation_drawing_probe.cpp tests/annotation_render_test.cpp
         APPEND PROPERTY OBJECT_DEPENDS "${snipaste_header_dependencies}")
 endif()
 
@@ -428,6 +435,14 @@ if(SNIPASTE_BUILD_TESTS)
     )
     target_include_directories(snipaste_ui_tests PRIVATE src)
     target_link_libraries(snipaste_ui_tests PRIVATE snipaste_ui Qt6::Test)
+    qt_add_executable(snipaste_annotation_render_tests tests/annotation_render_test.cpp)
+    target_link_libraries(snipaste_annotation_render_tests PRIVATE snipaste_ui Qt6::Test)
+    snipaste_apply_compile_options(snipaste_annotation_render_tests)
+    add_test(NAME annotation_render COMMAND snipaste_annotation_render_tests
+        -o "${CMAKE_CURRENT_BINARY_DIR}/annotation-render-test-results.txt,txt")
+    set_tests_properties(annotation_render PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>")
     add_executable(snipaste_performance_probe tests/snip_performance_probe.cpp)
     add_executable(snipaste_drawing_probe tests/annotation_drawing_probe.cpp)
     target_link_libraries(snipaste_drawing_probe PRIVATE snipaste_ui)

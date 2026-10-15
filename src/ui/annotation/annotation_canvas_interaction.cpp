@@ -1,6 +1,7 @@
 #include "platform/keyboard.h"
 #include "ui/annotation/annotation_canvas.h"
 #include "ui/annotation/annotation_renderer.h"
+#include "ui/annotation/annotation_stroke_preview.h"
 #include <QCursor>
 #include <QKeyEvent>
 #include <QLineF>
@@ -71,6 +72,7 @@ void AnnotationCanvas::finishHistoryGesture()
     m_resizingHandle = -1;
     m_editingMagnifierPart = MagnifierPart::None;
     m_currentPoints.clear();
+    m_strokePreview.reset();
     // Mouse moves only update the preview. One completed gesture creates one
     // history entry, and selecting or erasing empty space creates none.
     recordHistory();
@@ -546,7 +548,10 @@ void AnnotationCanvas::mouseMoveEvent(QMouseEvent *event)
         ((m_tool == Tool::Mosaic || m_tool == Tool::Blur) && m_effectShape == EffectShape::Brush))
     {
         if (event->modifiers().testFlag(Qt::ShiftModifier))
+        {
+            m_strokePreview.reset();
             m_currentPoints = {m_start, m_current};
+        }
         else
             m_currentPoints.append(m_current);
     }
