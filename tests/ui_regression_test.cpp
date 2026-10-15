@@ -6,6 +6,7 @@
 #include "ui/paste/paste_manager.h"
 #include "ui/paste/paste_window.h"
 #include "ui/snip/snip_overlay.h"
+#include "ui/snip/capture_target_worker.h"
 #include "ui/recognition/ocr_overlay.h"
 #include "ui/snip/scroll_capture_panel.h"
 #include "ui/snip/scroll_capture_preview.h"
@@ -42,11 +43,13 @@
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPaintEvent>
 #include <QPointer>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QAction>
 #include <QScreen>
+#include <QSemaphore>
 #include <QSignalSpy>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -59,8 +62,10 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QUrl>
+#include <QVariantAnimation>
 #include <QWheelEvent>
 #include <memory>
+#include <atomic>
 
 using namespace snipaste;
 
@@ -115,6 +120,17 @@ private slots:
     void inlineTextOutput();
     void textEditorCleanupAndToolSwitch();
     void hoverTargetLocksUntilReset();
+    void targetWorkerKeepsOnlyLatestPendingQuery();
+    void targetWorkerStopsWithoutBlockingUi();
+    void hoverAsyncResultSurvivesSmallPointerMoves();
+    void hoverAsyncResultCannotCrossCaptureSessions();
+    void hoverTransitionCanBeInterruptedAndClicksUseExactTarget();
+    void hoverTransitionStopsForDragAndReuse();
+    void hoverTransitionStopsRepaintingWhenSettled();
+    void hoverCursorRepaintsLocalRegion();
+    void hoverTransitionSkipsQuickWindowFallback();
+    void hoverTransitionDoesNotJumpWhileRetargeting();
+    void hoverPartialRepaintMatchesFullRepaint();
     void selectionBorderRemainsVisibleAfterConfirm();
     void manualDragOverridesDetectedTarget();
     void detectionModesAndColorShortcuts();
@@ -671,6 +687,366 @@ static ui::SnipOverlay *overlayForTest()
     auto *overlay = new ui::SnipOverlay(QGuiApplication::primaryScreen());
     overlay->show();
     return overlay;
+}
+
+void UiRegressionTest::targetWorkerKeepsOnlyLatestPendingQuery()
+{
+    QPointer<ui::CaptureTargetWorker> worker = new ui::CaptureTargetWorker;
+    QSignalSpy results(worker, &ui::CaptureTargetWorker::targetsReady);
+    auto began = std::make_shared<QSemaphore>();
+    auto proceed = std::make_shared<QSemaphore>();
+    worker->submit(1, [began, proceed] {
+        began->release();
+        proceed->tryAcquire(1, 3000);
+        return QList<QRect>{QRect(1, 1, 10, 10)};
+    });
+    worker->start();
+    QVERIFY(began->tryAcquire(1, 1000));
+    worker->submit(2, [] { return QList<QRect>{QRect(2, 2, 10, 10)}; });
+    worker->submit(3, [] { return QList<QRect>{QRect(3, 3, 10, 10)}; });
+    bool uiTicked = false;
+    QTimer::singleShot(0, this, [&] { uiTicked = true; });
+    QTRY_VERIFY(uiTicked);
+    QCOMPARE(results.size(), 0);
+    proceed->release();
+    QTRY_COMPARE(results.size(), 2);
+    QCOMPARE(results.at(0).at(0).toULongLong(), quint64(1));
+    QCOMPARE(results.at(1).at(0).toULongLong(), quint64(3));
+    QCOMPARE(qvariant_cast<QList<QRect>>(results.at(1).at(1)), QList<QRect>{QRect(3, 3, 10, 10)});
+    worker->stop();
+    QTRY_VERIFY(worker.isNull());
+}
+
+void UiRegressionTest::targetWorkerStopsWithoutBlockingUi()
+{
+    QPointer<ui::CaptureTargetWorker> worker = new ui::CaptureTargetWorker;
+    QSignalSpy results(worker, &ui::CaptureTargetWorker::targetsReady);
+    auto began = std::make_shared<QSemaphore>();
+    auto proceed = std::make_shared<QSemaphore>();
+    worker->submit(1, [began, proceed] {
+        began->release();
+        proceed->tryAcquire(1, 3000);
+        return QList<QRect>{QRect(1, 1, 10, 10)};
+    });
+    worker->start();
+    QVERIFY(began->tryAcquire(1, 1000));
+    worker->submit(2, [] { return QList<QRect>{QRect(2, 2, 10, 10)}; });
+    worker->cancelPending();
+    worker->stop();
+    bool uiTicked = false;
+    QTimer::singleShot(0, this, [&] { uiTicked = true; });
+    QTRY_VERIFY(uiTicked);
+    QVERIFY(worker && worker->isRunning());
+    proceed->release();
+    QTRY_VERIFY(worker.isNull());
+    QCOMPARE(results.size(), 0);
+}
+
+void UiRegressionTest::hoverAsyncResultSurvivesSmallPointerMoves()
+{
+    QPointer<ui::SnipOverlay> overlay = overlayForTest();
+    const QRect element(60, 80, 180, 130);
+    const QRect window = overlay->rect();
+    auto began = std::make_shared<QSemaphore>();
+    auto firstReady = std::make_shared<QSemaphore>();
+    auto laterReady = std::make_shared<QSemaphore>();
+    auto calls = std::make_shared<std::atomic<int>>(0);
+    QTest::mouseMove(overlay, element.center());
+    overlay->setTargetDetector([=](QPoint, bool elements) {
+        if (!elements)
+            return window;
+        const int call = calls->fetch_add(1);
+        began->release();
+        (call == 0 ? firstReady : laterReady)->tryAcquire(1, 3000);
+        return element;
+    }, true);
+    QTRY_VERIFY(began->available() > 0);
+    for (int dx = 1; dx <= 8; ++dx)
+        QTest::mouseMove(overlay, element.center() + QPoint(dx, 0));
+    firstReady->release();
+    auto *animation = overlay->findChild<QVariantAnimation *>(QStringLiteral("hoverSelectionAnimation"));
+    // The first query must be usable while newer queries are still blocked.
+    // Previously every pointer move discarded it and required a stationary cursor.
+    QTRY_COMPARE(animation->endValue().toRectF(), QRectF(element));
+    QTest::mouseClick(overlay, Qt::LeftButton, Qt::NoModifier, element.center() + QPoint(8, 0));
+    QCOMPARE(overlay->captureGeometry().region, element);
+    laterReady->release(20);
+    overlay->close();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+}
+
+void UiRegressionTest::hoverAsyncResultCannotCrossCaptureSessions()
+{
+    std::unique_ptr<ui::SnipOverlay> overlay(ui::SnipOverlay::createPrepared(QGuiApplication::primaryScreen()));
+    const QRect element(60, 80, 180, 130);
+    auto began = std::make_shared<QSemaphore>();
+    auto firstReady = std::make_shared<QSemaphore>();
+    auto laterReady = std::make_shared<QSemaphore>();
+    auto calls = std::make_shared<std::atomic<int>>(0);
+    overlay->beginCapture(QGuiApplication::primaryScreen());
+    const QRect window = overlay->rect();
+    overlay->setTargetDetector([=](QPoint, bool elements) {
+        if (!elements)
+            return window;
+        const int call = calls->fetch_add(1);
+        began->release();
+        (call == 0 ? firstReady : laterReady)->tryAcquire(1, 3000);
+        return element;
+    }, true);
+    overlay->show();
+    QTest::mouseMove(overlay.get(), element.center());
+    QTRY_VERIFY(began->available() > 0);
+    overlay->close();
+    overlay->beginCapture(QGuiApplication::primaryScreen());
+    overlay->show();
+    QTest::mouseMove(overlay.get(), element.center());
+    firstReady->release();
+    QTRY_VERIFY(calls->load() >= 2);
+    QCoreApplication::processEvents();
+    auto *animation = overlay->findChild<QVariantAnimation *>(QStringLiteral("hoverSelectionAnimation"));
+    QVERIFY(animation->endValue().toRectF() != QRectF(element));
+    QTest::mouseClick(overlay.get(), Qt::LeftButton, Qt::NoModifier, element.center());
+    QCOMPARE(overlay->captureGeometry().region, window);
+    laterReady->release(20);
+    overlay->close();
+}
+
+void UiRegressionTest::hoverTransitionCanBeInterruptedAndClicksUseExactTarget()
+{
+    QPointer<ui::SnipOverlay> overlay = overlayForTest();
+    const QRect first(60, 80, 150, 100);
+    const QRect second(320, 90, 250, 180);
+    const QRect third(100, 320, 180, 140);
+    overlay->setTargetDetector([=](QPoint point, bool) {
+        return point.y() >= 300 ? third : (point.x() < 300 ? first : second);
+    });
+    auto *animation = overlay->findChild<QVariantAnimation *>(QStringLiteral("hoverSelectionAnimation"));
+    QVERIFY(animation);
+    QTest::mouseMove(overlay, first.center());
+    animation->setCurrentTime(animation->duration());
+    QTest::mouseMove(overlay, second.center());
+    QVERIFY(animation->state() != QAbstractAnimation::Stopped);
+    QCOMPARE(animation->startValue().toRectF(), QRectF(first));
+    QCOMPARE(animation->endValue().toRectF(), QRectF(second));
+    overlay->findChild<QTimer *>(QStringLiteral("hoverAnimationFrameTimer"))->stop();
+    animation->setCurrentTime(22);
+    const QRectF interrupted = animation->currentValue().toRectF();
+    QVERIFY(interrupted != QRectF(first) && interrupted != QRectF(second));
+    QTest::mouseMove(overlay, third.center());
+    QCOMPARE(animation->startValue().toRectF(), interrupted);
+    QCOMPARE(animation->endValue().toRectF(), QRectF(third));
+    overlay->findChild<QTimer *>(QStringLiteral("hoverAnimationFrameTimer"))->stop();
+    animation->setCurrentTime(22);
+    QVERIFY(animation->currentValue().toRectF() != QRectF(third));
+    QTest::mouseClick(overlay, Qt::LeftButton, Qt::NoModifier, third.center());
+    auto *canvas = overlay->findChild<ui::AnnotationCanvas *>();
+    QVERIFY(canvas);
+    QCOMPARE(canvas->geometry(), third);
+    QCOMPARE(animation->state(), QAbstractAnimation::Stopped);
+    overlay->close();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+}
+
+void UiRegressionTest::hoverTransitionStopsForDragAndReuse()
+{
+    std::unique_ptr<ui::SnipOverlay> overlay(ui::SnipOverlay::createPrepared(QGuiApplication::primaryScreen()));
+    const QRect first(60, 80, 150, 100);
+    const QRect second(320, 90, 250, 180);
+    overlay->beginCapture(QGuiApplication::primaryScreen());
+    overlay->setTargetDetector([=](QPoint point, bool) { return point.x() < 300 ? first : second; });
+    overlay->show();
+    auto *animation = overlay->findChild<QVariantAnimation *>(QStringLiteral("hoverSelectionAnimation"));
+    QTest::mouseMove(overlay.get(), first.center());
+    animation->setCurrentTime(animation->duration());
+    QTest::mouseMove(overlay.get(), second.center());
+    QVERIFY(animation->state() != QAbstractAnimation::Stopped);
+    QTest::mousePress(overlay.get(), Qt::LeftButton, Qt::NoModifier, second.center());
+    QCOMPARE(animation->state(), QAbstractAnimation::Stopped);
+    const QPoint end = second.center() + QPoint(80, 60);
+    QTest::mouseMove(overlay.get(), end);
+    QTest::mouseRelease(overlay.get(), Qt::LeftButton, Qt::NoModifier, end);
+    QCOMPARE(overlay->captureGeometry().region, QRect(second.center(), end));
+    overlay->close();
+    QCOMPARE(animation->state(), QAbstractAnimation::Stopped);
+    overlay->beginCapture(QGuiApplication::primaryScreen());
+    overlay->show();
+    QTest::mouseMove(overlay.get(), first.center());
+    QTest::mouseClick(overlay.get(), Qt::LeftButton, Qt::NoModifier, first.center());
+    QCOMPARE(overlay->captureGeometry().region, first);
+    overlay->close();
+}
+
+void UiRegressionTest::hoverTransitionStopsRepaintingWhenSettled()
+{
+    struct PaintCounter final : QObject
+    {
+        int count = 0;
+        bool eventFilter(QObject *, QEvent *event) override
+        {
+            if (event->type() == QEvent::Paint)
+                ++count;
+            return false;
+        }
+    } counter;
+    QPointer<ui::SnipOverlay> overlay = overlayForTest();
+    const QRect target(100, 100, 220, 160);
+    overlay->setTargetDetector([=](QPoint, bool) { return target; });
+    QTest::mouseMove(overlay, target.center());
+    auto *animation = overlay->findChild<QVariantAnimation *>(QStringLiteral("hoverSelectionAnimation"));
+    animation->setCurrentTime(animation->duration());
+    QTest::qWait(50);
+    overlay->installEventFilter(&counter);
+    QTest::qWait(150);
+    const int idlePaints = counter.count;
+    overlay->close();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    QVERIFY2(idlePaints <= 2, qPrintable(QStringLiteral("Settled hover repainted %1 times without input").arg(idlePaints)));
+}
+
+void UiRegressionTest::hoverCursorRepaintsLocalRegion()
+{
+    struct PaintCounter final : QObject
+    {
+        qint64 area = 0;
+        bool eventFilter(QObject *, QEvent *event) override
+        {
+            if (event->type() == QEvent::Paint)
+                for (QRect r : static_cast<QPaintEvent *>(event)->region())
+                    area += qint64(r.width()) * r.height();
+            return false;
+        }
+    } counter;
+    QPointer<ui::SnipOverlay> overlay = overlayForTest();
+    const QRect target(100, 100, 220, 160);
+    overlay->setTargetDetector([=](QPoint, bool) { return target; });
+    QTest::mouseMove(overlay, target.center());
+    auto *animation = overlay->findChild<QVariantAnimation *>(QStringLiteral("hoverSelectionAnimation"));
+    animation->setCurrentTime(animation->duration());
+    QTest::qWait(50);
+    overlay->installEventFilter(&counter);
+    QTest::mouseMove(overlay, target.center() + QPoint(4, 0));
+    QTest::qWait(30);
+    QVERIFY(counter.area > 0);
+    QVERIFY2(counter.area < qint64(overlay->width()) * overlay->height() / 2,
+             "A pointer move within the same target must not repaint the entire screen");
+    overlay->close();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+}
+
+void UiRegressionTest::hoverTransitionSkipsQuickWindowFallback()
+{
+    QPointer<ui::SnipOverlay> overlay = overlayForTest();
+    const QRect first(60, 80, 180, 130);
+    const QRect second(340, 80, 180, 130);
+    const QRect window = overlay->rect();
+    QTest::mouseMove(overlay, first.center());
+    overlay->setTargetDetector([=](QPoint point, bool elements) {
+        return elements ? (point.x() < 300 ? first : second) : window;
+    }, true);
+    auto *animation = overlay->findChild<QVariantAnimation *>(QStringLiteral("hoverSelectionAnimation"));
+    QTRY_COMPARE(animation->endValue().toRectF(), QRectF(first));
+    animation->setCurrentTime(animation->duration());
+    QList<QRectF> destinations;
+    connect(animation, &QAbstractAnimation::stateChanged, overlay,
+            [&](QAbstractAnimation::State state, QAbstractAnimation::State) {
+        if (state == QAbstractAnimation::Running)
+            destinations.append(animation->endValue().toRectF());
+    });
+    QTest::mouseMove(overlay, second.center());
+    QVERIFY(destinations.isEmpty());
+    QTRY_COMPARE(animation->endValue().toRectF(), QRectF(second));
+    QCOMPARE(destinations, QList<QRectF>{QRectF(second)});
+    QTest::mouseClick(overlay, Qt::LeftButton, Qt::NoModifier, second.center());
+    QCOMPARE(overlay->captureGeometry().region, second);
+    overlay->close();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+}
+
+void UiRegressionTest::hoverTransitionDoesNotJumpWhileRetargeting()
+{
+    QPointer<ui::SnipOverlay> overlay = overlayForTest();
+    const QRect first(60, 80, 180, 130);
+    const QRect second(340, 80, 180, 130);
+    overlay->setTargetDetector([=](QPoint point, bool) { return point.x() < 300 ? first : second; });
+    QTest::mouseMove(overlay, second.center());
+    auto *animation = overlay->findChild<QVariantAnimation *>(QStringLiteral("hoverSelectionAnimation"));
+    animation->setCurrentTime(animation->duration());
+    QTest::mouseMove(overlay, first.center());
+    animation->setCurrentTime(animation->duration());
+    QSignalSpy values(animation, &QVariantAnimation::valueChanged);
+    QMouseEvent move(QEvent::MouseMove, second.center(), overlay->mapToGlobal(second.center()),
+                     Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(overlay, &move);
+    // Configuring the next transition must not briefly emit its destination
+    // and then jump back to the start before the first animation tick.
+    for (const auto &value : values)
+        QCOMPARE(value.at(0).toRectF(), QRectF(first));
+    QCOMPARE(animation->currentValue().toRectF(), QRectF(first));
+    overlay->close();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+}
+
+void UiRegressionTest::hoverPartialRepaintMatchesFullRepaint()
+{
+    std::unique_ptr<ui::SnipOverlay> overlay(ui::SnipOverlay::createPrepared(QGuiApplication::primaryScreen()));
+    overlay->beginCapture(QGuiApplication::primaryScreen());
+    overlay->resize(800, 600);
+    overlay->setExitOnFocusLoss(false);
+    overlay->setDetectionOptions(true, true, false);
+    overlay->setCaptureDisplayOptions(false, QColor(0, 0, 0, 100), Qt::white,
+                                     2, true, true, false, false, true, false);
+    QImage background(overlay->size(), QImage::Format_RGB32);
+    background.fill(QColor(110, 150, 180));
+    overlay->setBackgroundProvider([background] { return background; });
+    QRect target(80, 190, 95, 89);
+    overlay->setTargetDetector([&](QPoint, bool) { return target; });
+    overlay->show();
+    QTest::keyClick(overlay.get(), Qt::Key_F5);
+    QTRY_VERIFY(overlay->isVisible());
+    auto *animation = overlay->findChild<QVariantAnimation *>(QStringLiteral("hoverSelectionAnimation"));
+    auto *frameTimer = overlay->findChild<QTimer *>(QStringLiteral("hoverAnimationFrameTimer"));
+    const auto snapshot = [&] {
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::UpdateRequest);
+        const auto *buffer = dynamic_cast<const QImage *>(overlay->backingStore()->paintDevice());
+        return buffer ? buffer->copy() : QImage();
+    };
+    QMouseEvent initialMove(QEvent::MouseMove, target.center(), overlay->mapToGlobal(target.center()),
+                            Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(overlay.get(), &initialMove);
+    animation->setCurrentTime(animation->duration());
+    overlay->repaint();
+    const QList<QRect> targets{QRect(400, 80, 250, 180), QRect(85, 193, 95, 89),
+                               QRect(220, 8, 190, 120), QRect(80, 190, 95, 89)};
+    for (int transition = 0; transition < targets.size(); ++transition)
+    {
+        target = targets.at(transition);
+        QMouseEvent move(QEvent::MouseMove, target.center(), overlay->mapToGlobal(target.center()),
+                         Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(overlay.get(), &move);
+        frameTimer->stop();
+        QCOMPARE(animation->endValue().toRectF(), QRectF(target));
+        for (int time : {7, 13, 24, 43, 70, 88})
+        {
+            animation->setCurrentTime(time);
+            const QImage partial = snapshot();
+            QVERIFY(!partial.isNull());
+            overlay->repaint();
+            const QImage full = snapshot();
+            if (partial != full)
+            {
+                const QString artifactDir = qEnvironmentVariable("SNIPASTE_TEST_ARTIFACTS");
+                if (!artifactDir.isEmpty())
+                {
+                    QDir().mkpath(artifactDir);
+                    partial.save(QDir(artifactDir).filePath(QStringLiteral("hover-partial.png")));
+                    full.save(QDir(artifactDir).filePath(QStringLiteral("hover-full.png")));
+                }
+                QFAIL(qPrintable(QStringLiteral("Hover repaint left stale pixels at transition %1, time %2 ms, DPR %3")
+                                     .arg(transition).arg(time).arg(overlay->devicePixelRatioF())));
+            }
+        }
+    }
+    overlay->close();
 }
 
 void UiRegressionTest::hoverTargetLocksUntilReset()

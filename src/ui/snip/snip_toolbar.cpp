@@ -332,6 +332,8 @@ void SnipOverlay::confirmSelection()
 {
     if (m_selection.isEmpty() || m_canvas)
         return;
+    invalidateTargetDetection();
+    setHoverSelection({}, false);
     if (!m_toolbar)
         createToolbar();
     // Keep normal captures in full-screen image coordinates.  A history item
@@ -366,6 +368,7 @@ void SnipOverlay::confirmSelection()
     m_canvas->show();
     if (m_selectionBorder)
     {
+        m_selectionBorder->show();
         m_selectionBorder->raise();
         m_selectionBorder->update();
     }
@@ -399,6 +402,10 @@ void SnipOverlay::confirmSelection()
 
 void SnipOverlay::resetSelection()
 {
+    if (m_selectionBorder)
+        m_selectionBorder->hide();
+    invalidateTargetDetection();
+    setHoverSelection({}, false);
     clearOcrOverlay();
     if (!m_toolbar)
         createToolbar();

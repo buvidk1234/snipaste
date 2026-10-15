@@ -8,6 +8,7 @@
 #include <QApplication>
 #include <QCryptographicHash>
 #include <QElapsedTimer>
+#include <QEventLoop>
 #include <QFrame>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -20,7 +21,10 @@
 #include <QImageReader>
 #include <QIcon>
 #include <QFile>
+#include <QPaintEvent>
 #include <QSslSocket>
+#include <QTimer>
+#include <QVariantAnimation>
 #include <cstdio>
 #include <memory>
 #include <vector>
@@ -29,6 +33,86 @@
 #include <windows.h>
 #include <psapi.h>
 #endif
+
+class PerformanceApplication final : public QApplication
+{
+public:
+    using QApplication::QApplication;
+    QWidget *hoverOverlay = nullptr;
+    QElapsedTimer hoverClock;
+    QJsonArray hoverPaints;
+
+    bool notify(QObject *receiver, QEvent *event) override
+    {
+        if (receiver != hoverOverlay || event->type() != QEvent::Paint)
+            return QApplication::notify(receiver, event);
+        const auto *paint = static_cast<QPaintEvent *>(event);
+        qint64 area = 0;
+        for (const QRect rect : paint->region())
+            area += qint64(rect.width()) * rect.height();
+        const double start = hoverClock.nsecsElapsed() / 1e6;
+        const bool result = QApplication::notify(receiver, event);
+        hoverPaints.append(QJsonObject{{"atMs", start},
+            {"paintMs", hoverClock.nsecsElapsed() / 1e6 - start}, {"area", double(area)}});
+        return result;
+    }
+};
+
+static int hoverAnimationProbe(PerformanceApplication &app)
+{
+    auto *screen = app.primaryScreen();
+    std::unique_ptr<snipaste::ui::SnipOverlay> overlay(snipaste::ui::SnipOverlay::createPrepared(screen));
+    overlay->setWindowFlag(Qt::WindowTransparentForInput);
+    overlay->setWindowFlag(Qt::WindowDoesNotAcceptFocus);
+    overlay->setAttribute(Qt::WA_ShowWithoutActivating);
+    overlay->beginCapture(screen);
+    overlay->setExitOnFocusLoss(false);
+    const QRect first(40, 60, screen->size().width() / 3, screen->size().height() / 3);
+    const QRect second(screen->size().width() / 3, 100,
+                       screen->size().width() * 3 / 5, screen->size().height() * 3 / 4);
+    QRect target = first;
+    overlay->setTargetDetector([&](QPoint, bool) { return target; });
+    overlay->show();
+    app.processEvents();
+    QMouseEvent initialMove(QEvent::MouseMove, first.center(), overlay->mapToGlobal(first.center()),
+                            Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(overlay.get(), &initialMove);
+    auto *animation = overlay->findChild<QVariantAnimation *>(QStringLiteral("hoverSelectionAnimation"));
+    animation->setCurrentTime(animation->duration());
+    const auto wait = [](int ms) {
+        QEventLoop loop;
+        QTimer::singleShot(ms, &loop, &QEventLoop::quit);
+        loop.exec();
+    };
+    wait(50);
+    QJsonArray transitions;
+    bool complete = true;
+    for (int i = 0; i < 12; ++i) {
+        if (!overlay->isVisible()) {
+            complete = false;
+            break;
+        }
+        target = i % 2 == 0 ? second : first;
+        app.hoverPaints = {};
+        app.hoverClock.start();
+        app.hoverOverlay = overlay.get();
+        QMouseEvent move(QEvent::MouseMove, target.center(), overlay->mapToGlobal(target.center()),
+                         Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(overlay.get(), &move);
+        wait(130);
+        app.hoverOverlay = nullptr;
+        transitions.append(app.hoverPaints);
+        complete = complete && overlay->captureGeometry().region.isEmpty()
+            && animation->endValue().toRectF() == QRectF(target) && !app.hoverPaints.isEmpty();
+    }
+    overlay->close();
+    const QJsonObject report{{"complete", complete}, {"platform", app.platformName()}, {"refreshHz", screen->refreshRate()},
+        {"logicalSize", QJsonArray{screen->size().width(), screen->size().height()}},
+        {"devicePixelRatio", screen->devicePixelRatio()}, {"transitions", transitions}};
+    const QByteArray json = QJsonDocument(report).toJson();
+    std::fwrite(json.constData(), 1, size_t(json.size()), stdout);
+    return complete ? 0 : 6;
+}
 
 // Native diagnostic only: sends events to its own widgets, never global
 // hotkeys or mouse input. Disk measurements use an isolated temporary directory.
@@ -100,8 +184,10 @@ static QJsonObject imageFormats(QTemporaryDir &temporary)
 
 int main(int argc, char **argv)
 {
-    QApplication app(argc, argv);
+    PerformanceApplication app(argc, argv);
     app.setQuitOnLastWindowClosed(false);
+    if (app.arguments().contains(QStringLiteral("--hover-animation")))
+        return hoverAnimationProbe(app);
     if (app.arguments().contains(QStringLiteral("--package-formats-only"))) {
         QTemporaryDir temporary;
         if (!temporary.isValid())

@@ -10,6 +10,7 @@
 #include <QList>
 #include <QPointer>
 #include <QRect>
+#include <QRegion>
 #include <QSize>
 #include <QStringList>
 #include <QWidget>
@@ -22,6 +23,7 @@ class QMouseEvent;
 class QTimer;
 class QToolButton;
 class QStackedLayout;
+class QVariantAnimation;
 
 namespace snipaste::ui
 {
@@ -32,6 +34,7 @@ class SnipBorderOverlay;
 class ScrollCapturePanel;
 class ScrollCapturePreview;
 class OcrOverlay;
+class CaptureTargetWorker;
 
 class SnipOverlay final : public QWidget
 {
@@ -42,6 +45,7 @@ class SnipOverlay final : public QWidget
     explicit SnipOverlay(QScreen *screen, bool autoCopy = false, QWidget *parent = nullptr);
     SnipOverlay(QScreen *screen, bool autoCopy, bool captureCursor, QRect initialSelection,
                 QWidget *parent = nullptr);
+    ~SnipOverlay() override;
 
     // Construct the hidden controls at application startup, without capturing
     // the desktop. The caller owns this reusable overlay.
@@ -55,13 +59,15 @@ class SnipOverlay final : public QWidget
     bool pasteSelection(bool closeAfter = true);
     void setFixedSelectionSize(const QSize &size);
     using TargetDetector = std::function<QRect(QPoint, bool)>;
-    void setTargetDetector(TargetDetector detector);
+    // Asynchronous element callbacks must capture values, not GUI objects.
+    void setTargetDetector(TargetDetector detector, bool asynchronous = false);
     void setDetectionOptions(bool detectWindows, bool detectElements, bool showHints);
     void setDetectionProcessFilters(const QStringList &excludedProcesses,
                                     const QStringList &unstableProcesses)
     {
         m_excludedDetectionProcesses = excludedProcesses;
         m_unstableDetectionProcesses = unstableProcesses;
+        invalidateTargetDetection();
     }
     void setExchangeNavigationKeys(bool enabled) { m_exchangeNavigationKeys = enabled; }
     void setLastSelection(QRect selection);
@@ -213,6 +219,9 @@ class SnipOverlay final : public QWidget
     QRect globalSelection() const;
     void drawCapturedCursor(const QScreen *screen);
     void drawMagnifier(QPainter &painter) const;
+    QRect magnifierRect(QPoint position, bool includeText = false) const;
+    QRect shortcutHintsRect() const;
+    void updateHoverCursor(QPoint previousPosition);
     void drawMagnifierGuides(QPainter &painter) const;
     void drawShortcutHints(QPainter &painter) const;
     void playCaptureSound() const;
@@ -224,6 +233,13 @@ class SnipOverlay final : public QWidget
     // Windows accessibility/UI Automation stack.  Callers that are trying to
     // get the first frame on screen can explicitly skip the latter.
     void updateHoverTarget(bool allowElements = true);
+    void invalidateTargetDetection();
+    void queryHoverElements();
+    void setHoverSelection(QRect selection, bool animate = true, bool provisional = false);
+    void startHoverTransition();
+    void updateHoverDisplay(QRectF selection);
+    QRect selectionLabelRect(QRect selection, const QString &text) const;
+    QString selectionSizeText() const;
     void updateDragSelection(QPoint position, Qt::KeyboardModifiers modifiers);
     QPoint sampledPixel() const;
     QString sampledColorText() const;
@@ -252,11 +268,23 @@ class SnipOverlay final : public QWidget
     QRect m_liveSelection;
     std::function<QImage()> m_backgroundProvider;
     QList<QRect> m_targetHierarchy;
+    QList<QRect> m_windowHierarchy;
+    quintptr m_targetWindow = 0;
+    quint64 m_targetRequest = 0;
+    QTimer *m_targetTimer = nullptr;
+    QPointer<CaptureTargetWorker> m_targetWorker;
     int m_targetLevel = 0;
     QPoint m_targetPoint = QPoint(-1, -1);
     QRect m_selection;
     QPoint m_dragOrigin;
     QRect m_hoverSelection;
+    QRectF m_hoverDisplaySelection;
+    QRegion m_hoverDecorationRegion;
+    QVariantAnimation *m_hoverAnimation = nullptr;
+    QTimer *m_hoverFrameTimer = nullptr;
+    QElapsedTimer m_hoverFrameClock;
+    int m_hoverFrameInterval = 16;
+    QTimer *m_hoverFallbackTimer = nullptr;
     QRect m_pressedTarget;
     QRect m_lastSelection;
     QList<QRect> m_regionHistory;
@@ -268,6 +296,7 @@ class SnipOverlay final : public QWidget
     bool m_movingSelection = false;
     TargetDetector m_targetDetector;
     bool m_nativeTargetDetector = true;
+    bool m_asynchronousTargetDetector = false;
     bool m_detectWindows = true;
     bool m_detectElements = true;
     bool m_elementMode = true;

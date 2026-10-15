@@ -117,6 +117,7 @@ set(SNIPASTE_UI_SOURCES
     src/ui/preferences/preferences_capture.cpp
     src/ui/preferences/appearance_settings.cpp
     src/ui/snip/snip_overlay.cpp
+    src/ui/snip/capture_target_worker.cpp
     src/ui/snip/capture_icons.cpp
     src/ui/snip/snip_toolbar.cpp
     src/ui/snip/snip_controls.cpp
@@ -203,6 +204,7 @@ set(SNIPASTE_UI_HEADERS
     src/ui/preferences/preferences_dialog.h
     src/ui/preferences/appearance_settings.h
     src/ui/snip/snip_overlay.h
+    src/ui/snip/capture_target_worker.h
     src/ui/recognition/ocr_overlay.h
     src/ui/snip/capture_icons.h
     src/ui/snip/window_capture_overlay.h

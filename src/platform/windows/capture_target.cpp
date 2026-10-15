@@ -45,89 +45,169 @@ BOOL CALLBACK findUnderlyingWindow(HWND window, LPARAM data)
     return FALSE;
 }
 
-bool accessibleBounds(HWND window, POINT point, RECT &bounds, QList<RECT> *hierarchy = nullptr)
+struct AutomationContext {
+    HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    ComPtr<IUIAutomation> automation;
+    ComPtr<IUIAutomationTreeWalker> walker;
+    ComPtr<IUIAutomationCacheRequest> cache;
+    HWND accessibleWindow = nullptr;
+    DWORD accessibleThread = 0;
+    ComPtr<IAccessible> accessibleRoot;
+
+    void ensureAutomation()
+    {
+        if (automation)
+            return;
+        if (FAILED(initialized) && initialized != RPC_E_CHANGED_MODE)
+            return;
+        if (FAILED(CoCreateInstance(CLSID_CUIAutomation8, nullptr, CLSCTX_INPROC_SERVER,
+                                     IID_PPV_ARGS(automation.GetAddressOf()))))
+            CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
+                               IID_PPV_ARGS(automation.GetAddressOf()));
+        if (!automation)
+            return;
+        ComPtr<IUIAutomation2> options;
+        if (SUCCEEDED(automation.As(&options))) {
+            options->put_ConnectionTimeout(30);
+            options->put_TransactionTimeout(30);
+        }
+        automation->get_ControlViewWalker(walker.GetAddressOf());
+        if (SUCCEEDED(automation->CreateCacheRequest(cache.GetAddressOf()))) {
+            cache->put_TreeScope(TreeScope_Element);
+            cache->AddProperty(UIA_BoundingRectanglePropertyId);
+            cache->AddProperty(UIA_NativeWindowHandlePropertyId);
+            cache->AddProperty(UIA_ProcessIdPropertyId);
+        }
+    }
+
+    ~AutomationContext()
+    {
+        cache.Reset();
+        walker.Reset();
+        automation.Reset();
+        accessibleRoot.Reset();
+        if (SUCCEEDED(initialized))
+            CoUninitialize();
+    }
+};
+
+bool accessibleBounds(AutomationContext &context, HWND window, POINT point, RECT &bounds, QList<RECT> &hierarchy,
+                       ComPtr<IAccessible> &leaf, LONG &leafChild, ULONGLONG deadline)
 {
     // AccessibleObjectFromPoint would find our topmost overlay. Start from the
     // underlying HWND instead, then hit-test its client accessibility tree.
-    const HRESULT initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     bool found = false;
-    {
-        ComPtr<IAccessible> current;
-        if (SUCCEEDED(AccessibleObjectFromWindow(window, static_cast<DWORD>(OBJID_CLIENT),
-                                                IID_PPV_ARGS(current.GetAddressOf())))) {
-            for (int depth = 0; depth < 16; ++depth) {
-                VARIANT hit;
-                VariantInit(&hit);
-                if (FAILED(current->accHitTest(point.x, point.y, &hit))) {
-                    VariantClear(&hit);
-                    break;
-                }
-                ComPtr<IAccessible> next;
-                if (hit.vt == VT_DISPATCH && hit.pdispVal) {
-                    hit.pdispVal->QueryInterface(IID_PPV_ARGS(next.GetAddressOf()));
-                } else if (hit.vt == VT_I4) {
-                    LONG x = 0, y = 0, width = 0, height = 0;
-                    if (SUCCEEDED(current->accLocation(&x, &y, &width, &height, hit))
-                        && width > 0 && height > 0) {
-                        RECT candidate{x, y, x + width, y + height};
-                        if (PtInRect(&candidate, point)) {
-                            bounds = candidate;
-                            if (hierarchy) hierarchy->append(candidate);
-                            found = true;
-                        }
-                    }
-                    if (hit.lVal != CHILDID_SELF) {
-                        ComPtr<IDispatch> child;
-                        if (SUCCEEDED(current->get_accChild(hit, child.GetAddressOf())) && child)
-                            child.As(&next);
-                    }
-                }
+    ComPtr<IAccessible> current;
+    const DWORD thread = GetWindowThreadProcessId(window, nullptr);
+    if (context.accessibleWindow == window && context.accessibleThread == thread)
+        current = context.accessibleRoot;
+    DWORD_PTR objectResult = 0;
+    // Bound the initial cross-process WM_GETOBJECT request. A provider can
+    // still stall a later MSAA call, so this function belongs on the worker.
+    if (!current && !SendMessageTimeoutW(window, WM_GETOBJECT, 0, OBJID_CLIENT,
+                              SMTO_ABORTIFHUNG | SMTO_BLOCK, 30, &objectResult))
+        return false;
+    if (objectResult)
+        ObjectFromLresult(static_cast<LRESULT>(objectResult), IID_IAccessible, 0,
+                            reinterpret_cast<void **>(current.GetAddressOf()));
+    if (!current)
+        CreateStdAccessibleObject(window, OBJID_CLIENT,
+                                     IID_PPV_ARGS(current.GetAddressOf()));
+    context.accessibleWindow = window;
+    context.accessibleThread = thread;
+    context.accessibleRoot = current;
+    if (current) {
+        for (int depth = 0; depth < 12 && GetTickCount64() < deadline; ++depth) {
+            VARIANT hit;
+            VariantInit(&hit);
+            if (FAILED(current->accHitTest(point.x, point.y, &hit))) {
                 VariantClear(&hit);
-                if (!next || next.Get() == current.Get())
-                    break;
-                current = next;
+                break;
             }
+            ComPtr<IAccessible> next;
+            if (hit.vt == VT_DISPATCH && hit.pdispVal) {
+                hit.pdispVal->QueryInterface(IID_PPV_ARGS(next.GetAddressOf()));
+            } else if (hit.vt == VT_I4) {
+                LONG x = 0, y = 0, width = 0, height = 0;
+                if (SUCCEEDED(current->accLocation(&x, &y, &width, &height, hit))
+                    && width > 0 && height > 0) {
+                    RECT candidate{x, y, x + width, y + height};
+                    if (PtInRect(&candidate, point)) {
+                        bounds = candidate;
+                        hierarchy.append(candidate);
+                        leaf = current;
+                        leafChild = hit.lVal;
+                        found = true;
+                    }
+                }
+                if (hit.lVal != CHILDID_SELF) {
+                    ComPtr<IDispatch> child;
+                    if (SUCCEEDED(current->get_accChild(hit, child.GetAddressOf())) && child)
+                        child.As(&next);
+                }
+            }
+            VariantClear(&hit);
+            if (!next || next.Get() == current.Get())
+                break;
+            current = next;
         }
     }
-    if (SUCCEEDED(initialized))
-        CoUninitialize();
     return found;
 }
 
-bool uiAutomationBounds(POINT point, RECT &bounds, QList<RECT> *hierarchy = nullptr)
+bool uiAutomationBounds(AutomationContext &context, HWND window, POINT point,
+                         IAccessible *accessible, LONG childId, RECT &bounds,
+                         QList<RECT> &hierarchy, ULONGLONG deadline)
 {
-    const HRESULT initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    bool found = false;
-    ComPtr<IUIAutomation> automation;
-    if (SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
-                                   IID_PPV_ARGS(automation.GetAddressOf())))) {
-        ComPtr<IUIAutomationTreeWalker> walker;
-        automation->get_ControlViewWalker(walker.GetAddressOf());
-        ComPtr<IUIAutomationElement> current;
-        if (SUCCEEDED(automation->ElementFromPoint(POINT{point.x, point.y},
-                                                   current.GetAddressOf())) && current) {
-            for (int depth = 0; depth < 16 && current; ++depth) {
-                RECT candidate{};
-                if (SUCCEEDED(current->get_CurrentBoundingRectangle(&candidate))
-                    && candidate.right > candidate.left && candidate.bottom > candidate.top
-                    && PtInRect(&candidate, point)) {
-                    bounds = candidate;
-                    if (hierarchy)
-                        hierarchy->append(candidate);
-                    found = true;
-                }
-                if (!walker)
-                    break;
-                ComPtr<IUIAutomationElement> parent;
-                if (FAILED(walker->GetParentElement(current.Get(), parent.GetAddressOf())))
-                    break;
-                current = parent;
-            }
-        }
+    context.ensureAutomation();
+    if (!context.automation || !context.cache || !context.walker)
+        return false;
+    DWORD processId = 0;
+    GetWindowThreadProcessId(window, &processId);
+    ComPtr<IUIAutomationElement> current;
+    if (accessible) {
+        // Preserve the MSAA hit beneath the overlay rather than asking UIA to
+        // hit-test our own topmost capture window.
+        context.automation->ElementFromIAccessibleBuildCache(accessible, childId,
+                                        context.cache.Get(), current.GetAddressOf());
     }
-    if (SUCCEEDED(initialized))
-        CoUninitialize();
-    return found;
+    if (!current) {
+        context.automation->ElementFromPointBuildCache(point, context.cache.Get(),
+                                                        current.GetAddressOf());
+    }
+    QList<RECT> candidates;
+    bool belongsToWindow = false;
+    for (int depth = 0; depth < 12 && current && GetTickCount64() < deadline; ++depth) {
+        int elementProcess = 0;
+        UIA_HWND handle = nullptr;
+        if (FAILED(current->get_CachedProcessId(&elementProcess))
+            || static_cast<DWORD>(elementProcess) != processId)
+            break;
+        if (SUCCEEDED(current->get_CachedNativeWindowHandle(&handle)) && handle) {
+            const HWND native = reinterpret_cast<HWND>(handle);
+            if (GetAncestor(native, GA_ROOT) != window)
+                break;
+            belongsToWindow = true;
+        }
+        RECT candidate{};
+        if (SUCCEEDED(current->get_CachedBoundingRectangle(&candidate))
+            && candidate.right > candidate.left && candidate.bottom > candidate.top
+            && PtInRect(&candidate, point)) {
+            candidates.append(candidate);
+        }
+        if (reinterpret_cast<HWND>(handle) == window)
+            break;
+        ComPtr<IUIAutomationElement> parent;
+        if (FAILED(context.walker->GetParentElementBuildCache(current.Get(),
+                                       context.cache.Get(), parent.GetAddressOf())))
+            break;
+        current = parent;
+    }
+    if (!belongsToWindow || candidates.isEmpty())
+        return false;
+    bounds = candidates.first();
+    hierarchy.append(candidates);
+    return true;
 }
 
 QString processExecutablePath(HWND window)
@@ -183,37 +263,60 @@ bool processMatches(HWND window, const QStringList &patterns)
 } // namespace
 #endif
 
-QList<QRect> captureTargetHierarchyAt(QPoint localPosition, QSize logicalScreenSize,
-                                      WId overlayWindow, bool elementMode,
-                                      const QStringList &excludedProcesses,
-                                      const QStringList &unstableProcesses,
-                                      quintptr *nativeWindow)
+CaptureTargetQuery prepareCaptureTargetQuery(QPoint localPosition, QSize logicalScreenSize,
+                                             WId overlayWindow, bool elementMode,
+                                             const QStringList &excludedProcesses,
+                                             const QStringList &unstableProcesses)
 {
+    CaptureTargetQuery query;
+    query.localPosition = localPosition;
+    query.logicalScreenSize = logicalScreenSize;
+    query.elementMode = elementMode;
+    query.excludedProcesses = excludedProcesses;
+    query.unstableProcesses = unstableProcesses;
 #ifdef Q_OS_WIN
-    if (nativeWindow)
-        *nativeWindow = 0;
     if (logicalScreenSize.isEmpty())
-        return {};
+        return query;
     const HWND overlay = reinterpret_cast<HWND>(overlayWindow);
     MONITORINFO monitor{sizeof(MONITORINFO)};
     if (!GetMonitorInfo(MonitorFromWindow(overlay, MONITOR_DEFAULTTONEAREST), &monitor))
+        return query;
+    query.overlayWindow = reinterpret_cast<quintptr>(overlay);
+    query.nativeOrigin = QPoint(monitor.rcMonitor.left, monitor.rcMonitor.top);
+    query.nativeScreenSize = QSize(monitor.rcMonitor.right - monitor.rcMonitor.left,
+                                     monitor.rcMonitor.bottom - monitor.rcMonitor.top);
+    query.valid = !query.nativeScreenSize.isEmpty();
+#else
+    Q_UNUSED(overlayWindow)
+#endif
+    return query;
+}
+
+QList<QRect> captureTargetHierarchy(const CaptureTargetQuery &query, quintptr *nativeWindow)
+{
+    if (nativeWindow)
+        *nativeWindow = 0;
+#ifdef Q_OS_WIN
+    if (!query.valid || query.logicalScreenSize.isEmpty() || query.nativeScreenSize.isEmpty())
         return {};
-    const qreal sx = qreal(monitor.rcMonitor.right - monitor.rcMonitor.left) / logicalScreenSize.width();
-    const qreal sy = qreal(monitor.rcMonitor.bottom - monitor.rcMonitor.top) / logicalScreenSize.height();
-    const POINT point{monitor.rcMonitor.left + qRound(localPosition.x() * sx),
-                      monitor.rcMonitor.top + qRound(localPosition.y() * sy)};
-    WindowSearch search{point, overlay};
+    const QPoint localPosition = query.localPosition;
+    const QSize logicalScreenSize = query.logicalScreenSize;
+    const qreal sx = qreal(query.nativeScreenSize.width()) / logicalScreenSize.width();
+    const qreal sy = qreal(query.nativeScreenSize.height()) / logicalScreenSize.height();
+    const POINT point{query.nativeOrigin.x() + qRound(localPosition.x() * sx),
+                      query.nativeOrigin.y() + qRound(localPosition.y() * sy)};
+    WindowSearch search{point, reinterpret_cast<HWND>(query.overlayWindow)};
     EnumWindows(findUnderlyingWindow, reinterpret_cast<LPARAM>(&search));
     if (!search.found)
         return {};
     if (nativeWindow)
         *nativeWindow = reinterpret_cast<quintptr>(search.found);
     const QRect screenRect(QPoint(), logicalScreenSize);
-    if (processMatches(search.found, excludedProcesses))
+    if (processMatches(search.found, query.excludedProcesses))
         return {screenRect};
     RECT target = search.bounds;
     QList<RECT> nativeTargets{search.bounds};
-    if (elementMode) {
+    if (query.elementMode) {
         HWND child = search.found;
         for (int depth = 0; depth < 32; ++depth) {
             POINT clientPoint = point;
@@ -229,11 +332,33 @@ QList<QRect> captureTargetHierarchyAt(QPoint localPosition, QSize logicalScreenS
         RECT element{};
         if (GetWindowRect(child, &element) && PtInRect(&element, point))
             target = element;
-        const bool unstable = processMatches(search.found, unstableProcesses);
-        if (!unstable && accessibleBounds(child, point, element, &nativeTargets))
-            target = element;
-        if (!unstable && uiAutomationBounds(point, element, &nativeTargets))
-            target = element;
+        const bool unstable = processMatches(search.found, query.unstableProcesses);
+        // UIA can synchronously call a provider on the target's UI thread. A
+        // compatibility call on that same thread must retain the HWND result.
+        if (query.accessibility && !unstable
+            && GetWindowThreadProcessId(child, nullptr) != GetCurrentThreadId()) {
+            thread_local AutomationContext context;
+            if (SUCCEEDED(context.initialized) || context.initialized == RPC_E_CHANGED_MODE) {
+                const ULONGLONG deadline = GetTickCount64() + 45;
+                ComPtr<IAccessible> leaf;
+                LONG leafChild = CHILDID_SELF;
+                const bool found = accessibleBounds(context, child, point, element, nativeTargets,
+                                                      leaf, leafChild, deadline);
+                if (found)
+                    target = element;
+                // MSAA already found a specific control. Do not add UIA
+                // initialization and ancestor RPCs to every successful hit.
+                RECT client{};
+                GetClientRect(child, &client);
+                MapWindowPoints(child, nullptr, reinterpret_cast<POINT *>(&client), 2);
+                const bool specific = found && (element.left > client.left || element.top > client.top
+                    || element.right < client.right || element.bottom < client.bottom);
+                if (!specific && GetTickCount64() < deadline
+                    && uiAutomationBounds(context, search.found, point, leaf.Get(), leafChild,
+                                             element, nativeTargets, deadline))
+                    target = element;
+            }
+        }
         RECT clipped{};
         if (IntersectRect(&clipped, &target, &search.bounds))
             target = clipped;
@@ -243,10 +368,10 @@ QList<QRect> captureTargetHierarchyAt(QPoint localPosition, QSize logicalScreenS
     for (const RECT &native : nativeTargets) {
         RECT clipped{};
         if (!IntersectRect(&clipped, &native, &search.bounds)) continue;
-        const int left = qFloor((clipped.left - monitor.rcMonitor.left) / sx);
-        const int top = qFloor((clipped.top - monitor.rcMonitor.top) / sy);
-        const int right = qCeil((clipped.right - monitor.rcMonitor.left) / sx);
-        const int bottom = qCeil((clipped.bottom - monitor.rcMonitor.top) / sy);
+        const int left = qFloor((clipped.left - query.nativeOrigin.x()) / sx);
+        const int top = qFloor((clipped.top - query.nativeOrigin.y()) / sy);
+        const int right = qCeil((clipped.right - query.nativeOrigin.x()) / sx);
+        const int bottom = qCeil((clipped.bottom - query.nativeOrigin.y()) / sy);
         const QRect candidate = QRect(left, top, right - left, bottom - top)
             .intersected(QRect(QPoint(), logicalScreenSize));
         if (candidate.contains(localPosition) && !targets.contains(candidate)) targets.append(candidate);
@@ -257,15 +382,20 @@ QList<QRect> captureTargetHierarchyAt(QPoint localPosition, QSize logicalScreenS
     });
     return targets;
 #else
-    Q_UNUSED(localPosition)
-    Q_UNUSED(logicalScreenSize)
-    Q_UNUSED(overlayWindow)
-    Q_UNUSED(elementMode)
-    Q_UNUSED(excludedProcesses)
-    Q_UNUSED(unstableProcesses)
-    Q_UNUSED(nativeWindow)
+    Q_UNUSED(query)
     return {};
 #endif
+}
+
+QList<QRect> captureTargetHierarchyAt(QPoint localPosition, QSize logicalScreenSize,
+                                      WId overlayWindow, bool elementMode,
+                                      const QStringList &excludedProcesses,
+                                      const QStringList &unstableProcesses,
+                                      quintptr *nativeWindow)
+{
+    return captureTargetHierarchy(prepareCaptureTargetQuery(localPosition, logicalScreenSize,
+                                       overlayWindow, elementMode, excludedProcesses,
+                                       unstableProcesses), nativeWindow);
 }
 
 QRect captureTargetAt(QPoint localPosition, QSize logicalScreenSize, WId overlayWindow, bool elementMode,

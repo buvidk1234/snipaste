@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <dlfcn.h>
+#include <libproc.h>
 
 namespace snipaste::platform {
 
@@ -93,11 +94,8 @@ pid_t processId(CFDictionaryRef dictionary)
 
 QString processPathForId(pid_t pid)
 {
-    NSRunningApplication *application =
-        [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
-    return application.executableURL.path
-        ? QString::fromUtf8(application.executableURL.path.UTF8String)
-        : QString();
+    char path[PROC_PIDPATHINFO_MAXSIZE]{};
+    return proc_pidpath(pid, path, sizeof(path)) > 0 ? QString::fromUtf8(path) : QString();
 }
 
 CGPoint cursorPosition()
@@ -125,46 +123,66 @@ QRect localRect(CGRect nativeBounds, const QPoint &nativeOrigin, QSize logicalSc
     return result.intersected(QRect(QPoint(), logicalScreenSize));
 }
 
-bool axElementBounds(CGPoint point, CGRect &bounds)
+QList<CGRect> axElementBounds(CGPoint point, pid_t processId)
 {
     if (!AXIsProcessTrusted())
-        return false;
-    AXUIElementRef system = AXUIElementCreateSystemWide();
-    if (!system)
-        return false;
+        return {};
+    AXUIElementRef application = AXUIElementCreateApplication(processId);
+    if (!application)
+        return {};
+    // An application-scoped hit test bypasses the capture overlay. Avoid
+    // changing the system-wide AX messaging timeout shared by other callers.
+    AXUIElementSetMessagingTimeout(application, 0.08f);
     AXUIElementRef element = nullptr;
-    const AXError hit = AXUIElementCopyElementAtPosition(system, static_cast<float>(point.x),
+    const AXError hit = AXUIElementCopyElementAtPosition(application, static_cast<float>(point.x),
                                                           static_cast<float>(point.y), &element);
-    CFRelease(system);
+    CFRelease(application);
     if (hit != kAXErrorSuccess || !element)
-        return false;
+        return {};
 
-    AXValueRef position = nullptr;
-    AXValueRef size = nullptr;
-    const AXError positionError = AXUIElementCopyAttributeValue(element, kAXPositionAttribute,
-                                                                  reinterpret_cast<CFTypeRef *>(&position));
-    const AXError sizeError = AXUIElementCopyAttributeValue(element, kAXSizeAttribute,
-                                                              reinterpret_cast<CFTypeRef *>(&size));
-    CGPoint origin{};
-    CGSize dimensions{};
-    const bool valid = positionError == kAXErrorSuccess && sizeError == kAXErrorSuccess
-        && AXValueGetType(position) == kAXValueCGPointType
-        && AXValueGetType(size) == kAXValueCGSizeType
-        && AXValueGetValue(position, static_cast<AXValueType>(kAXValueCGPointType), &origin)
-        && AXValueGetValue(size, static_cast<AXValueType>(kAXValueCGSizeType), &dimensions)
-        && dimensions.width > 0.0 && dimensions.height > 0.0;
-    if (valid)
-        bounds = CGRectMake(origin.x, origin.y, dimensions.width, dimensions.height);
-    if (position)
-        CFRelease(position);
-    if (size)
-        CFRelease(size);
-    CFRelease(element);
-    return valid;
+    const void *attributes[]{kAXPositionAttribute, kAXSizeAttribute, kAXParentAttribute};
+    CFArrayRef names = CFArrayCreate(kCFAllocatorDefault, attributes, 3, &kCFTypeArrayCallBacks);
+    QList<CGRect> bounds;
+    const CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + 0.12;
+    for (int depth = 0; depth < 8 && element && CFAbsoluteTimeGetCurrent() < deadline; ++depth) {
+        AXUIElementSetMessagingTimeout(element, 0.08f);
+        pid_t owner = 0;
+        if (AXUIElementGetPid(element, &owner) != kAXErrorSuccess || owner != processId)
+            break;
+        CFArrayRef values = nullptr;
+        AXUIElementRef parent = nullptr;
+        if (AXUIElementCopyMultipleAttributeValues(element, names, 0, &values) == kAXErrorSuccess
+            && values && CFArrayGetCount(values) == 3) {
+            const auto position = static_cast<AXValueRef>(CFArrayGetValueAtIndex(values, 0));
+            const auto size = static_cast<AXValueRef>(CFArrayGetValueAtIndex(values, 1));
+            CGPoint origin{};
+            CGSize dimensions{};
+            if (CFGetTypeID(position) == AXValueGetTypeID()
+                && CFGetTypeID(size) == AXValueGetTypeID()
+                && AXValueGetType(position) == kAXValueCGPointType
+                && AXValueGetType(size) == kAXValueCGSizeType
+                && AXValueGetValue(position, static_cast<AXValueType>(kAXValueCGPointType), &origin)
+                && AXValueGetValue(size, static_cast<AXValueType>(kAXValueCGSizeType), &dimensions)
+                && dimensions.width > 0.0 && dimensions.height > 0.0)
+                bounds.append(CGRectMake(origin.x, origin.y, dimensions.width, dimensions.height));
+            const CFTypeRef parentValue = CFArrayGetValueAtIndex(values, 2);
+            if (CFGetTypeID(parentValue) == AXUIElementGetTypeID()
+                && !CFEqual(parentValue, element))
+                parent = static_cast<AXUIElementRef>(CFRetain(parentValue));
+        }
+        if (values)
+            CFRelease(values);
+        CFRelease(element);
+        element = parent;
+    }
+    if (element)
+        CFRelease(element);
+    CFRelease(names);
+    return bounds;
 }
 
 NativeTarget targetAtPoint(CGPoint point, CGWindowID ignoredWindow,
-                           const QStringList &excludedProcesses)
+                           const QStringList &excludedProcesses, bool needsProcessPath)
 {
     NativeTarget result;
     CFArrayRef windows = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly
@@ -196,7 +214,8 @@ NativeTarget targetAtPoint(CGPoint point, CGWindowID ignoredWindow,
         result.bounds = bounds;
         result.processId = pid;
         result.processName = stringFromCFString(CFDictionaryGetValue(dictionary, kCGWindowOwnerName));
-        result.processPath = processPathForId(pid);
+        if (needsProcessPath || !excludedProcesses.isEmpty())
+            result.processPath = processPathForId(pid);
         result.windowId = windowId;
         if (processMatches(result, excludedProcesses))
             result = {};
@@ -208,27 +227,53 @@ NativeTarget targetAtPoint(CGPoint point, CGWindowID ignoredWindow,
 
 } // namespace
 
-QList<QRect> captureTargetHierarchyAt(QPoint localPosition, QSize logicalScreenSize,
-                                      WId overlayWindow, bool elementMode,
-                                      const QStringList &excludedProcesses,
-                                      const QStringList &unstableProcesses,
-                                      quintptr *nativeWindow)
+CaptureTargetQuery prepareCaptureTargetQuery(QPoint localPosition, QSize logicalScreenSize,
+                                             WId overlayWindow, bool elementMode,
+                                             const QStringList &excludedProcesses,
+                                             const QStringList &unstableProcesses)
+{
+    CaptureTargetQuery query;
+    query.localPosition = localPosition;
+    query.logicalScreenSize = logicalScreenSize;
+    query.nativeScreenSize = logicalScreenSize;
+    query.elementMode = elementMode;
+    query.excludedProcesses = excludedProcesses;
+    query.unstableProcesses = unstableProcesses;
+    if (logicalScreenSize.isEmpty())
+        return query;
+
+    query.nativeOrigin = nativeOriginForLocalPoint(localPosition);
+    if (overlayWindow && QGuiApplication::platformName() == QStringLiteral("cocoa")) {
+        NSView *overlayView = (__bridge NSView *)(void *)overlayWindow;
+        if (overlayView.window) {
+            query.overlayWindow = static_cast<quintptr>(overlayView.window.windowNumber);
+            const NSRect local = [overlayView convertRect:overlayView.bounds toView:nil];
+            const NSRect global = [overlayView.window convertRectToScreen:local];
+            NSScreen *primary = NSScreen.screens.firstObject;
+            if (primary) {
+                query.nativeOrigin = QPoint(qRound(NSMinX(global)),
+                                              qRound(NSMaxY(primary.frame) - NSMaxY(global)));
+            }
+        }
+    }
+    query.valid = true;
+    return query;
+}
+
+QList<QRect> captureTargetHierarchy(const CaptureTargetQuery &query, quintptr *nativeWindow)
 {
     if (nativeWindow)
         *nativeWindow = 0;
-    if (logicalScreenSize.isEmpty())
+    if (!query.valid || query.logicalScreenSize.isEmpty())
         return {};
-
-    const QPoint nativeOrigin = nativeOriginForLocalPoint(localPosition);
+    const QPoint localPosition = query.localPosition;
+    const QSize logicalScreenSize = query.logicalScreenSize;
+    const QPoint nativeOrigin = query.nativeOrigin;
     const QPoint nativePoint = nativeOrigin + localPosition;
-    CGWindowID ignoredWindow = kCGNullWindowID;
-    if (overlayWindow && QGuiApplication::platformName() == QStringLiteral("cocoa")) {
-        NSView *overlayView = (__bridge NSView *)(void *)overlayWindow;
-        if (overlayView.window)
-            ignoredWindow = static_cast<CGWindowID>(overlayView.window.windowNumber);
-    }
     const NativeTarget target = targetAtPoint(CGPointMake(nativePoint.x(), nativePoint.y()),
-                                              ignoredWindow, excludedProcesses);
+                                              static_cast<CGWindowID>(query.overlayWindow),
+                                              query.excludedProcesses,
+                                              query.elementMode && !query.unstableProcesses.isEmpty());
     if (nativeWindow)
         *nativeWindow = static_cast<quintptr>(target.windowId);
     const QRect screenRect(QPoint(), logicalScreenSize);
@@ -240,9 +285,10 @@ QList<QRect> captureTargetHierarchyAt(QPoint localPosition, QSize logicalScreenS
     if (!window.isEmpty() && window.contains(localPosition))
         targets.append(window);
 
-    if (elementMode && !processMatches(target, unstableProcesses)) {
-        CGRect elementBounds{};
-        if (axElementBounds(CGPointMake(nativePoint.x(), nativePoint.y()), elementBounds)) {
+    if (query.elementMode && query.accessibility && !processMatches(target, query.unstableProcesses)) {
+        const QList<CGRect> hierarchy = axElementBounds(CGPointMake(nativePoint.x(), nativePoint.y()),
+                                                         target.processId);
+        for (const CGRect &elementBounds : hierarchy) {
             // The overlay is still visible while the pointer is inspected.
             // Only accept an accessibility element contained by the selected
             // application window; this prevents the overlay's own controls
@@ -261,6 +307,17 @@ QList<QRect> captureTargetHierarchyAt(QPoint localPosition, QSize logicalScreenS
         return qint64(left.width()) * left.height() < qint64(right.width()) * right.height();
     });
     return targets;
+}
+
+QList<QRect> captureTargetHierarchyAt(QPoint localPosition, QSize logicalScreenSize,
+                                      WId overlayWindow, bool elementMode,
+                                      const QStringList &excludedProcesses,
+                                      const QStringList &unstableProcesses,
+                                      quintptr *nativeWindow)
+{
+    return captureTargetHierarchy(prepareCaptureTargetQuery(localPosition, logicalScreenSize,
+                                       overlayWindow, elementMode, excludedProcesses,
+                                       unstableProcesses), nativeWindow);
 }
 
 QRect captureTargetAt(QPoint localPosition, QSize logicalScreenSize, WId overlayWindow,
