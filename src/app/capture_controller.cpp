@@ -7,6 +7,7 @@
 #include "core/recognition/barcode_service.h"
 #include "platform/desktop_integration.h"
 #include "ui/annotation/annotation_dialog.h"
+#include "ui/ai/ai_dialog.h"
 #include "ui/clipboard_output.h"
 #include "ui/output/image_output.h"
 #include "ui/paste/paste_manager.h"
@@ -139,6 +140,10 @@ void CaptureController::start(const CaptureRequest &request)
     m_activeOverlay->setHoldAfterCapture(hold);
     m_activeOverlay->setKeepAspectRatio(keepAspect);
     configureOverlay(superCaptureMode);
+    QObject::connect(m_activeOverlay, &snipaste::ui::SnipOverlay::aiRequested, this,
+                     [this, overlay = m_activeOverlay](const QImage &image) {
+                         overlay->showAiDialog(new ui::AiDialog(image, core::AiSettings::fromConfig(m_config), overlay));
+                     });
     m_activeOverlay->setLastSelection(m_lastSelection.translated(-screen->geometry().topLeft()));
     QList<QRect> localRegions;
     for (const QRect &region : m_recentSelections)

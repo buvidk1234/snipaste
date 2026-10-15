@@ -35,6 +35,7 @@ class SnipBorderOverlay;
 class ScrollCapturePanel;
 class ScrollCapturePreview;
 class OcrOverlay;
+class AiDialog;
 class CaptureTargetWorker;
 
 class SnipOverlay final : public QWidget
@@ -56,6 +57,7 @@ class SnipOverlay final : public QWidget
 
     void captureSelectionImmediately();
     void startScrollCapture();
+    void showAiDialog(AiDialog *dialog);
     // The global paste command uses the current selection while this
     // capture session is open, before it has entered clipboard/history.
     bool pasteSelection(bool closeAfter = true);
@@ -160,6 +162,7 @@ class SnipOverlay final : public QWidget
     void pasteRequested(const QImage &image);
     void annotateRequested(const QImage &image);
     void ocrRequested(const QImage &image);
+    void aiRequested(const QImage &image);
     void ocrCompleted();
     void barcodeRequested(const QImage &image);
     void printRequested(const QImage &image);
@@ -335,6 +338,8 @@ class SnipOverlay final : public QWidget
     AnnotationCanvas *m_canvas = nullptr;
     AnnotationCanvas *m_preparedCanvas = nullptr;
     OcrOverlay *m_ocrOverlay = nullptr;
+    QWidget *m_aiLayer = nullptr;
+    AiDialog *m_aiDialog = nullptr;
     QString m_ocrEngine;
     QString m_ocrLanguage;
     bool m_reusable = false;

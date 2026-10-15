@@ -32,6 +32,7 @@ class PreferencesDialog final : public QDialog
     QWidget *createOutputPage(QWidget *parent);
     QWidget *createControlPage(QWidget *parent);
     QWidget *createUpdatePage(QWidget *parent);
+    QWidget *createAiPage(QWidget *parent);
     QWidget *createAboutPage(QWidget *parent);
     int px(int physicalPixels) const;
     QVector<std::function<void()>> m_pageSavers;

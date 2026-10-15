@@ -500,7 +500,7 @@ void UiRegressionTest::preferencesProfessionalReferencePages()
     QTest::qWait(20);
     auto *tabs = dialog.findChild<QTabWidget *>(QStringLiteral("preferencesTabs"));
     QVERIFY(tabs);
-    QCOMPARE(tabs->count(), 8);
+    QCOMPARE(tabs->count(), 9);
     QCOMPARE(tabs->tabText(0), QStringLiteral("常规"));
     QCOMPARE(tabs->tabText(1), QStringLiteral("界面"));
     const QString artifactDir = qEnvironmentVariable("SNIPASTE_TEST_ARTIFACTS");
@@ -627,7 +627,7 @@ void UiRegressionTest::preferencesProfessionalReferencePages()
     updateHours->setValue(48);
     proxyType->setCurrentText(QStringLiteral("HTTP 代理"));
     proxyAuth->setChecked(true);
-    tabs->setCurrentIndex(7);
+    tabs->setCurrentIndex(8);
     QTest::qWait(20);
     QVERIFY(save(QStringLiteral("preferences-about.png")));
     QCOMPARE(dialog.windowTitle(), QStringLiteral("Snipaste 首选项"));

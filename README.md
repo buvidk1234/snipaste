@@ -14,6 +14,8 @@
 
 更多操作可自行探索。
 
+在“首选项 → AI”中填写 API Key、接口基础地址（例如 `https://api.openai.com/v1`）和支持图片输入的模型名，关闭首选项即可保存。服务需要兼容 **Responses API**，请求携带 `tools: [{"type":"image_generation"}]`，生图需要接口及模型支持该工具。框选截图后点击工具栏的 **AI**，选区附近会出现悬浮对话面板，支持拖动和连续追问；选区中的标注也会提交。回复支持文字和图片，可继续要求修改生成的图片，右键图片可复制或保存原图。按 **Enter** 发送，**Shift + Enter** 换行，点击停止按钮可取消请求。按 **Esc** 或点击关闭按钮可返回原来的截图选区，保留标注。密钥保存在本机配置文件中，对话仅保留在当前面板内。
+
 ## 构建
 
 构建配置只有两个文件：[CMakeLists.txt](CMakeLists.txt) 定义构建、测试和打包规则，[CMakePresets.json](CMakePresets.json) 保存平台和 Debug / Release 参数。本地和 CI 使用相同命令，产物位于 `build/<preset>/`。

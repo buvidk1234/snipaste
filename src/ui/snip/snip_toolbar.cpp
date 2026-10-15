@@ -62,11 +62,9 @@ void SnipOverlay::createToolbar()
     stack->addWidget(m_toolOptions, 0, Qt::AlignLeft);
 
     // Keep the action row inside the overlay at fractional DPI.  The row has
-    // eighteen regular buttons, one narrower "more" button, two separators,
-    // and the action frame border.  The previous estimate was based on the
-    // pre-scroll-capture button count, so the extra action made the toolbar
-    // extend past narrow logical screens at 150% and 200% scaling.
-    const qreal compact = qMin<qreal>(1, qMax<qreal>(0, (width() - 40) / 576.0));
+    // nineteen regular buttons, one narrower "more" button, two separators,
+    // and the action frame border.
+    const qreal compact = qMin<qreal>(1, qMax<qreal>(0, (width() - 40) / 608.0));
     const auto button = [row, actions, compact](CaptureIcon icon, const QString &name, const QString &tip) {
         auto *b = new QToolButton(actions);
         b->setObjectName(name);
@@ -238,6 +236,15 @@ void SnipOverlay::createToolbar()
     separator();
     connect(button(CaptureIcon::Ocr, QStringLiteral("文字识别"), QStringLiteral("识别选区文字")),
             &QToolButton::clicked, this, &SnipOverlay::ocrSelection);
+    connect(button(CaptureIcon::Ai, QStringLiteral("AI"), QStringLiteral("与 AI 聊聊这张截图")),
+            &QToolButton::clicked, this, [this] {
+                if (m_canvas)
+                    m_canvas->finishTextInput();
+                const QImage image = m_canvas ? m_canvas->renderedImage() : m_background.copy(imageSelection());
+                if (image.isNull())
+                    return;
+                emit aiRequested(image);
+            });
     auto *scrollCapture = button(CaptureIcon::Scroll, QStringLiteral("滚动截图"),
                                  QStringLiteral("滚动截图：手动滚动后采集当前视口"));
     connect(scrollCapture, &QToolButton::clicked, this, &SnipOverlay::startScrollCapture);

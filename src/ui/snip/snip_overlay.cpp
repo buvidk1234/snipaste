@@ -3,6 +3,7 @@
 #include "platform/keyboard.h"
 #include "platform/screen_capture.h"
 #include "platform/windows/capture_target.h"
+#include "ui/ai/ai_dialog.h"
 #include "ui/annotation/annotation_canvas.h"
 #include "ui/annotation/annotation_options.h"
 #include "ui/clipboard_output.h"
@@ -199,7 +200,7 @@ void SnipOverlay::beginCapture(QScreen *screen, bool autoCopy, bool captureCurso
     setGeometry(m_screenGeometry);
     if (m_toolbar)
     {
-        const qreal compact = qMin<qreal>(1, qMax<qreal>(0, (width() - 40) / 576.0));
+        const qreal compact = qMin<qreal>(1, qMax<qreal>(0, (width() - 40) / 608.0));
         for (auto *button : m_toolbar->findChildren<QToolButton *>())
             if (button->property("captureActionButton").toBool())
                 button->setFixedSize(qMax(16, int(32 * compact)), 30);
@@ -280,6 +281,11 @@ void SnipOverlay::resizeEvent(QResizeEvent *event)
         m_selectionBorder->setGeometry(rect());
     if (m_ocrOverlay)
         m_ocrOverlay->setGeometry(rect());
+    if (m_aiLayer)
+    {
+        m_aiLayer->setGeometry(rect());
+        m_aiDialog->placeNear(m_selection, rect());
+    }
 }
 
 void SnipOverlay::captureSelectionImmediately()
@@ -773,7 +779,7 @@ void SnipOverlay::paintEvent(QPaintEvent *event)
     if ((m_showCrosshair || (m_showMagnifierGuides && !m_disableGuides)) && !m_selectionConfirmed &&
         rect().contains(m_cursorPosition))
         drawMagnifierGuides(painter);
-    if (m_showShortcutHints && !m_dragging && !m_transformingSelection &&
+    if (m_showShortcutHints && !m_dragging && !m_transformingSelection && !m_aiLayer &&
         event->region().intersects(shortcutHintsRect()))
         drawShortcutHints(painter);
     // Qt repaints translucent children along with their parent. Requesting
@@ -1002,6 +1008,13 @@ void SnipOverlay::mouseDoubleClickEvent(QMouseEvent *event)
 
 void SnipOverlay::keyPressEvent(QKeyEvent *event)
 {
+    if (m_aiDialog)
+    {
+        if (event->key() == Qt::Key_Escape)
+            m_aiDialog->close();
+        event->accept();
+        return;
+    }
     if (m_ocrOverlay) {
         QApplication::sendEvent(m_ocrOverlay, event);
         return;
@@ -1588,6 +1601,9 @@ void SnipOverlay::releaseCaptureResources()
 {
     invalidateTargetDetection();
     setHoverSelection({}, false);
+    delete m_aiLayer;
+    m_aiLayer = nullptr;
+    m_aiDialog = nullptr;
     clearOcrOverlay();
     if (m_annotationOptions)
         m_annotationOptions->setCanvas(nullptr);
@@ -1634,6 +1650,13 @@ void SnipOverlay::updateToolbarGeometry()
 {
     if (!m_toolbar)
         return;
+    if (m_aiLayer)
+    {
+        m_toolbar->hide();
+        m_sizeToolbar->hide();
+        m_aiLayer->raise();
+        return;
+    }
     if (m_ocrOverlay) {
         m_toolbar->hide();
         m_sizeToolbar->hide();
