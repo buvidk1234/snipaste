@@ -6,84 +6,20 @@
 
 #include <QApplication>
 #include <QClipboard>
-#include <QDir>
-#include <QFile>
-#include <QFileInfo>
-#include <QHash>
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QMimeData>
-#include <QSaveFile>
-#include <QSet>
-#include <QStandardPaths>
-#include <QUrl>
-#include <QUuid>
 
-namespace snipaste::ui {
-
-namespace {
-
-constexpr auto kPersistedImageKey = "_snipastePersistedImageKey";
-constexpr auto kPersistedImagePath = "_snipastePersistedImagePath";
-
-quint64 imageFingerprint(const QImage &image)
+namespace snipaste::ui
 {
-    if (image.isNull())
-        return 0;
-    // FNV-1a keeps only a 64-bit signature instead of retaining the entire
-    // captured image solely to recognize the next paste.  Hash rows directly
-    // so the comparison does not allocate another image-sized QByteArray.
-    quint64 hash = 1469598103934665603ULL;
-    const auto mix = [&hash](quint64 value) {
-        hash ^= value;
-        hash *= 1099511628211ULL;
-    };
-    mix(static_cast<quint64>(image.width()));
-    mix(static_cast<quint64>(image.height()));
-    // QClipboard may hand the same pixels back in a different QImage format
-    // (for example RGB32 instead of ARGB32_Premultiplied).  Hash the logical
-    // QRgb value returned by QImage::pixel(), rather than the storage bytes,
-    // so capture-position detection survives that conversion without keeping
-    // a second, canonical full-size image resident.
-    for (int y = 0; y < image.height(); ++y) {
-        for (int x = 0; x < image.width(); ++x)
-            mix(static_cast<quint64>(image.pixel(x, y)));
-    }
-    return hash;
-}
-
-} // namespace
-
-PasteManager::PasteManager(QObject *parent)
-    : QObject(parent)
+void PasteManager::forEachWindow(const std::function<void(PasteWindow *)> &action)
 {
-    m_groups.append(Group{QStringLiteral("默认组"), {}});
-}
-
-PasteManager::~PasteManager()
-{
-    // Top-level widgets have no QWidget parent; the manager owns their lifetime.
-    for (const Group &group : m_groups) {
-        for (const QPointer<PasteWindow> &window : group.windows) {
-            if (window) {
-                window->disconnect(this);
-                delete window.data();
-            }
-        }
-    }
-}
-
-PasteWindow *PasteManager::createPaste(const QImage &image)
-{
-    if (image.isNull())
-        return nullptr;
-
     prune();
-    if (m_groups.isEmpty())
-        m_groups.append(Group{QStringLiteral("默认组"), {}});
+    for (const auto &group : m_groups)
+        for (const auto &window : group.windows)
+            if (window)
+                action(window.data());
+}
 
-    auto *window = new PasteWindow(image);
+void PasteManager::applyWindowSettings(PasteWindow *window)
+{
     window->setPasteManager(this);
     window->setResizeEnabled(m_resizeEnabled);
     window->setExchangeNavigationKeys(m_exchangeNavigationKeys);
@@ -106,20 +42,85 @@ PasteWindow *PasteManager::createPaste(const QImage &image)
     window->setFlashTransparency(m_flashTransparency);
     window->setKeepOnDrag(m_keepOnDrag);
     window->setWindowOpacity(m_defaultOpacity);
-    window->setCopyAsFileShortcutEnabled(
-        m_copyAsFileMode != static_cast<int>(CopyAsFileMode::Disabled));
+    window->setCopyAsFileShortcutEnabled(m_copyAsFileMode != static_cast<int>(CopyAsFileMode::Disabled));
+}
+
+namespace
+{
+
+quint64 imageFingerprint(const QImage &image)
+{
+    if (image.isNull())
+        return 0;
+    // FNV-1a keeps only a 64-bit signature instead of retaining the entire
+    // captured image solely to recognize the next paste.  Hash rows directly
+    // so the comparison does not allocate another image-sized QByteArray.
+    quint64 hash = 1469598103934665603ULL;
+    const auto mix = [&hash](quint64 value) {
+        hash ^= value;
+        hash *= 1099511628211ULL;
+    };
+    mix(static_cast<quint64>(image.width()));
+    mix(static_cast<quint64>(image.height()));
+    // QClipboard may hand the same pixels back in a different QImage format
+    // (for example RGB32 instead of ARGB32_Premultiplied).  Hash the logical
+    // QRgb value returned by QImage::pixel(), rather than the storage bytes,
+    // so capture-position detection survives that conversion without keeping
+    // a second, canonical full-size image resident.
+    for (int y = 0; y < image.height(); ++y)
+    {
+        for (int x = 0; x < image.width(); ++x)
+            mix(static_cast<quint64>(image.pixel(x, y)));
+    }
+    return hash;
+}
+
+} // namespace
+
+PasteManager::PasteManager(QObject *parent) : QObject(parent)
+{
+    m_groups.append(Group{QStringLiteral("默认组"), {}});
+}
+
+PasteManager::~PasteManager()
+{
+    // Top-level widgets have no QWidget parent; the manager owns their lifetime.
+    for (const Group &group : m_groups)
+    {
+        for (const QPointer<PasteWindow> &window : group.windows)
+        {
+            if (window)
+            {
+                window->disconnect(this);
+                delete window.data();
+            }
+        }
+    }
+}
+
+PasteWindow *PasteManager::createPaste(const QImage &image)
+{
+    if (image.isNull())
+        return nullptr;
+
+    prune();
+    if (m_groups.isEmpty())
+        m_groups.append(Group{QStringLiteral("默认组"), {}});
+
+    auto *window = new PasteWindow(image);
+    applyWindowSettings(window);
     m_groups[m_activeGroup].windows.append(window);
     connectWindow(window);
     QImage pixels = image;
     pixels.setDevicePixelRatio(1);
     // Keep the last capture region available for direct createPaste() calls;
     // the awaiting flag only controls clipboard-priority handling below.
-    const bool fromCapture = m_captureRegion.isValid()
-        && pixels.size() == m_captureSize
-        && (image.cacheKey() == m_captureImageKey
-            || imageFingerprint(pixels) == m_captureFingerprint);
+    const bool fromCapture =
+        m_captureRegion.isValid() && pixels.size() == m_captureSize &&
+        (image.cacheKey() == m_captureImageKey || imageFingerprint(pixels) == m_captureFingerprint);
     const QPoint capturePosition = m_captureRegion.topLeft();
-    if (fromCapture) {
+    if (fromCapture)
+    {
         m_captureAwaitingPaste = false;
     }
     if (fromCapture && m_useCapturePosition)
@@ -135,7 +136,8 @@ PasteWindow *PasteManager::createPaste(const QImage &image)
 PasteWindow *PasteManager::createPasteAtPosition(const QImage &image, const QPoint &globalPosition)
 {
     PasteWindow *window = createPaste(image);
-    if (window) {
+    if (window)
+    {
         window->setActivateOnShow(m_activateNew);
         window->showAtPosition(globalPosition);
         window->setActivateOnShow(true);
@@ -167,41 +169,25 @@ void PasteManager::setDefaultOpacity(qreal opacity)
 void PasteManager::setShadowEnabled(bool enabled)
 {
     m_shadowEnabled = enabled;
-    prune();
-    for (Group &group : m_groups)
-        for (const QPointer<PasteWindow> &window : group.windows)
-            if (window)
-                window->setShadowEnabled(enabled);
+    forEachWindow([&](PasteWindow *window) { window->setShadowEnabled(enabled); });
 }
 
 void PasteManager::setResizeEnabled(bool enabled)
 {
     m_resizeEnabled = enabled;
-    prune();
-    for (Group &group : m_groups)
-        for (const QPointer<PasteWindow> &window : group.windows)
-            if (window)
-                window->setResizeEnabled(enabled);
+    forEachWindow([&](PasteWindow *window) { window->setResizeEnabled(enabled); });
 }
 
 void PasteManager::setExchangeNavigationKeys(bool enabled)
 {
     m_exchangeNavigationKeys = enabled;
-    prune();
-    for (Group &group : m_groups)
-        for (const QPointer<PasteWindow> &window : group.windows)
-            if (window)
-                window->setExchangeNavigationKeys(enabled);
+    forEachWindow([&](PasteWindow *window) { window->setExchangeNavigationKeys(enabled); });
 }
 
 void PasteManager::setMaxNetworkImageBytes(qint64 bytes)
 {
     m_maxNetworkImageBytes = qBound<qint64>(0, bytes, 1024LL * 1024 * 1024);
-    prune();
-    for (Group &group : m_groups)
-        for (const QPointer<PasteWindow> &window : group.windows)
-            if (window)
-                window->setMaxNetworkImageBytes(m_maxNetworkImageBytes);
+    forEachWindow([&](PasteWindow *window) { window->setMaxNetworkImageBytes(m_maxNetworkImageBytes); });
 }
 
 void PasteManager::setMagneticAttachThreshold(int pixels)
@@ -209,153 +195,92 @@ void PasteManager::setMagneticAttachThreshold(int pixels)
     m_magneticAttachThreshold = qBound(0, pixels, 500);
 }
 
-void PasteManager::setCopyAsFile(bool enabled)
-{
-    setCopyAsFileMode(enabled ? static_cast<int>(CopyAsFileMode::Always)
-                              : static_cast<int>(CopyAsFileMode::Disabled));
-}
-
 void PasteManager::setMaxSize(int pixels)
 {
     m_maxSize = qBound(0, pixels, 100000);
-    prune();
-    for (Group &group : m_groups)
-        for (const QPointer<PasteWindow> &window : group.windows)
-            if (window)
-                window->setMaxSize(m_maxSize);
+    forEachWindow([&](PasteWindow *window) { window->setMaxSize(m_maxSize); });
 }
 
 void PasteManager::setThumbnailSize(const QSize &size)
 {
-    m_thumbnailSize = QSize(qBound(1, size.width(), 4096),
-                            qBound(1, size.height(), 4096));
-    prune();
-    for (Group &group : m_groups)
-        for (const QPointer<PasteWindow> &window : group.windows)
-            if (window)
-                window->setThumbnailSize(m_thumbnailSize);
+    m_thumbnailSize = QSize(qBound(1, size.width(), 4096), qBound(1, size.height(), 4096));
+    forEachWindow([&](PasteWindow *window) { window->setThumbnailSize(m_thumbnailSize); });
 }
 
 void PasteManager::setWheelCenter(bool enabled)
 {
     m_wheelCenter = enabled;
-    prune();
-    for (Group &group : m_groups)
-        for (const QPointer<PasteWindow> &window : group.windows)
-            if (window)
-                window->setWheelCenter(enabled);
+    forEachWindow([&](PasteWindow *window) { window->setWheelCenter(enabled); });
 }
 
 void PasteManager::setResetTransform(bool enabled)
 {
     m_resetTransform = enabled;
-    prune();
-    for (Group &group : m_groups)
-        for (const QPointer<PasteWindow> &window : group.windows)
-            if (window)
-                window->setResetTransform(enabled);
+    forEachWindow([&](PasteWindow *window) { window->setResetTransform(enabled); });
 }
 
 void PasteManager::setHelpKeys(bool enabled)
 {
     m_helpKeys = enabled;
-    prune();
-    for (Group &group : m_groups)
-        for (const QPointer<PasteWindow> &window : group.windows)
-            if (window)
-                window->setHelpKeys(enabled);
+    forEachWindow([&](PasteWindow *window) { window->setHelpKeys(enabled); });
 }
 
 void PasteManager::setDisableDpiScaling(bool enabled)
 {
     m_disableDpiScaling = enabled;
-    prune();
-    for (Group &group : m_groups)
-        for (const QPointer<PasteWindow> &window : group.windows)
-            if (window)
-                window->setDisableDpiScaling(enabled);
+    forEachWindow([&](PasteWindow *window) { window->setDisableDpiScaling(enabled); });
 }
 
 void PasteManager::setCloseConfirm(bool enabled)
 {
     m_closeConfirm = enabled;
-    prune();
-    for (Group &group : m_groups)
-        for (const QPointer<PasteWindow> &window : group.windows)
-            if (window)
-                window->setCloseConfirm(enabled);
+    forEachWindow([&](PasteWindow *window) { window->setCloseConfirm(enabled); });
 }
 
 void PasteManager::setDestroyConfirm(bool enabled)
 {
     m_destroyConfirm = enabled;
-    prune();
-    for (Group &group : m_groups)
-        for (const QPointer<PasteWindow> &window : group.windows)
-            if (window)
-                window->setDestroyConfirm(enabled);
+    forEachWindow([&](PasteWindow *window) { window->setDestroyConfirm(enabled); });
 }
 
 void PasteManager::setCopyAsFileMode(int mode)
 {
     m_copyAsFileMode = static_cast<int>(copyAsFileModeFromInt(mode));
-    prune();
-    for (Group &group : m_groups)
-        for (const QPointer<PasteWindow> &window : group.windows)
-            if (window)
-                window->setCopyAsFileShortcutEnabled(
-                    m_copyAsFileMode != static_cast<int>(CopyAsFileMode::Disabled));
+    forEachWindow([&](PasteWindow *window) {
+        window->setCopyAsFileShortcutEnabled(m_copyAsFileMode != static_cast<int>(CopyAsFileMode::Disabled));
+    });
 }
 
 void PasteManager::setBackgroundMode(const QString &mode)
 {
     m_backgroundMode = mode.trimmed().isEmpty() ? QStringLiteral("伪透明") : mode.trimmed();
-    prune();
-    for (Group &group : m_groups)
-        for (const QPointer<PasteWindow> &window : group.windows)
-            if (window)
-                window->setBackgroundMode(m_backgroundMode);
+    forEachWindow([&](PasteWindow *window) { window->setBackgroundMode(m_backgroundMode); });
 }
 
 void PasteManager::setSmoothScale(bool enabled)
 {
     m_smoothScale = enabled;
-    prune();
-    for (Group &group : m_groups)
-        for (const QPointer<PasteWindow> &window : group.windows)
-            if (window)
-                window->setSmoothScale(enabled);
+    forEachWindow([&](PasteWindow *window) { window->setSmoothScale(enabled); });
 }
 
 void PasteManager::setEscapeActions(const QString &escapeAction, const QString &shiftEscapeAction)
 {
     m_escapeAction = escapeAction;
     m_shiftEscapeAction = shiftEscapeAction;
-    prune();
-    for (Group &group : m_groups)
-        for (const QPointer<PasteWindow> &window : group.windows)
-            if (window)
-                window->setEscapeActions(m_escapeAction, m_shiftEscapeAction);
+    forEachWindow(
+        [&](PasteWindow *window) { window->setEscapeActions(m_escapeAction, m_shiftEscapeAction); });
 }
 
 void PasteManager::setMouseActions(const QStringList &actions)
 {
     m_mouseActions = actions;
-    prune();
-    for (Group &group : m_groups)
-        for (const QPointer<PasteWindow> &window : group.windows)
-            if (window)
-                window->setMouseActions(m_mouseActions);
+    forEachWindow([&](PasteWindow *window) { window->setMouseActions(m_mouseActions); });
 }
 
 void PasteManager::setVirtualDesktopPinned(bool enabled)
 {
     m_virtualDesktopPinned = enabled;
-    prune();
-    for (Group &group : m_groups)
-        for (const QPointer<PasteWindow> &window : group.windows)
-            if (window)
-                window->setVirtualDesktopPinned(enabled);
+    forEachWindow([&](PasteWindow *window) { window->setVirtualDesktopPinned(enabled); });
 }
 
 void PasteManager::setHiddenForFileDialog(bool hidden)
@@ -363,18 +288,24 @@ void PasteManager::setHiddenForFileDialog(bool hidden)
     if (hidden == m_hiddenForFileDialog)
         return;
     m_hiddenForFileDialog = hidden;
-    if (hidden) {
+    if (hidden)
+    {
         m_fileDialogVisible.clear();
         prune();
-        for (const Group &group : m_groups) {
-            for (const QPointer<PasteWindow> &window : group.windows) {
-                if (window && window->isVisible() && !window->isSoloHidden()) {
+        for (const Group &group : m_groups)
+        {
+            for (const QPointer<PasteWindow> &window : group.windows)
+            {
+                if (window && window->isVisible() && !window->isSoloHidden())
+                {
                     m_fileDialogVisible.append(window);
                     window->hide();
                 }
             }
         }
-    } else {
+    }
+    else
+    {
         for (const QPointer<PasteWindow> &window : m_fileDialogVisible)
             if (window && window->state() == PasteWindow::State::Active)
                 window->showExisting();
@@ -395,11 +326,7 @@ void PasteManager::setActivateNew(bool enabled)
 void PasteManager::setFlashTransparency(bool enabled)
 {
     m_flashTransparency = enabled;
-    prune();
-    for (Group &group : m_groups)
-        for (const QPointer<PasteWindow> &window : group.windows)
-            if (window)
-                window->setFlashTransparency(enabled);
+    forEachWindow([&](PasteWindow *window) { window->setFlashTransparency(enabled); });
 }
 
 void PasteManager::setFlashGroupSwitch(bool enabled)
@@ -415,11 +342,7 @@ void PasteManager::setHideAllOnPasteKey(bool enabled)
 void PasteManager::setKeepOnDrag(bool enabled)
 {
     m_keepOnDrag = enabled;
-    prune();
-    for (Group &group : m_groups)
-        for (const QPointer<PasteWindow> &window : group.windows)
-            if (window)
-                window->setKeepOnDrag(enabled);
+    forEachWindow([&](PasteWindow *window) { window->setKeepOnDrag(enabled); });
 }
 
 void PasteManager::connectWindow(PasteWindow *window)
@@ -432,11 +355,9 @@ void PasteManager::connectWindow(PasteWindow *window)
     QObject::connect(window, &PasteWindow::copyRequested, this, [this](PasteWindow *source) {
         if (!source)
             return;
-        copyImageToClipboard(source->displayedImage(), m_copyAsFileMode, false,
-                             ClipboardImageSource::Paste);
+        copyImageToClipboard(source->displayedImage(), m_copyAsFileMode, false, ClipboardImageSource::Paste);
     });
-    QObject::connect(window, &PasteWindow::copyAsFileRequested, this,
-                     [this](PasteWindow *source) {
+    QObject::connect(window, &PasteWindow::copyAsFileRequested, this, [this](PasteWindow *source) {
         if (source)
             copyImageToClipboard(source->displayedImage(), m_copyAsFileMode, true,
                                  ClipboardImageSource::Paste);
@@ -447,7 +368,8 @@ void PasteManager::connectWindow(PasteWindow *window)
                              return;
                          if (m_selected.contains(source) && m_selected.size() > 1)
                              moveSelectedBy(delta);
-                         else {
+                         else
+                         {
                              source->move(source->pos() + delta);
                              snapWindowToNearby(source);
                          }
@@ -458,9 +380,10 @@ void PasteManager::connectWindow(PasteWindow *window)
                      [this](PasteWindow *source, qreal scaleFactor, qreal opacityDelta) {
                          if (!source || !m_selected.contains(source) || m_selected.size() < 2)
                              return;
-                         for (const QPointer<PasteWindow> &selected : m_selected) {
-                             if (!selected || selected == source
-                                 || selected->state() != PasteWindow::State::Active)
+                         for (const QPointer<PasteWindow> &selected : m_selected)
+                         {
+                             if (!selected || selected == source ||
+                                 selected->state() != PasteWindow::State::Active)
                                  continue;
                              if (scaleFactor != qreal(1.0))
                                  selected->scaleBy(scaleFactor);
@@ -477,11 +400,11 @@ void PasteManager::snapWindowToNearby(PasteWindow *window)
     prune();
     QRect candidate = window->frameGeometry();
     const int threshold = m_magneticAttachThreshold;
-    const auto snap = [threshold](int first, int second) {
-        return qAbs(first - second) <= threshold;
-    };
-    for (const Group &group : m_groups) {
-        for (const QPointer<PasteWindow> &other : group.windows) {
+    const auto snap = [threshold](int first, int second) { return qAbs(first - second) <= threshold; };
+    for (const Group &group : m_groups)
+    {
+        for (const QPointer<PasteWindow> &other : group.windows)
+        {
             if (!other || other == window || !other->isVisible())
                 continue;
             const QRect target = other->frameGeometry();
@@ -502,10 +425,14 @@ void PasteManager::snapWindowToNearby(PasteWindow *window)
 PasteWindow *PasteManager::pasteClipboard(const QImage &image)
 {
     prune();
-    if (m_hideAllOnPasteKey) {
-        for (const Group &group : m_groups) {
-            for (const QPointer<PasteWindow> &window : group.windows) {
-                if (window && window->isVisible() && window->isFlashing()) {
+    if (m_hideAllOnPasteKey)
+    {
+        for (const Group &group : m_groups)
+        {
+            for (const QPointer<PasteWindow> &window : group.windows)
+            {
+                if (window && window->isVisible() && window->isFlashing())
+                {
                     hideAll();
                     return window;
                 }
@@ -516,47 +443,57 @@ PasteWindow *PasteManager::pasteClipboard(const QImage &image)
     pixels.setDevicePixelRatio(1);
     // Direct capture-to-pin calls share the same QImage. Its content key is
     // sufficient there; clipboard conversions still verify every pixel.
-    const quint64 fingerprint = image.cacheKey() == m_captureImageKey
-        ? m_captureFingerprint : imageFingerprint(pixels);
+    const quint64 fingerprint =
+        image.cacheKey() == m_captureImageKey ? m_captureFingerprint : imageFingerprint(pixels);
     // A new capture is a new paste even if its pixels happen to equal an older
     // closed pin (for example, two identical icons at different positions).
-    if (m_captureAwaitingPaste && m_captureRegion.isValid()
-        && pixels.size() == m_captureSize
-        && fingerprint == m_captureFingerprint) {
+    if (m_captureAwaitingPaste && m_captureRegion.isValid() && pixels.size() == m_captureSize &&
+        fingerprint == m_captureFingerprint)
+    {
         m_lastClipboardFingerprint = fingerprint;
         m_lastClipboardSize = pixels.size();
         return createPaste(image);
     }
-    if (!pixels.isNull()) {
-        const bool repeated = fingerprint == m_lastClipboardFingerprint
-            && pixels.size() == m_lastClipboardSize;
-        if (!repeated) {
+    if (!pixels.isNull())
+    {
+        const bool repeated =
+            fingerprint == m_lastClipboardFingerprint && pixels.size() == m_lastClipboardSize;
+        if (!repeated)
+        {
             m_lastClipboardFingerprint = fingerprint;
             m_lastClipboardSize = pixels.size();
-        } else if (!m_closed.isEmpty()) {
+        }
+        else if (!m_closed.isEmpty())
+        {
             PasteWindow *window = restoreClosedAt(m_closed.size() - 1);
             if (window && m_flashNew)
                 window->flash();
             return window;
         }
-        for (qsizetype index = m_closed.size() - 1; index >= 0; --index) {
+        for (qsizetype index = m_closed.size() - 1; index >= 0; --index)
+        {
             QImage source = m_closed.at(index)->sourceImage();
             source.setDevicePixelRatio(1);
-            if (source == pixels) {
+            if (source == pixels)
+            {
                 PasteWindow *window = restoreClosedAt(index);
                 if (window && m_flashNew)
                     window->flash();
                 return window;
             }
         }
-        if (repeated) {
-            for (const Group &group : m_groups) {
-                for (const QPointer<PasteWindow> &window : group.windows) {
+        if (repeated)
+        {
+            for (const Group &group : m_groups)
+            {
+                for (const QPointer<PasteWindow> &window : group.windows)
+                {
                     if (!window || !window->isVisible())
                         continue;
                     QImage source = window->sourceImage();
                     source.setDevicePixelRatio(1);
-                    if (source == pixels) {
+                    if (source == pixels)
+                    {
                         if (m_flashNew)
                             window->flash();
                         return window;
@@ -566,7 +503,8 @@ PasteWindow *PasteManager::pasteClipboard(const QImage &image)
         }
         return createPaste(image);
     }
-    if (!m_closed.isEmpty()) {
+    if (!m_closed.isEmpty())
+    {
         PasteWindow *window = restoreClosedAt(m_closed.size() - 1);
         if (window && m_flashNew)
             window->flash();
@@ -599,7 +537,8 @@ void PasteManager::onWindowClosed(PasteWindow *window)
 
 void PasteManager::trimClosed()
 {
-    while (m_closed.size() > m_restoreCount) {
+    while (m_closed.size() > m_restoreCount)
+    {
         const QPointer<PasteWindow> window = m_closed.takeFirst();
         if (window)
             window->close();
@@ -610,8 +549,10 @@ void PasteManager::toggleAll()
 {
     prune();
     const bool anyVisible = visibleCount() > 0;
-    for (Group &group : m_groups) {
-        for (const QPointer<PasteWindow> &window : group.windows) {
+    for (Group &group : m_groups)
+    {
+        for (const QPointer<PasteWindow> &window : group.windows)
+        {
             if (!window)
                 continue;
             if (anyVisible)
@@ -624,20 +565,12 @@ void PasteManager::toggleAll()
 
 void PasteManager::showAll()
 {
-    prune();
-    for (Group &group : m_groups)
-        for (const QPointer<PasteWindow> &window : group.windows)
-            if (window)
-                window->showExisting();
+    forEachWindow([&](PasteWindow *window) { window->showExisting(); });
 }
 
 void PasteManager::hideAll()
 {
-    prune();
-    for (Group &group : m_groups)
-        for (const QPointer<PasteWindow> &window : group.windows)
-            if (window)
-                window->hide();
+    forEachWindow([&](PasteWindow *window) { window->hide(); });
 }
 
 void PasteManager::switchGroup()
@@ -649,7 +582,8 @@ void PasteManager::switchGroup()
     setGroupVisible(m_activeGroup, false);
     m_activeGroup = (m_activeGroup + 1) % m_groups.size();
     setGroupVisible(m_activeGroup, true);
-    if (m_flashGroupSwitch) {
+    if (m_flashGroupSwitch)
+    {
         for (const QPointer<PasteWindow> &window : m_groups[m_activeGroup].windows)
             if (window && window->isVisible())
                 window->flash();
@@ -664,7 +598,8 @@ void PasteManager::switchGroup(int index)
     setGroupVisible(m_activeGroup, false);
     m_activeGroup = index;
     setGroupVisible(m_activeGroup, true);
-    if (m_flashGroupSwitch) {
+    if (m_flashGroupSwitch)
+    {
         for (const QPointer<PasteWindow> &window : m_groups[m_activeGroup].windows)
             if (window && window->isVisible())
                 window->flash();
@@ -692,8 +627,7 @@ void PasteManager::renameGroup(int index, const QString &name)
 void PasteManager::moveGroup(int from, int to)
 {
     prune();
-    if (from < 0 || from >= m_groups.size() || to < 0 || to >= m_groups.size()
-        || from == to)
+    if (from < 0 || from >= m_groups.size() || to < 0 || to >= m_groups.size() || from == to)
         return;
     Group group = m_groups.takeAt(from);
     m_groups.insert(to, std::move(group));
@@ -805,7 +739,8 @@ bool PasteManager::soloMode() const
 void PasteManager::clearSelection()
 {
     m_selected.clear();
-    if (m_soloMode) {
+    if (m_soloMode)
+    {
         m_soloMode = false;
         for (Group &group : m_groups)
             for (const QPointer<PasteWindow> &window : group.windows)
@@ -818,8 +753,10 @@ void PasteManager::selectAllVisible()
 {
     prune();
     m_selected.clear();
-    for (const Group &group : m_groups) {
-        for (const QPointer<PasteWindow> &window : group.windows) {
+    for (const Group &group : m_groups)
+    {
+        for (const QPointer<PasteWindow> &window : group.windows)
+        {
             if (window && window->isVisible() && !window->isSoloHidden())
                 m_selected.append(window);
         }
@@ -849,12 +786,15 @@ void PasteManager::moveSelectedToGroup(int index)
     prune();
     if (index < 0 || index >= m_groups.size() || m_selected.isEmpty())
         return;
-    for (const QPointer<PasteWindow> &window : m_selected) {
+    for (const QPointer<PasteWindow> &window : m_selected)
+    {
         if (!window)
             continue;
-        for (Group &group : m_groups) {
+        for (Group &group : m_groups)
+        {
             const int at = group.windows.indexOf(window);
-            if (at >= 0) {
+            if (at >= 0)
+            {
                 group.windows.removeAt(at);
                 break;
             }
@@ -878,19 +818,22 @@ void PasteManager::toggleClickThroughAtCursor(const QPoint &globalPosition)
     // activated candidate.  Prefer it when several pins overlap, then fall
     // back through the remaining groups/windows.
     PasteWindow *underCursor = nullptr;
-    for (qsizetype groupIndex = m_groups.size() - 1; groupIndex >= 0 && !underCursor; --groupIndex) {
+    for (qsizetype groupIndex = m_groups.size() - 1; groupIndex >= 0 && !underCursor; --groupIndex)
+    {
         const Group &group = m_groups.at(groupIndex);
-        for (qsizetype index = group.windows.size() - 1; index >= 0; --index) {
+        for (qsizetype index = group.windows.size() - 1; index >= 0; --index)
+        {
             PasteWindow *window = group.windows.at(index);
-            if (window && window->state() == PasteWindow::State::Active
-                && window->isVisible() && !window->isSoloHidden()
-                && window->frameGeometry().contains(globalPosition)) {
+            if (window && window->state() == PasteWindow::State::Active && window->isVisible() &&
+                !window->isSoloHidden() && window->frameGeometry().contains(globalPosition))
+            {
                 underCursor = window;
                 break;
             }
         }
     }
-    if (underCursor) {
+    if (underCursor)
+    {
         underCursor->setClickThrough(!underCursor->clickThrough());
         return;
     }
@@ -918,8 +861,10 @@ void PasteManager::moveSelectedBy(const QPoint &delta)
 void PasteManager::destroyAll()
 {
     prune();
-    for (Group &group : m_groups) {
-        for (const QPointer<PasteWindow> &window : group.windows) {
+    for (Group &group : m_groups)
+    {
+        for (const QPointer<PasteWindow> &window : group.windows)
+        {
             if (window)
                 window->close();
         }
@@ -931,207 +876,13 @@ void PasteManager::destroyAll()
     clearSelection();
 }
 
-void PasteManager::loadState(const QString &directory)
-{
-    QFile stateFile(QDir(directory).filePath(QStringLiteral("state.json")));
-    if (!stateFile.open(QIODevice::ReadOnly))
-        return;
-    const QJsonDocument document = QJsonDocument::fromJson(stateFile.readAll());
-    if (!document.isObject())
-        return;
-
-    const QJsonObject root = document.object();
-    const QJsonArray groups = root.value(QStringLiteral("groups")).toArray();
-    if (groups.isEmpty())
-        return;
-    destroyAll();
-    m_groups.clear();
-    for (const QJsonValue &groupValue : groups) {
-        Group group;
-        const QJsonObject groupObject = groupValue.toObject();
-        const bool namedFormat = groupValue.isObject();
-        const QJsonArray windowArray = namedFormat
-                                           ? groupObject.value(QStringLiteral("windows")).toArray()
-                                           : groupValue.toArray();
-        group.name = namedFormat
-                         ? groupObject.value(QStringLiteral("name")).toString()
-                         : QStringLiteral("组 %1").arg(m_groups.size() + 1);
-        if (group.name.isEmpty())
-            group.name = QStringLiteral("组 %1").arg(m_groups.size() + 1);
-        for (const QJsonValue &windowValue : windowArray) {
-            const QJsonObject windowObject = windowValue.toObject();
-            const QString imagePath = QDir(directory).filePath(
-                windowObject.value(QStringLiteral("image")).toString());
-            QImage image;
-            if (!image.load(imagePath))
-                continue;
-            auto *window = new PasteWindow(image);
-            window->setPasteManager(this);
-            window->setResizeEnabled(m_resizeEnabled);
-            window->setExchangeNavigationKeys(m_exchangeNavigationKeys);
-            window->setMaxNetworkImageBytes(m_maxNetworkImageBytes);
-            window->setMaxSize(m_maxSize);
-            window->setThumbnailSize(m_thumbnailSize);
-            window->setWheelCenter(m_wheelCenter);
-            window->setResetTransform(m_resetTransform);
-            window->setDisableDpiScaling(m_disableDpiScaling);
-            window->setHelpKeys(m_helpKeys);
-            window->setCloseConfirm(m_closeConfirm);
-            window->setDestroyConfirm(m_destroyConfirm);
-            window->setWindowOpacity(m_defaultOpacity);
-            window->setShadowEnabled(m_shadowEnabled);
-            window->setBackgroundMode(m_backgroundMode);
-            window->setSmoothScale(m_smoothScale);
-            window->setEscapeActions(m_escapeAction, m_shiftEscapeAction);
-            window->setMouseActions(m_mouseActions);
-            window->setVirtualDesktopPinned(m_virtualDesktopPinned);
-            window->setFlashTransparency(m_flashTransparency);
-            window->setKeepOnDrag(m_keepOnDrag);
-            window->setCopyAsFileShortcutEnabled(
-                m_copyAsFileMode != static_cast<int>(CopyAsFileMode::Disabled));
-            window->move(windowObject.value(QStringLiteral("x")).toInt(),
-                         windowObject.value(QStringLiteral("y")).toInt());
-            window->setWindowOpacity(windowObject.value(QStringLiteral("opacity")).toDouble(1.0));
-            window->restoreTransform(windowObject.value(QStringLiteral("rotation")).toInt(),
-                                     windowObject.value(QStringLiteral("flipHorizontal")).toBool(),
-                                     windowObject.value(QStringLiteral("flipVertical")).toBool(),
-                                     windowObject.value(QStringLiteral("grayscale")).toBool(),
-                                     windowObject.value(QStringLiteral("inverted")).toBool(),
-                                     windowObject.value(QStringLiteral("scale")).toDouble(1.0),
-                                     windowObject.value(QStringLiteral("transparentBackground")).toBool(),
-                                     windowObject.value(QStringLiteral("alwaysOnTop")).toBool(true));
-            window->setThumbnailMode(windowObject.value(QStringLiteral("thumbnailMode")).toBool(false));
-            if (windowObject.contains(QStringLiteral("backgroundMode")))
-                window->setBackgroundMode(windowObject.value(QStringLiteral("backgroundMode")).toString());
-            if (windowObject.contains(QStringLiteral("virtualDesktop")))
-                window->setVirtualDesktopPinned(windowObject.value(QStringLiteral("virtualDesktop")).toBool());
-            window->setClickThrough(windowObject.value(QStringLiteral("clickThrough")).toBool());
-            window->setShadowEnabled(windowObject.contains(QStringLiteral("shadow"))
-                                         ? windowObject.value(QStringLiteral("shadow")).toBool()
-                                         : m_shadowEnabled);
-            window->setProperty(kPersistedImageKey, window->sourceImage().cacheKey());
-            window->setProperty(kPersistedImagePath, QFileInfo(imagePath).absoluteFilePath());
-            group.windows.append(window);
-            connectWindow(window);
-            if (windowObject.value(QStringLiteral("visible")).toBool(true))
-                window->showExisting();
-            else
-                window->hide();
-        }
-        m_groups.append(std::move(group));
-    }
-    if (m_groups.isEmpty())
-        m_groups.append(Group{QStringLiteral("默认组"), {}});
-    m_activeGroup = qBound(0, root.value(QStringLiteral("activeGroup")).toInt(), m_groups.size() - 1);
-}
-
-void PasteManager::saveState(const QString &directory) const
-{
-    QDir dir(directory);
-    if (!dir.mkpath(QStringLiteral(".")))
-        return;
-
-    struct PersistedImage {
-        QPointer<PasteWindow> window;
-        qint64 key;
-        QString path;
-    };
-    QList<PersistedImage> persistedImages;
-    QHash<qint64, QString> imageNames;
-    QSet<QString> expectedImages;
-    QStringList createdImages;
-    const auto discardNewImages = [&] {
-        for (const QString &fileName : createdImages)
-            dir.remove(fileName);
-    };
-    QJsonArray groups;
-    for (int groupIndex = 0; groupIndex < m_groups.size(); ++groupIndex) {
-        QJsonArray windows;
-        for (const QPointer<PasteWindow> &window : m_groups.at(groupIndex).windows) {
-            if (!window || window->state() != PasteWindow::State::Active
-                || window->sourceImage().isNull())
-                continue;
-            const QImage &source = window->sourceImage();
-            const qint64 imageKey = source.cacheKey();
-            QString fileName = imageNames.value(imageKey);
-            if (fileName.isEmpty()) {
-                const QFileInfo savedImage(window->property(kPersistedImagePath).toString());
-                // Moving, regrouping or transforming a pin changes its state,
-                // not its source pixels. Keep the lossless PNG already saved
-                // for that source, including legacy position-named files.
-                if (window->property(kPersistedImageKey).toLongLong() == imageKey
-                    && savedImage.isFile() && savedImage.absolutePath() == dir.absolutePath()) {
-                    fileName = savedImage.fileName();
-                } else {
-                    fileName = QStringLiteral("paste-%1.png").arg(
-                        QUuid::createUuid().toString(QUuid::Id128));
-                    QSaveFile imageFile(dir.filePath(fileName));
-                    if (!imageFile.open(QIODevice::WriteOnly) || !source.save(&imageFile, "PNG")
-                        || !imageFile.commit()) {
-                        discardNewImages();
-                        return;
-                    }
-                    createdImages.append(fileName);
-                }
-                imageNames.insert(imageKey, fileName);
-            }
-            expectedImages.insert(fileName);
-            persistedImages.append({window, imageKey, QFileInfo(dir.filePath(fileName)).absoluteFilePath()});
-            QJsonObject object;
-            object.insert(QStringLiteral("image"), fileName);
-            object.insert(QStringLiteral("visible"), window->isVisible());
-            object.insert(QStringLiteral("x"), window->x());
-            object.insert(QStringLiteral("y"), window->y());
-            object.insert(QStringLiteral("opacity"), window->windowOpacity());
-            object.insert(QStringLiteral("rotation"), window->rotationQuarterTurns());
-            object.insert(QStringLiteral("flipHorizontal"), window->flipHorizontal());
-            object.insert(QStringLiteral("flipVertical"), window->flipVertical());
-            object.insert(QStringLiteral("grayscale"), window->grayscale());
-            object.insert(QStringLiteral("inverted"), window->inverted());
-            object.insert(QStringLiteral("scale"), window->scale());
-            object.insert(QStringLiteral("transparentBackground"), window->transparentBackground());
-            object.insert(QStringLiteral("backgroundMode"), window->backgroundMode());
-            object.insert(QStringLiteral("alwaysOnTop"), window->alwaysOnTop());
-            object.insert(QStringLiteral("clickThrough"), window->clickThrough());
-            object.insert(QStringLiteral("shadow"), window->shadowEnabled());
-            object.insert(QStringLiteral("virtualDesktop"), window->virtualDesktopPinned());
-            object.insert(QStringLiteral("thumbnailMode"), window->thumbnailMode());
-            windows.append(object);
-        }
-        QJsonObject groupObject;
-        groupObject.insert(QStringLiteral("name"), m_groups.at(groupIndex).name);
-        groupObject.insert(QStringLiteral("windows"), windows);
-        groups.append(groupObject);
-    }
-
-    QJsonObject root;
-    root.insert(QStringLiteral("activeGroup"), m_activeGroup);
-    root.insert(QStringLiteral("groups"), groups);
-    QSaveFile stateFile(dir.filePath(QStringLiteral("state.json")));
-    const QByteArray state = QJsonDocument(root).toJson(QJsonDocument::Indented);
-    if (!stateFile.open(QIODevice::WriteOnly) || stateFile.write(state) != state.size()
-        || !stateFile.commit()) {
-        discardNewImages();
-        return;
-    }
-    // A failed state commit must leave both the old JSON and its PNGs usable.
-    // Update reuse metadata and remove obsolete files only after committing.
-    for (const PersistedImage &image : persistedImages) {
-        if (image.window) {
-            image.window->setProperty(kPersistedImageKey, image.key);
-            image.window->setProperty(kPersistedImagePath, image.path);
-        }
-    }
-    for (const QString &fileName : dir.entryList({QStringLiteral("paste-*.png")}, QDir::Files))
-        if (!expectedImages.contains(fileName))
-            dir.remove(fileName);
-}
-
 int PasteManager::visibleCount() const
 {
     int count = 0;
-    for (const Group &group : m_groups) {
-        for (const QPointer<PasteWindow> &window : group.windows) {
+    for (const Group &group : m_groups)
+    {
+        for (const QPointer<PasteWindow> &window : group.windows)
+        {
             if (window && window->isVisible())
                 ++count;
         }
@@ -1146,21 +897,22 @@ int PasteManager::groupCount() const
 
 void PasteManager::prune()
 {
-    for (Group &group : m_groups) {
-        for (qsizetype index = group.windows.size() - 1; index >= 0; --index) {
-            if (!group.windows.at(index)
-                || group.windows.at(index)->state() == PasteWindow::State::Destroyed)
+    for (Group &group : m_groups)
+    {
+        for (qsizetype index = group.windows.size() - 1; index >= 0; --index)
+        {
+            if (!group.windows.at(index) || group.windows.at(index)->state() == PasteWindow::State::Destroyed)
                 group.windows.removeAt(index);
         }
     }
-    for (qsizetype index = m_selected.size() - 1; index >= 0; --index) {
-        if (!m_selected.at(index)
-            || m_selected.at(index)->state() != PasteWindow::State::Active)
+    for (qsizetype index = m_selected.size() - 1; index >= 0; --index)
+    {
+        if (!m_selected.at(index) || m_selected.at(index)->state() != PasteWindow::State::Active)
             m_selected.removeAt(index);
     }
-    for (qsizetype index = m_closed.size() - 1; index >= 0; --index) {
-        if (!m_closed.at(index)
-            || m_closed.at(index)->state() != PasteWindow::State::Closed)
+    for (qsizetype index = m_closed.size() - 1; index >= 0; --index)
+    {
+        if (!m_closed.at(index) || m_closed.at(index)->state() != PasteWindow::State::Closed)
             m_closed.removeAt(index);
     }
     if (m_groups.isEmpty())
@@ -1173,7 +925,8 @@ void PasteManager::setGroupVisible(int groupIndex, bool visible)
 {
     if (groupIndex < 0 || groupIndex >= m_groups.size())
         return;
-    for (const QPointer<PasteWindow> &window : m_groups[groupIndex].windows) {
+    for (const QPointer<PasteWindow> &window : m_groups[groupIndex].windows)
+    {
         if (!window)
             continue;
         if (visible)
@@ -1187,13 +940,16 @@ void PasteManager::onWindowActivated(PasteWindow *window, Qt::KeyboardModifiers 
 {
     if (!window)
         return;
-    if (modifiers.testFlag(snipaste::platform::primaryModifier())) {
+    if (modifiers.testFlag(snipaste::platform::primaryModifier()))
+    {
         const int index = m_selected.indexOf(window);
         if (index >= 0)
             m_selected.removeAt(index);
         else
             m_selected.append(window);
-    } else {
+    }
+    else
+    {
         m_selected.clear();
         m_selected.append(window);
     }

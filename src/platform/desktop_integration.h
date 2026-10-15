@@ -3,9 +3,11 @@
 #include <QString>
 #include <QStringList>
 
-namespace snipaste::platform {
+namespace snipaste::platform
+{
 
-struct HotkeySpec {
+struct HotkeySpec
+{
     unsigned int modifiers = 0;
     unsigned int key = 0;
     bool valid = false;
@@ -17,5 +19,6 @@ void pasteClipboardAsKeyboardInput();
 void trimIdleProcessMemory();
 bool foregroundApplicationMatches(const QStringList &ignored);
 void setProcessPriority(int configured);
+void setWindowPinned(quintptr handle, bool enabled);
 
 } // namespace snipaste::platform

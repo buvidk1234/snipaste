@@ -1,14 +1,16 @@
 #pragma once
 
 #include <QImage>
+#include <QList>
 #include <QObject>
 #include <QPointer>
-#include <QList>
 #include <QRect>
 #include <QSize>
 #include <QString>
+#include <functional>
 
-namespace snipaste::ui {
+namespace snipaste::ui
+{
 
 class PasteWindow;
 
@@ -16,7 +18,7 @@ class PasteManager final : public QObject
 {
     Q_OBJECT
 
-public:
+  public:
     explicit PasteManager(QObject *parent = nullptr);
     ~PasteManager() override;
 
@@ -39,8 +41,6 @@ public:
     void setDestroyConfirm(bool enabled);
     void setMagneticAttachThreshold(int pixels);
     void setCopyAsFileMode(int mode);
-    // Compatibility API for callers that only distinguish file-copy on/off.
-    void setCopyAsFile(bool enabled);
     void setBackgroundMode(const QString &mode);
     void setSmoothScale(bool enabled);
     void setEscapeActions(const QString &escapeAction, const QString &shiftEscapeAction);
@@ -90,12 +90,15 @@ public:
     int visibleCount() const;
     int groupCount() const;
 
-private:
-    struct Group {
+  private:
+    struct Group
+    {
         QString name;
         QList<QPointer<PasteWindow>> windows;
     };
 
+    void applyWindowSettings(PasteWindow *window);
+    void forEachWindow(const std::function<void(PasteWindow *)> &action);
     void prune();
     void setGroupVisible(int groupIndex, bool visible);
     void onWindowActivated(PasteWindow *window, Qt::KeyboardModifiers modifiers);

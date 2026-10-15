@@ -49,6 +49,8 @@ set(CMAKE_AUTORCC ON)
 find_package(Qt6 6.12 REQUIRED COMPONENTS Core Gui Widgets Network Concurrent PrintSupport)
 
 set(SNIPASTE_CORE_SOURCES
+    src/core/paste/image_transform.cpp
+    src/core/paste/paste_state_store.cpp
     src/core/annotation/annotation_types.cpp
     src/core/annotation/annotation_document.cpp
     src/core/command/argument_parser.cpp
@@ -64,6 +66,7 @@ set(SNIPASTE_CORE_SOURCES
 )
 
 set(SNIPASTE_PLATFORM_SOURCES
+    src/platform/startup_integration.cpp
     src/platform/desktop_integration.cpp
     ${SNIPASTE_NATIVE_PLATFORM_SOURCES}
     src/platform/screen_capture.cpp
@@ -71,6 +74,19 @@ set(SNIPASTE_PLATFORM_SOURCES
 )
 
 set(SNIPASTE_UI_SOURCES
+    src/ui/annotation/annotation_options_geometry.cpp
+    src/ui/annotation/annotation_options_brushes.cpp
+    src/ui/annotation/annotation_options_effects.cpp
+    src/ui/annotation/annotation_options_text.cpp
+    src/ui/annotation/annotation_options.cpp
+    src/ui/annotation/annotation_toolbar_icons.cpp
+    src/ui/paste/paste_manager_persistence.cpp
+    src/ui/paste/paste_window_state.cpp
+    src/ui/annotation/annotation_canvas_text.cpp
+    src/ui/paste/paste_window_interaction.cpp
+    src/ui/paste/paste_window_actions.cpp
+    src/ui/paste/paste_window_drop.cpp
+    src/ui/paste/paste_group_dialog.cpp
     src/ui/whiteboard/whiteboard_window.cpp
     src/ui/snip/capture_support.cpp
     src/ui/output/image_output.cpp
@@ -84,7 +100,13 @@ set(SNIPASTE_UI_SOURCES
     src/ui/annotation/annotation_renderer.cpp
     src/ui/annotation/image_region.cpp
     src/ui/history/screenshot_history_dialog.cpp
-    src/ui/preferences/preferences_dialog_rich.cpp
+    src/ui/preferences/preferences_dialog.cpp
+    src/ui/preferences/preference_widgets.cpp
+    src/ui/preferences/preferences_paste.cpp
+    src/ui/preferences/preferences_output.cpp
+    src/ui/preferences/preferences_control.cpp
+    src/ui/preferences/preferences_update.cpp
+    src/ui/preferences/preferences_about.cpp
     src/ui/preferences/preferences_appearance.cpp
     src/ui/preferences/preferences_capture.cpp
     src/ui/preferences/appearance_settings.cpp
@@ -110,12 +132,20 @@ if(APPLE)
 endif()
 
 set(SNIPASTE_APP_HEADERS
+    src/app/application_controller.h
+    src/app/capture_controller.h
+    src/app/command_line.h
+    src/app/input_controller.h
+    src/app/screenshot_history_service.h
+    src/app/screenshot_output.h
     src/app/external_command.h
     src/app/runtime_settings.h
     src/app/logging.h
 )
 
 set(SNIPASTE_CORE_HEADERS
+    src/core/paste/image_transform.h
+    src/core/paste/paste_state_store.h
     src/core/command/argument_parser.h
     src/core/command/command_registry.h
     src/core/config/config_store.h
@@ -132,6 +162,7 @@ set(SNIPASTE_CORE_HEADERS
 )
 
 set(SNIPASTE_PLATFORM_HEADERS
+    src/platform/startup_integration.h
     src/platform/desktop_integration.h
     src/platform/windows/global_hotkey.h
     src/platform/windows/super_capture.h
@@ -142,6 +173,11 @@ set(SNIPASTE_PLATFORM_HEADERS
 )
 
 set(SNIPASTE_UI_HEADERS
+    src/ui/annotation/annotation_options.h
+    src/ui/annotation/annotation_toolbar_icons.h
+    src/ui/annotation/annotation_option_widgets.h
+    src/ui/preferences/preference_widgets.h
+    src/ui/paste/paste_group_dialog.h
     src/ui/whiteboard/whiteboard_window.h
     src/ui/snip/capture_support.h
     src/ui/output/image_output.h
@@ -182,9 +218,18 @@ set(SNIPASTE_HEADERS
 )
 
 set(SNIPASTE_APP_SOURCES
+    src/app/application_arguments.cpp
+    src/app/application_capture_commands.cpp
+    src/app/application_controller.cpp
+    src/app/application_paste_commands.cpp
+    src/app/application_utility_commands.cpp
+    src/app/capture_controller.cpp
+    src/app/command_line.cpp
+    src/app/input_controller.cpp
+    src/app/screenshot_history_service.cpp
+    src/app/screenshot_output.cpp
     src/app/external_command.cpp
     src/app/runtime_settings.cpp
-    src/app/main.cpp
     src/app/logging.cpp
 )
 
@@ -251,7 +296,10 @@ if(WIN32)
     target_link_libraries(snipaste_ui PUBLIC winmm)
 endif()
 
-qt_add_executable(snipaste ${SNIPASTE_APP_SOURCES} ${SNIPASTE_APP_HEADERS})
+qt_add_library(snipaste_app STATIC ${SNIPASTE_APP_SOURCES} ${SNIPASTE_APP_HEADERS})
+target_include_directories(snipaste_app PUBLIC src)
+target_link_libraries(snipaste_app PUBLIC snipaste_ui)
+qt_add_executable(snipaste src/app/main.cpp)
 
 if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja")
     # Localized /showIncludes output can disagree with Ninja's detected prefix.
@@ -261,7 +309,7 @@ if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja")
     foreach(header IN LISTS SNIPASTE_HEADERS)
         list(APPEND snipaste_header_dependencies "${CMAKE_CURRENT_SOURCE_DIR}/${header}")
     endforeach()
-    set_property(SOURCE ${SNIPASTE_APP_SOURCES} ${SNIPASTE_CORE_SOURCES}
+    set_property(SOURCE src/app/main.cpp ${SNIPASTE_APP_SOURCES} ${SNIPASTE_CORE_SOURCES}
         ${SNIPASTE_PLATFORM_SOURCES} ${SNIPASTE_UI_SOURCES} tests/ui_regression_test.cpp
         tests/snip_performance_probe.cpp tests/annotation_drawing_probe.cpp
         APPEND PROPERTY OBJECT_DEPENDS "${snipaste_header_dependencies}")
@@ -274,7 +322,7 @@ if(WIN32)
 endif()
 
 target_include_directories(snipaste PRIVATE src)
-target_link_libraries(snipaste PRIVATE snipaste_ui)
+target_link_libraries(snipaste PRIVATE snipaste_app)
 
 if(WIN32)
     # Windows.Media.Ocr is a WinRT API. The Windows SDK ships the C++/WinRT
@@ -324,6 +372,7 @@ snipaste_apply_compile_options(snipaste_core)
 snipaste_apply_compile_options(snipaste_platform)
 snipaste_apply_compile_options(snipaste_ui)
 snipaste_apply_compile_options(snipaste)
+snipaste_apply_compile_options(snipaste_app)
 
 install(TARGETS snipaste
     RUNTIME DESTINATION bin
@@ -334,6 +383,19 @@ option(SNIPASTE_BUILD_TESTS "Build UI regression tests" OFF)
 if(SNIPASTE_BUILD_TESTS)
     enable_testing()
     find_package(Qt6 REQUIRED COMPONENTS Test)
+
+    qt_add_executable(snipaste_application_tests tests/application_controller_test.cpp)
+    target_link_libraries(snipaste_application_tests PRIVATE snipaste_app Qt6::Test)
+    snipaste_apply_compile_options(snipaste_application_tests)
+    if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja")
+        set_property(SOURCE tests/application_controller_test.cpp
+            APPEND PROPERTY OBJECT_DEPENDS "${snipaste_header_dependencies}")
+    endif()
+    add_test(NAME application_controller COMMAND snipaste_application_tests)
+    set_tests_properties(application_controller PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
+        TIMEOUT 45)
 
     qt_add_executable(snipaste_core_tests tests/core_unit_test.cpp)
     target_include_directories(snipaste_core_tests PRIVATE src)

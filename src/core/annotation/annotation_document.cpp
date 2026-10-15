@@ -2,7 +2,32 @@
 
 #include <utility>
 
-namespace snipaste::core {
+namespace snipaste::core
+{
+
+int AnnotationDocument::append(AnnotationShape shape)
+{
+    m_current.shapes.append(std::move(shape));
+    ++m_revision;
+    return m_current.shapes.size() - 1;
+}
+
+bool AnnotationDocument::remove(int index)
+{
+    if (index < 0 || index >= m_current.shapes.size())
+        return false;
+    m_current.shapes.removeAt(index);
+    ++m_revision;
+    return true;
+}
+
+void AnnotationDocument::clear()
+{
+    if (m_current.shapes.isEmpty())
+        return;
+    m_current.shapes.clear();
+    ++m_revision;
+}
 
 bool AnnotationDocument::commit()
 {
@@ -21,6 +46,7 @@ bool AnnotationDocument::undo()
     m_redo.append(std::move(m_committed));
     m_committed = m_undo.takeLast();
     m_current = m_committed;
+    ++m_revision;
     return true;
 }
 
@@ -31,6 +57,7 @@ bool AnnotationDocument::redo()
     m_undo.append(std::move(m_committed));
     m_committed = m_redo.takeLast();
     m_current = m_committed;
+    ++m_revision;
     return true;
 }
 
@@ -44,8 +71,11 @@ void AnnotationDocument::translate(const QPointF &delta)
     };
     shift(m_current);
     shift(m_committed);
-    for (auto &state : m_undo) shift(state);
-    for (auto &state : m_redo) shift(state);
+    for (auto &state : m_undo)
+        shift(state);
+    for (auto &state : m_redo)
+        shift(state);
+    ++m_revision;
 }
 
 void AnnotationDocument::reset()
@@ -54,6 +84,7 @@ void AnnotationDocument::reset()
     m_committed = {};
     m_undo.clear();
     m_redo.clear();
+    ++m_revision;
 }
 
 } // namespace snipaste::core

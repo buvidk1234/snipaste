@@ -1,10 +1,10 @@
 #pragma once
 
-#include "core/scroll_stitcher.h"
 #include "core/history/screenshot_history.h"
+#include "core/scroll_stitcher.h"
 
-#include <QImage>
 #include <QColor>
+#include <QImage>
 #include <QList>
 #include <QPointer>
 #include <QRect>
@@ -21,9 +21,11 @@ class QTimer;
 class QToolButton;
 class QStackedLayout;
 
-namespace snipaste::ui {
+namespace snipaste::ui
+{
 
 class AnnotationCanvas;
+class AnnotationOptions;
 class SnipBorderOverlay;
 class ScrollCapturePanel;
 class ScrollCapturePreview;
@@ -33,19 +35,16 @@ class SnipOverlay final : public QWidget
     Q_OBJECT
     friend class SnipBorderOverlay;
 
-public:
+  public:
     explicit SnipOverlay(QScreen *screen, bool autoCopy = false, QWidget *parent = nullptr);
-    SnipOverlay(QScreen *screen,
-                bool autoCopy,
-                bool captureCursor,
-                QRect initialSelection,
+    SnipOverlay(QScreen *screen, bool autoCopy, bool captureCursor, QRect initialSelection,
                 QWidget *parent = nullptr);
 
     // Construct the hidden controls at application startup, without capturing
     // the desktop. The caller owns this reusable overlay.
     static SnipOverlay *createPrepared(QScreen *screen);
-    void beginCapture(QScreen *screen, bool autoCopy = false,
-                      bool captureCursor = false, QRect initialSelection = {});
+    void beginCapture(QScreen *screen, bool autoCopy = false, bool captureCursor = false,
+                      QRect initialSelection = {});
 
     void captureSelectionImmediately();
     // The global paste command uses the current selection while this
@@ -57,13 +56,15 @@ public:
     void setDetectionOptions(bool detectWindows, bool detectElements, bool showHints);
     void setDetectionProcessFilters(const QStringList &excludedProcesses,
                                     const QStringList &unstableProcesses)
-    { m_excludedDetectionProcesses = excludedProcesses; m_unstableDetectionProcesses = unstableProcesses; }
+    {
+        m_excludedDetectionProcesses = excludedProcesses;
+        m_unstableDetectionProcesses = unstableProcesses;
+    }
     void setExchangeNavigationKeys(bool enabled) { m_exchangeNavigationKeys = enabled; }
     void setLastSelection(QRect selection);
     void setSelectionHistory(const QList<QRect> &regions);
     core::CaptureGeometry captureGeometry() const { return {m_selection, size()}; }
-    void setCaptureHistory(const QList<QImage> &images,
-                           const QList<core::CaptureGeometry> &geometries = {},
+    void setCaptureHistory(const QList<QImage> &images, const QList<core::CaptureGeometry> &geometries = {},
                            const QList<QImage> &backgrounds = {},
                            std::function<QImage(int)> backgroundLoader = {},
                            std::function<QImage(int)> imageLoader = {});
@@ -72,26 +73,13 @@ public:
     void setKeepAspectRatio(bool enabled) { m_keepAspectRatio = enabled; }
     // Capture display options are kept on the overlay so each new capture
     // reflects the preferences without relying on process globals.
-    void setCaptureDisplayOptions(bool showAnchor,
-                                  const QColor &maskColor,
-                                  const QColor &anchorColor,
-                                  int borderWidth,
-                                  bool magnifierMask,
-                                  bool magnifierBorder,
-                                  bool magnifierAnchor,
-                                  bool crosshair,
-                                  bool disableGuides,
+    void setCaptureDisplayOptions(bool showAnchor, const QColor &maskColor, const QColor &anchorColor,
+                                  int borderWidth, bool magnifierMask, bool magnifierBorder,
+                                  bool magnifierAnchor, bool crosshair, bool disableGuides,
                                   bool hideOneByOne);
-    void setMagnifierOptions(bool automatic,
-                             bool superCapture,
-                             const QStringList &colorFormats,
-                             bool hideHexPrefix,
-                             bool uppercaseHex,
-                             bool grid,
-                             bool coordinates,
-                             bool hints,
-                             int zoom,
-                             bool superMode);
+    void setMagnifierOptions(bool automatic, bool superCapture, const QStringList &colorFormats,
+                             bool hideHexPrefix, bool uppercaseHex, bool grid, bool coordinates, bool hints,
+                             int zoom, bool superMode);
     void setDefaultAnnotation(const QString &annotation) { m_defaultAnnotation = annotation.trimmed(); }
     void setCaptureSound(bool enabled, const QString &file, bool onQuickSave)
     {
@@ -115,10 +103,7 @@ public:
     void setShowShareButton(bool enabled);
     // 0 = always copy images as files, 1 = only the copy-as-file shortcut,
     // 2 = copy image data.  These values match output/copyAsFileMode.
-    void setCopyAsFileMode(int mode)
-    {
-        m_copyAsFileMode = mode >= 0 && mode <= 2 ? mode : 2;
-    }
+    void setCopyAsFileMode(int mode) { m_copyAsFileMode = mode >= 0 && mode <= 2 ? mode : 2; }
     void setQuickSaveDirectory(const QString &directory) { m_quickSaveDirectory = directory; }
     // Output settings are supplied by the application when a capture session
     // is created.  Keeping them on the overlay makes both the toolbar's
@@ -132,10 +117,10 @@ public:
     void setPenTipCount(int count) { m_penTipCount = qBound(1, count, 5); }
     void setAnnotationPalette(const QStringList &palette) { m_annotationPalette = palette; }
     void setMouseActions(const QString &doubleClickAction, bool doubleClickExit,
-                         const QString &middleClickAction, bool middleClickExit,
-                         const QString &enterAction, bool enterExit);
+                         const QString &middleClickAction, bool middleClickExit, const QString &enterAction,
+                         bool enterExit);
 
-protected:
+  protected:
     void paintEvent(QPaintEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
@@ -151,7 +136,7 @@ protected:
     bool focusNextPrevChild(bool) override { return false; }
     bool eventFilter(QObject *watched, QEvent *event) override;
 
-signals:
+  signals:
     void sessionClosed();
     void screenshotCaptured(const QImage &image);
     void screenshotCapturedWithBackground(const QImage &image, const QImage &background);
@@ -168,7 +153,7 @@ signals:
     void fileSaved(const QString &path);
     void quickSaveCompleted(const QString &path);
 
-private:
+  private:
     SnipOverlay(QScreen *screen, QWidget *parent, bool reusable);
     QRect imageSelection() const;
     QImage selectionImage() const;
@@ -238,9 +223,6 @@ private:
     void updateSelectionTransform(QPoint position);
     void updateSelectionCursor(QPoint position);
     void refreshAnnotationCursor();
-    void updateDynamicWidthButtons(qreal width);
-    void updateAllColorWatchers(const QColor &color);
-    void showCornerRadiusPopup(QWidget *sourceBtn);
     void forwardCanvasMouseEvent(QMouseEvent *event);
     void changeSelection(QRect selection, bool moveAnnotations);
     void paintSelectionFrame(QPainter &painter);
@@ -301,14 +283,7 @@ private:
     QFrame *m_toolbar = nullptr;
     QFrame *m_toolOptions = nullptr;
     QStackedLayout *m_toolOptionsStack = nullptr;
-    QList<QToolButton *> m_colorWatchers;
-    QList<QPair<QToolButton *, QString>> m_paletteButtons;
-    QList<QToolButton *> m_dynamicWidthButtons;
-    QPointer<QFrame> m_cornerRadiusPopup;
-    QColor m_currentAnnotationColor = QColor(QStringLiteral("#ed1c24"));
-    QToolButton *m_lineStyleButton = nullptr;
-    QToolButton *m_arrowStyleButton = nullptr;
-    QToolButton *m_curveStyleButton = nullptr;
+    AnnotationOptions *m_annotationOptions = nullptr;
     QFrame *m_sizeToolbar = nullptr;
     QToolButton *m_sizeButton = nullptr;
     QToolButton *m_roundedButton = nullptr;

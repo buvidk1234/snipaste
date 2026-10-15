@@ -421,6 +421,17 @@ void UiRegressionTest::preferencesProfessionalReferencePages()
     QCOMPARE(outputTabs->tabText(0), QStringLiteral("文件"));
     QCOMPARE(outputTabs->tabText(1), QStringLiteral("剪贴板"));
     QCOMPARE(outputTabs->tabText(2), QStringLiteral("文字识别"));
+    auto *autoSave = dialog.findChild<QCheckBox *>(QStringLiteral("outputAutoSave"));
+    auto *fileRestore = dialog.findChild<QPushButton *>(QStringLiteral("outputFileRestore"));
+    auto *clipboardRestore = dialog.findChild<QPushButton *>(QStringLiteral("outputClipboardRestore"));
+    QVERIFY(autoSave && fileRestore && clipboardRestore);
+    autoSave->setChecked(true);
+    fileRestore->click();
+    QVERIFY(!autoSave->isChecked());
+    autoSave->setChecked(true);
+    clipboardRestore->click();
+    QVERIFY(!autoSave->isChecked());
+    autoSave->setChecked(true);
     outputTabs->setCurrentIndex(0); QTest::qWait(20); QVERIFY(save(QStringLiteral("preferences-output-file.png")));
     QVERIFY(tabs->currentWidget()->findChild<QSpinBox *>(QStringLiteral("outputImageQuality")));
     outputTabs->setCurrentIndex(1); QTest::qWait(20); QVERIFY(save(QStringLiteral("preferences-output-clipboard.png")));
@@ -491,6 +502,7 @@ void UiRegressionTest::preferencesProfessionalReferencePages()
     QCOMPARE(config.value(QStringLiteral("paste/backgroundMode")).toString(), QStringLiteral("透明"));
     QCOMPARE(config.value(QStringLiteral("paste/escapeAction")).toString(), QStringLiteral("销毁贴图"));
     QCOMPARE(config.value(QStringLiteral("output/ocrEngine")).toString(), QStringLiteral("Tesseract"));
+    QCOMPARE(config.value(QStringLiteral("capture/autoSave")).toBool(), true);
     QCOMPARE(config.value(QStringLiteral("control/cornerEnabled")).toBool(), true);
     QCOMPARE(config.value(QStringLiteral("control/cornerSize")).toInt(), 14);
     QCOMPARE(config.value(QStringLiteral("control/cornerIgnoredApplications")).toStringList(),

@@ -1,11 +1,11 @@
 #pragma once
 
-#include <QImage>
 #include <QColor>
+#include <QImage>
 #include <QSize>
-#include <QTransform>
 #include <QStringList>
 #include <QTimer>
+#include <QTransform>
 #include <QWidget>
 
 class QContextMenuEvent;
@@ -14,16 +14,27 @@ class QDropEvent;
 class QKeyEvent;
 class QMouseEvent;
 class QWheelEvent;
+class QUrl;
 
-namespace snipaste::ui {
+namespace snipaste::core
+{
+struct PasteWindowState;
+}
+namespace snipaste::ui
+{
 
 class PasteManager;
 
 class PasteWindow final : public QWidget
 {
     Q_OBJECT
-public:
-    enum class State { Active, Closed, Destroyed };
+  public:
+    enum class State
+    {
+        Active,
+        Closed,
+        Destroyed
+    };
 
     explicit PasteWindow(QImage image, QWidget *parent = nullptr);
 
@@ -80,16 +91,10 @@ public:
     void setThumbnailMode(bool enabled);
     void scaleBy(qreal factor);
     void adjustOpacity(qreal delta);
-    void restoreTransform(int rotationQuarterTurns,
-                          bool flipHorizontal,
-                          bool flipVertical,
-                          bool grayscale,
-                          bool inverted,
-                          qreal scale,
-                          bool transparentBackground,
-                          bool alwaysOnTop);
+    void restoreTransform(int rotationQuarterTurns, bool flipHorizontal, bool flipVertical, bool grayscale,
+                          bool inverted, qreal scale, bool transparentBackground, bool alwaysOnTop);
 
-signals:
+  signals:
     void activated(snipaste::ui::PasteWindow *window, Qt::KeyboardModifiers modifiers);
     void pasteClosed(snipaste::ui::PasteWindow *window);
     void selectAllRequested(snipaste::ui::PasteWindow *window);
@@ -97,10 +102,9 @@ signals:
     void copyAsFileRequested(snipaste::ui::PasteWindow *window);
     void moveRequested(snipaste::ui::PasteWindow *window, QPoint delta);
     void positionChanged(snipaste::ui::PasteWindow *window);
-    void wheelTransformRequested(snipaste::ui::PasteWindow *window,
-                                 qreal scaleFactor, qreal opacityDelta);
+    void wheelTransformRequested(snipaste::ui::PasteWindow *window, qreal scaleFactor, qreal opacityDelta);
 
-protected:
+  protected:
     bool event(QEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
@@ -114,7 +118,13 @@ protected:
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dropEvent(QDropEvent *event) override;
 
-private:
+  private:
+    friend class PasteManager;
+    core::PasteWindowState snapshot() const;
+    void restore(const core::PasteWindowState &state);
+    void downloadDroppedImage(const QUrl &url);
+    qint64 m_savedImageKey = 0;
+    QString m_savedImagePath;
     void setSourceImage(const QImage &image);
     void applyDroppedImage(const QImage &image);
     void rebuildImage();
@@ -123,7 +133,6 @@ private:
     void changeScale(qreal factor);
     void setAlwaysOnTop(bool enabled);
     void toggleBackgroundMode();
-    void toggleClickThrough();
     void toggleThumbnailMode();
     void cropImage();
     void applySelectionThumbnail(const QRect &selection);

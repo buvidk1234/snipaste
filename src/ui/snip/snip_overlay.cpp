@@ -1,70 +1,72 @@
 #include "ui/snip/snip_overlay.h"
-#include "ui/clipboard_output.h"
-#include "ui/annotation/annotation_canvas.h"
 #include "core/command/argument_parser.h"
 #include "platform/keyboard.h"
 #include "platform/screen_capture.h"
 #include "platform/windows/capture_target.h"
+#include "ui/annotation/annotation_canvas.h"
+#include "ui/annotation/annotation_options.h"
+#include "ui/clipboard_output.h"
 #include "ui/snip/scroll_capture_panel.h"
 #include "ui/snip/scroll_capture_preview.h"
 
 #include <QApplication>
 #include <QBackingStore>
-#include <QCoreApplication>
 #include <QClipboard>
+#include <QCoreApplication>
 #include <QCursor>
 #include <QDateTime>
 #include <QDir>
 #include <QEventLoop>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QFrame>
 #include <QFontMetrics>
+#include <QFrame>
 #include <QKeyEvent>
 #include <QLayout>
+#include <QMessageBox>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPointer>
+#include <QPolygon>
 #include <QProcess>
 #include <QScreen>
 #include <QStandardPaths>
-#include <QPolygon>
-#include <QPointer>
-#include <QMessageBox>
 #include <QTimer>
-#include <QToolTip>
 #include <QToolButton>
+#include <QToolTip>
 #include <algorithm>
 #include <cmath>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
+
 #include <mmsystem.h>
 #endif
 
-namespace snipaste::ui {
+namespace snipaste::ui
+{
 
 class SnipBorderOverlay final : public QWidget
 {
-public:
-    explicit SnipBorderOverlay(SnipOverlay *parent)
-        : QWidget(parent)
-        , m_overlay(parent)
+  public:
+    explicit SnipBorderOverlay(SnipOverlay *parent) : QWidget(parent), m_overlay(parent)
     {
         setAttribute(Qt::WA_TransparentForMouseEvents);
         setAttribute(Qt::WA_TranslucentBackground);
     }
 
-protected:
+  protected:
     void paintEvent(QPaintEvent *) override
     {
-        if (m_overlay) {
+        if (m_overlay)
+        {
             QPainter painter(this);
             m_overlay->paintSelectionFrame(painter);
         }
     }
 
-private:
+  private:
     SnipOverlay *m_overlay = nullptr;
 };
 
@@ -73,10 +75,7 @@ SnipOverlay::SnipOverlay(QScreen *screen, bool autoCopy, QWidget *parent)
 {
 }
 
-SnipOverlay::SnipOverlay(QScreen *screen,
-                         bool autoCopy,
-                         bool captureCursor,
-                         QRect initialSelection,
+SnipOverlay::SnipOverlay(QScreen *screen, bool autoCopy, bool captureCursor, QRect initialSelection,
                          QWidget *parent)
     : SnipOverlay(screen, parent, false)
 {
@@ -84,8 +83,7 @@ SnipOverlay::SnipOverlay(QScreen *screen,
 }
 
 SnipOverlay::SnipOverlay(QScreen *screen, QWidget *parent, bool reusable)
-    : QWidget(parent)
-    , m_reusable(reusable)
+    : QWidget(parent), m_reusable(reusable)
 {
     Q_ASSERT(screen);
     setAttribute(Qt::WA_DeleteOnClose, !reusable);
@@ -100,8 +98,7 @@ SnipOverlay::SnipOverlay(QScreen *screen, QWidget *parent, bool reusable)
     m_targetDetector = [this](QPoint point, bool elements) {
         if (QGuiApplication::platformName() == QStringLiteral("offscreen"))
             return QRect();
-        return platform::captureTargetAt(point, size(), winId(), elements,
-                                         m_excludedDetectionProcesses,
+        return platform::captureTargetAt(point, size(), winId(), elements, m_excludedDetectionProcesses,
                                          m_unstableDetectionProcesses);
     };
 }
@@ -123,8 +120,7 @@ SnipOverlay *SnipOverlay::createPrepared(QScreen *screen)
     return overlay;
 }
 
-void SnipOverlay::beginCapture(QScreen *screen, bool autoCopy,
-                               bool captureCursor, QRect initialSelection)
+void SnipOverlay::beginCapture(QScreen *screen, bool autoCopy, bool captureCursor, QRect initialSelection)
 {
     Q_ASSERT(screen && !m_captureActive);
     ++m_sessionGeneration;
@@ -152,14 +148,15 @@ void SnipOverlay::beginCapture(QScreen *screen, bool autoCopy,
     m_captureCornerRadius = 8;
     if (m_roundedButton)
         m_roundedButton->setChecked(false);
-    if (m_cornerRadiusPopup)
-        m_cornerRadiusPopup->hide();
+    if (m_annotationOptions)
+        m_annotationOptions->closePopups();
     if (m_toolbar)
         resetSelection();
     m_screenGeometry = screen->geometry();
     m_singleScreenGeometry = m_screenGeometry;
     setGeometry(m_screenGeometry);
-    if (m_toolbar) {
+    if (m_toolbar)
+    {
         const qreal compact = qMin<qreal>(1, qMax<qreal>(0, (width() - 40) / 576.0));
         for (auto *button : m_toolbar->findChildren<QToolButton *>())
             if (button->property("captureActionButton").toBool())
@@ -178,17 +175,22 @@ void SnipOverlay::beginCapture(QScreen *screen, bool autoCopy,
         drawCapturedCursor(screen);
     if (!m_initialSelection.isEmpty())
         m_selection = m_initialSelection.intersected(rect());
-    if (!m_toolbar) {
-        if (m_initialSelection.isEmpty() && QGuiApplication::platformName() != QStringLiteral("offscreen")) {
+    if (!m_toolbar)
+    {
+        if (m_initialSelection.isEmpty() && QGuiApplication::platformName() != QStringLiteral("offscreen"))
+        {
             const auto generation = m_sessionGeneration;
             QTimer::singleShot(40, this, [this, generation] {
-                if (m_captureActive && generation == m_sessionGeneration && !m_toolbar) {
+                if (m_captureActive && generation == m_sessionGeneration && !m_toolbar)
+                {
                     createToolbar();
                     updateToolbarGeometry();
                     update();
                 }
             });
-        } else {
+        }
+        else
+        {
             createToolbar();
         }
     }
@@ -200,7 +202,8 @@ void SnipOverlay::beginCapture(QScreen *screen, bool autoCopy,
 void SnipOverlay::setQuickResponse(bool enabled)
 {
     m_quickResponse = enabled;
-    if (!enabled && !m_toolbar) {
+    if (!enabled && !m_toolbar)
+    {
         createToolbar();
         updateToolbarGeometry();
         update();
@@ -245,7 +248,8 @@ void SnipOverlay::setFixedSelectionSize(const QSize &size)
 {
     m_fixedSelectionSize = size.isValid() ? size.expandedTo(QSize(1, 1)) : QSize();
     m_aspectRatio = m_fixedSelectionSize.isValid() && m_fixedSelectionSize.height() > 0
-        ? qreal(m_fixedSelectionSize.width()) / m_fixedSelectionSize.height() : 0.0;
+                        ? qreal(m_fixedSelectionSize.width()) / m_fixedSelectionSize.height()
+                        : 0.0;
 }
 
 void SnipOverlay::setTargetDetector(TargetDetector detector)
@@ -279,16 +283,10 @@ void SnipOverlay::setDetectionOptions(bool detectWindows, bool detectElements, b
         updateHoverTarget();
 }
 
-void SnipOverlay::setCaptureDisplayOptions(bool showAnchor,
-                                           const QColor &maskColor,
-                                           const QColor &anchorColor,
-                                           int borderWidth,
-                                           bool magnifierMask,
-                                           bool magnifierBorder,
-                                           bool magnifierAnchor,
-                                           bool crosshair,
-                                           bool disableGuides,
-                                           bool hideOneByOne)
+void SnipOverlay::setCaptureDisplayOptions(bool showAnchor, const QColor &maskColor,
+                                           const QColor &anchorColor, int borderWidth, bool magnifierMask,
+                                           bool magnifierBorder, bool magnifierAnchor, bool crosshair,
+                                           bool disableGuides, bool hideOneByOne)
 {
     m_showAnchor = showAnchor;
     if (maskColor.isValid())
@@ -317,8 +315,8 @@ void SnipOverlay::playCaptureSound() const
 
     QFileInfo configured(m_captureSoundFile);
     QString path = configured.isAbsolute()
-        ? configured.absoluteFilePath()
-        : QDir(QCoreApplication::applicationDirPath()).filePath(m_captureSoundFile);
+                       ? configured.absoluteFilePath()
+                       : QDir(QCoreApplication::applicationDirPath()).filePath(m_captureSoundFile);
     if (!QFileInfo::exists(path) && configured.isRelative())
         path = QDir::current().filePath(m_captureSoundFile);
     if (!QFileInfo::exists(path))
@@ -328,8 +326,7 @@ void SnipOverlay::playCaptureSound() const
     // PlaySound is asynchronous and replaces a previous capture sound, so a
     // rapid sequence of copies does not block the capture UI or accumulate
     // child processes.
-    PlaySoundW(reinterpret_cast<LPCWSTR>(path.utf16()), nullptr,
-               SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
+    PlaySoundW(reinterpret_cast<LPCWSTR>(path.utf16()), nullptr, SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
 #elif defined(Q_OS_MACOS)
     QProcess::startDetached(QStringLiteral("afplay"), {path});
 #else
@@ -338,16 +335,9 @@ void SnipOverlay::playCaptureSound() const
 #endif
 }
 
-void SnipOverlay::setMagnifierOptions(bool automatic,
-                                       bool superCapture,
-                                       const QStringList &colorFormats,
-                                       bool hideHexPrefix,
-                                       bool uppercaseHex,
-                                       bool grid,
-                                       bool coordinates,
-                                       bool hints,
-                                       int zoom,
-                                       bool superMode)
+void SnipOverlay::setMagnifierOptions(bool automatic, bool superCapture, const QStringList &colorFormats,
+                                      bool hideHexPrefix, bool uppercaseHex, bool grid, bool coordinates,
+                                      bool hints, int zoom, bool superMode)
 {
     m_showMagnifier = superMode ? superCapture : automatic;
     m_magnifierGrid = grid;
@@ -357,9 +347,10 @@ void SnipOverlay::setMagnifierOptions(bool automatic,
     m_magnifierUppercaseHex = uppercaseHex;
     m_magnifierZoom = qBound(3, zoom, 30);
     m_magnifierColorFormats.clear();
-    for (const QString &format : colorFormats) {
-        if ((format == QStringLiteral("RGB") || format == QStringLiteral("HEX"))
-            && !m_magnifierColorFormats.contains(format))
+    for (const QString &format : colorFormats)
+    {
+        if ((format == QStringLiteral("RGB") || format == QStringLiteral("HEX")) &&
+            !m_magnifierColorFormats.contains(format))
             m_magnifierColorFormats.append(format);
     }
     if (m_magnifierColorFormats.isEmpty())
@@ -376,10 +367,13 @@ void SnipOverlay::setLastSelection(QRect selection)
 
 void SnipOverlay::setSelectionHistory(const QList<QRect> &regions)
 {
-    m_regionHistory.clear(); m_regionHistoryIndex = -1;
-    for (const QRect &region : regions) {
+    m_regionHistory.clear();
+    m_regionHistoryIndex = -1;
+    for (const QRect &region : regions)
+    {
         const QRect local = region.intersected(rect());
-        if (!local.isEmpty()) m_regionHistory.append(local);
+        if (!local.isEmpty())
+            m_regionHistory.append(local);
     }
 }
 
@@ -387,24 +381,33 @@ void SnipOverlay::updateHoverTarget(bool allowElements)
 {
     if (m_selectionConfirmed || m_dragging)
         return;
-    if (!m_detectWindows || m_fixedSelectionSize.isValid()) {
-        m_hoverSelection = {}; m_targetHierarchy.clear(); update(); return;
+    if (!m_detectWindows || m_fixedSelectionSize.isValid())
+    {
+        m_hoverSelection = {};
+        m_targetHierarchy.clear();
+        update();
+        return;
     }
-    if (m_targetPoint != m_cursorPosition || m_targetHierarchy.isEmpty()) {
-        m_targetPoint = m_cursorPosition; m_targetLevel = 0; m_targetHierarchy.clear();
+    if (m_targetPoint != m_cursorPosition || m_targetHierarchy.isEmpty())
+    {
+        m_targetPoint = m_cursorPosition;
+        m_targetLevel = 0;
+        m_targetHierarchy.clear();
         const bool detectElements = allowElements && m_elementMode && m_detectElements;
-        if (m_nativeTargetDetector && QGuiApplication::platformName() != QStringLiteral("offscreen")) {
-            m_targetHierarchy = platform::captureTargetHierarchyAt(m_cursorPosition, size(), winId(),
-                                                                  detectElements,
-                                                                  m_excludedDetectionProcesses,
-                                                                  m_unstableDetectionProcesses);
-        } else if (!m_nativeTargetDetector && m_targetDetector) {
+        if (m_nativeTargetDetector && QGuiApplication::platformName() != QStringLiteral("offscreen"))
+        {
+            m_targetHierarchy = platform::captureTargetHierarchyAt(
+                m_cursorPosition, size(), winId(), detectElements, m_excludedDetectionProcesses,
+                m_unstableDetectionProcesses);
+        }
+        else if (!m_nativeTargetDetector && m_targetDetector)
+        {
             const QRect window = m_targetDetector(m_cursorPosition, false).intersected(rect());
-            const QRect element = detectElements
-                ? m_targetDetector(m_cursorPosition, true).intersected(rect()) : window;
+            const QRect element =
+                detectElements ? m_targetDetector(m_cursorPosition, true).intersected(rect()) : window;
             for (const QRect candidate : {element, window})
-                if ((!m_hideOneByOne || candidate.width() > 1 || candidate.height() > 1)
-                    && candidate.contains(m_cursorPosition) && !m_targetHierarchy.contains(candidate))
+                if ((!m_hideOneByOne || candidate.width() > 1 || candidate.height() > 1) &&
+                    candidate.contains(m_cursorPosition) && !m_targetHierarchy.contains(candidate))
                     m_targetHierarchy.append(candidate);
             if (!m_targetHierarchy.isEmpty() && !m_targetHierarchy.contains(rect()))
                 m_targetHierarchy.append(rect());
@@ -412,10 +415,12 @@ void SnipOverlay::updateHoverTarget(bool allowElements)
                 return qint64(a.width()) * a.height() < qint64(b.width()) * b.height();
             });
         }
-        if (m_hideOneByOne) {
+        if (m_hideOneByOne)
+        {
             m_targetHierarchy.erase(std::remove_if(m_targetHierarchy.begin(), m_targetHierarchy.end(),
                                                    [](const QRect &candidate) {
-                                                       return candidate.width() <= 1 && candidate.height() <= 1;
+                                                       return candidate.width() <= 1 &&
+                                                              candidate.height() <= 1;
                                                    }),
                                     m_targetHierarchy.end());
         }
@@ -427,9 +432,11 @@ void SnipOverlay::updateHoverTarget(bool allowElements)
 void SnipOverlay::cycleTarget(int direction)
 {
     updateHoverTarget();
-    if (m_targetHierarchy.isEmpty()) return;
+    if (m_targetHierarchy.isEmpty())
+        return;
     m_targetLevel = qBound(0, m_targetLevel + direction, int(m_targetHierarchy.size()) - 1);
-    m_hoverSelection = m_targetHierarchy.at(m_targetLevel); update();
+    m_hoverSelection = m_targetHierarchy.at(m_targetLevel);
+    update();
 }
 
 void SnipOverlay::forwardCanvasMouseEvent(QMouseEvent *event)
@@ -437,8 +444,8 @@ void SnipOverlay::forwardCanvasMouseEvent(QMouseEvent *event)
     if (!m_canvas || !event)
         return;
     const QPointF local = event->position() - QPointF(m_canvas->geometry().topLeft());
-    QMouseEvent forwarded(event->type(), local, event->globalPosition(), event->button(),
-                          event->buttons(), event->modifiers());
+    QMouseEvent forwarded(event->type(), local, event->globalPosition(), event->button(), event->buttons(),
+                          event->modifiers());
     QCoreApplication::sendEvent(m_canvas, &forwarded);
     event->accept();
 }
@@ -446,7 +453,8 @@ void SnipOverlay::forwardCanvasMouseEvent(QMouseEvent *event)
 void SnipOverlay::paintEvent(QPaintEvent *)
 {
     QPainter painter(this);
-    if (m_scrollCaptureActive && !m_selection.isEmpty()) {
+    if (m_scrollCaptureActive && !m_selection.isEmpty())
+    {
         painter.drawImage(rect(), m_background);
         painter.fillRect(rect(), m_maskColor);
 
@@ -478,7 +486,8 @@ void SnipOverlay::paintEvent(QPaintEvent *)
     }
     painter.setRenderHint(QPainter::Antialiasing, false);
     QImage display = m_background;
-    if (m_canvas) {
+    if (m_canvas)
+    {
         // The canvas paints the transient text editor/brush preview itself.
         // The overlay only needs the committed layer here, which is cached by
         // AnnotationCanvas between pointer moves.
@@ -490,19 +499,21 @@ void SnipOverlay::paintEvent(QPaintEvent *)
     painter.fillRect(rect(), m_maskColor);
 
     const QRect selection = m_selection.isEmpty() ? m_hoverSelection : m_selection;
-    if (selection.isValid() && !selection.isEmpty()) {
+    if (selection.isValid() && !selection.isEmpty())
+    {
         painter.save();
         painter.setClipRect(selection);
         painter.drawImage(rect(), display);
         painter.restore();
-        if (!m_selectionBorder) {
+        if (!m_selectionBorder)
+        {
             paintSelectionFrame(painter);
         }
     }
     if (m_showMagnifier && !m_selectionConfirmed && rect().contains(m_cursorPosition))
         drawMagnifier(painter);
-    if ((m_showCrosshair || (m_showMagnifierGuides && !m_disableGuides))
-        && !m_selectionConfirmed && rect().contains(m_cursorPosition))
+    if ((m_showCrosshair || (m_showMagnifierGuides && !m_disableGuides)) && !m_selectionConfirmed &&
+        rect().contains(m_cursorPosition))
         drawMagnifierGuides(painter);
     if (m_showShortcutHints && !m_dragging && !m_transformingSelection)
         drawShortcutHints(painter);
@@ -516,8 +527,9 @@ void SnipOverlay::paintSelectionFrame(QPainter &painter)
     if (!selection.isValid() || selection.isEmpty())
         return;
 
-    if (m_transformingSelection && !m_transformOriginSelection.isEmpty()
-        && m_transformOriginSelection != selection) {
+    if (m_transformingSelection && !m_transformOriginSelection.isEmpty() &&
+        m_transformOriginSelection != selection)
+    {
         // Keep the old frame visible while an edge is being dragged. It
         // makes the newly covered desktop area obvious and keeps the
         // resize gesture from looking like the image itself is scaling.
@@ -531,36 +543,40 @@ void SnipOverlay::paintSelectionFrame(QPainter &painter)
     pen.setWidth(m_captureBorderWidth);
     painter.setPen(pen);
     if (m_roundedCorners)
-        painter.drawRoundedRect(selection.adjusted(0, 0, -1, -1), m_captureCornerRadius, m_captureCornerRadius);
+        painter.drawRoundedRect(selection.adjusted(0, 0, -1, -1), m_captureCornerRadius,
+                                m_captureCornerRadius);
     else
         painter.drawRect(selection.adjusted(0, 0, -1, -1));
 
-    const bool showAnchors = m_anchorThreshold <= 0
-        || (selection.width() >= m_anchorThreshold && selection.height() >= m_anchorThreshold);
-    if (m_showAnchor && showAnchors) {
+    const bool showAnchors = m_anchorThreshold <= 0 || (selection.width() >= m_anchorThreshold &&
+                                                        selection.height() >= m_anchorThreshold);
+    if (m_showAnchor && showAnchors)
+    {
         painter.setRenderHint(QPainter::Antialiasing);
         painter.setPen(QPen(m_anchorColor, 1.5));
         painter.setBrush(QColor(QStringLiteral("#2889ed")));
         const QRect r = selection.adjusted(0, 0, -1, -1);
-        for (const QPoint &point : {r.topLeft(), QPoint(r.center().x(), r.top()), r.topRight(),
-                                   QPoint(r.right(), r.center().y()), r.bottomRight(),
-                                   QPoint(r.center().x(), r.bottom()), r.bottomLeft(),
-                                   QPoint(r.left(), r.center().y())})
+        for (const QPoint &point :
+             {r.topLeft(), QPoint(r.center().x(), r.top()), r.topRight(), QPoint(r.right(), r.center().y()),
+              r.bottomRight(), QPoint(r.center().x(), r.bottom()), r.bottomLeft(),
+              QPoint(r.left(), r.center().y())})
             painter.drawEllipse(point, 4, 4);
         painter.setBrush(Qt::NoBrush);
     }
-    if (!m_selectionConfirmed || m_transformingSelection) {
-        const QString sizeText = QStringLiteral("%1 × %2 px")
-                                 .arg(qRound(selection.width() * qreal(m_background.width()) / width()))
-                                 .arg(qRound(selection.height() * qreal(m_background.height()) / height()));
+    if (!m_selectionConfirmed || m_transformingSelection)
+    {
+        const QString sizeText =
+            QStringLiteral("%1 × %2 px")
+                .arg(qRound(selection.width() * qreal(m_background.width()) / width()))
+                .arg(qRound(selection.height() * qreal(m_background.height()) / height()));
         QFontMetrics metrics(font());
         const int labelWidth = qMax(92, metrics.horizontalAdvance(sizeText) + 18);
         const int labelHeight = 22;
-        const int labelX = qBound(4, selection.center().x() - labelWidth / 2,
-                                  qMax(4, width() - labelWidth - 4));
+        const int labelX =
+            qBound(4, selection.center().x() - labelWidth / 2, qMax(4, width() - labelWidth - 4));
         const int labelY = selection.top() >= labelHeight + 4
-            ? selection.top() - labelHeight - 4
-            : qMin(height() - labelHeight - 4, selection.bottom() + 4);
+                               ? selection.top() - labelHeight - 4
+                               : qMin(height() - labelHeight - 4, selection.bottom() + 4);
         const QRect labelRect(labelX, qMax(4, labelY), labelWidth, labelHeight);
         painter.fillRect(labelRect, QColor(0, 0, 0, 180));
         painter.setPen(Qt::white);
@@ -570,20 +586,25 @@ void SnipOverlay::paintSelectionFrame(QPainter &painter)
 
 void SnipOverlay::mousePressEvent(QMouseEvent *event)
 {
-    if (event->button() == Qt::RightButton) {
+    if (event->button() == Qt::RightButton)
+    {
         m_transformingSelection = false;
         m_movingSelection = false;
-        if (m_selectionConfirmed || m_dragging) {
+        if (m_selectionConfirmed || m_dragging)
+        {
             m_dragging = false;
             resetSelection();
             updateHoverTarget();
-        } else {
+        }
+        else
+        {
             close();
         }
         return;
     }
 
-    if (event->button() == Qt::MiddleButton) {
+    if (event->button() == Qt::MiddleButton)
+    {
         executeConfiguredAction(m_middleClickAction, m_middleClickExit);
         return;
     }
@@ -591,24 +612,22 @@ void SnipOverlay::mousePressEvent(QMouseEvent *event)
     if (event->button() != Qt::LeftButton)
         return;
 
-    const bool brushTool = m_canvas
-        && (m_canvas->tool() == AnnotationCanvas::Tool::Pen
-            || m_canvas->tool() == AnnotationCanvas::Tool::Marker
-            || m_canvas->tool() == AnnotationCanvas::Tool::Mosaic
-            || m_canvas->tool() == AnnotationCanvas::Tool::Blur
-            || m_canvas->tool() == AnnotationCanvas::Tool::Eraser);
-    const bool edgeResize = m_selectionConfirmed
-        && resizeEdgesAt(event->position().toPoint()) != Qt::Edges();
-    if (m_selectionConfirmed && m_canvas
-        && !m_canvas->testAttribute(Qt::WA_TransparentForMouseEvents)
-        && !m_selection.contains(event->position().toPoint())
-        && (brushTool || !edgeResize)) {
+    const bool brushTool = m_canvas && (m_canvas->tool() == AnnotationCanvas::Tool::Pen ||
+                                        m_canvas->tool() == AnnotationCanvas::Tool::Marker ||
+                                        m_canvas->tool() == AnnotationCanvas::Tool::Mosaic ||
+                                        m_canvas->tool() == AnnotationCanvas::Tool::Blur ||
+                                        m_canvas->tool() == AnnotationCanvas::Tool::Eraser);
+    const bool edgeResize = m_selectionConfirmed && resizeEdgesAt(event->position().toPoint()) != Qt::Edges();
+    if (m_selectionConfirmed && m_canvas && !m_canvas->testAttribute(Qt::WA_TransparentForMouseEvents) &&
+        !m_selection.contains(event->position().toPoint()) && (brushTool || !edgeResize))
+    {
         m_externalDrawing = true;
         forwardCanvasMouseEvent(event);
         return;
     }
 
-    if (m_selectionConfirmed) {
+    if (m_selectionConfirmed)
+    {
         beginSelectionTransform(event->position().toPoint());
         return;
     }
@@ -630,17 +649,20 @@ void SnipOverlay::mousePressEvent(QMouseEvent *event)
 void SnipOverlay::mouseMoveEvent(QMouseEvent *event)
 {
     m_cursorPosition = event->position().toPoint();
-    if (m_externalDrawing && m_canvas) {
+    if (m_externalDrawing && m_canvas)
+    {
         forwardCanvasMouseEvent(event);
         update();
         return;
     }
-    if (m_transformingSelection) {
+    if (m_transformingSelection)
+    {
         updateSelectionTransform(m_cursorPosition);
         return;
     }
     updateSelectionCursor(m_cursorPosition);
-    if (!m_dragging) {
+    if (!m_dragging)
+    {
         updateHoverTarget();
         update();
         return;
@@ -658,24 +680,29 @@ void SnipOverlay::updateDragSelection(QPoint position, Qt::KeyboardModifiers mod
     if (!m_dragMoved && !m_fixedSelectionSize.isValid())
         return;
 
-    if (m_fixedSelectionSize.isValid()) {
+    if (m_fixedSelectionSize.isValid())
+    {
         const QSize size = m_fixedSelectionSize.boundedTo(rect().size());
         QPoint topLeft = position;
         topLeft.setX(qBound(0, topLeft.x(), width() - size.width()));
         topLeft.setY(qBound(0, topLeft.y(), height() - size.height()));
         m_selection = QRect(topLeft, size);
-    } else {
+    }
+    else
+    {
         m_selection = QRect(m_dragOrigin, position).normalized();
-        if (m_keepAspectRatio && m_aspectRatio > 0.0 && !modifiers.testFlag(Qt::ShiftModifier)) {
+        if (m_keepAspectRatio && m_aspectRatio > 0.0 && !modifiers.testFlag(Qt::ShiftModifier))
+        {
             const int width = qMax(1, m_selection.width());
             const int height = qMax(1, qRound(width / m_aspectRatio));
             const int signedHeight = position.y() >= m_dragOrigin.y() ? height : -height;
-            m_selection = QRect(m_dragOrigin,
-                                QPoint(position.x(), m_dragOrigin.y() + signedHeight)).normalized();
-        } else if (modifiers.testFlag(Qt::ShiftModifier)) {
+            m_selection =
+                QRect(m_dragOrigin, QPoint(position.x(), m_dragOrigin.y() + signedHeight)).normalized();
+        }
+        else if (modifiers.testFlag(Qt::ShiftModifier))
+        {
             const QPoint current = position;
-            const int side = qMin(qAbs(current.x() - m_dragOrigin.x()),
-                                  qAbs(current.y() - m_dragOrigin.y()));
+            const int side = qMin(qAbs(current.x() - m_dragOrigin.x()), qAbs(current.y() - m_dragOrigin.y()));
             const QPoint corner(m_dragOrigin.x() + (current.x() >= m_dragOrigin.x() ? side : -side),
                                 m_dragOrigin.y() + (current.y() >= m_dragOrigin.y() ? side : -side));
             m_selection = QRect(m_dragOrigin, corner).normalized();
@@ -686,14 +713,16 @@ void SnipOverlay::updateDragSelection(QPoint position, Qt::KeyboardModifiers mod
 
 void SnipOverlay::mouseReleaseEvent(QMouseEvent *event)
 {
-    if (event->button() == Qt::LeftButton && m_externalDrawing) {
+    if (event->button() == Qt::LeftButton && m_externalDrawing)
+    {
         forwardCanvasMouseEvent(event);
         m_externalDrawing = false;
         updateSelectionCursor(event->position().toPoint());
         update();
         return;
     }
-    if (event->button() == Qt::LeftButton && m_transformingSelection) {
+    if (event->button() == Qt::LeftButton && m_transformingSelection)
+    {
         updateSelectionTransform(event->position().toPoint());
         m_transformingSelection = false;
         m_movingSelection = false;
@@ -702,12 +731,14 @@ void SnipOverlay::mouseReleaseEvent(QMouseEvent *event)
         updateSelectionCursor(event->position().toPoint());
         return;
     }
-    if (event->button() == Qt::LeftButton && m_dragging) {
+    if (event->button() == Qt::LeftButton && m_dragging)
+    {
         m_cursorPosition = event->position().toPoint();
         updateDragSelection(m_cursorPosition, event->modifiers());
         m_dragging = false;
         m_selection = m_selection.intersected(rect());
-        if (m_selection.width() < 2 || m_selection.height() < 2) {
+        if (m_selection.width() < 2 || m_selection.height() < 2)
+        {
             resetSelection();
             updateHoverTarget();
             return;
@@ -721,7 +752,8 @@ void SnipOverlay::mouseReleaseEvent(QMouseEvent *event)
 
 void SnipOverlay::mouseDoubleClickEvent(QMouseEvent *event)
 {
-    if (event->button() == Qt::LeftButton) {
+    if (event->button() == Qt::LeftButton)
+    {
         executeConfiguredAction(m_doubleClickAction, m_doubleClickExit);
         return;
     }
@@ -730,42 +762,49 @@ void SnipOverlay::mouseDoubleClickEvent(QMouseEvent *event)
 
 void SnipOverlay::keyPressEvent(QKeyEvent *event)
 {
-    if (m_scrollCaptureActive) {
-        if (event->key() == Qt::Key_Escape) {
+    if (m_scrollCaptureActive)
+    {
+        if (event->key() == Qt::Key_Escape)
+        {
             cancelScrollCapture();
             event->accept();
             return;
         }
-        if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+        if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)
+        {
             finishScrollCapture();
             event->accept();
             return;
         }
-        if (event->key() == Qt::Key_S && event->modifiers().testFlag(Qt::ControlModifier)) {
+        if (event->key() == Qt::Key_S && event->modifiers().testFlag(Qt::ControlModifier))
+        {
             saveScrollCapture();
             event->accept();
             return;
         }
-        if (event->key() == Qt::Key_E) {
+        if (event->key() == Qt::Key_E)
+        {
             editScrollCapture();
             event->accept();
             return;
         }
     }
-    if (event->key() == Qt::Key_Space && m_transformingSelection) {
+    if (event->key() == Qt::Key_Space && m_transformingSelection)
+    {
         m_movingSelection = true;
         updateSelectionCursor(m_cursorPosition);
         event->accept();
         return;
     }
-    if (handleProShortcut(event)) return;
-    if (event->key() == Qt::Key_Escape) {
-        if (m_confirmEscape) {
-            const auto answer = QMessageBox::question(this,
-                                                      QStringLiteral("取消截屏"),
+    if (handleProShortcut(event))
+        return;
+    if (event->key() == Qt::Key_Escape)
+    {
+        if (m_confirmEscape)
+        {
+            const auto answer = QMessageBox::question(this, QStringLiteral("取消截屏"),
                                                       QStringLiteral("确定要取消当前截屏吗？"),
-                                                      QMessageBox::Yes | QMessageBox::No,
-                                                      QMessageBox::No);
+                                                      QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
             if (answer != QMessageBox::Yes)
                 return;
         }
@@ -773,30 +812,36 @@ void SnipOverlay::keyPressEvent(QKeyEvent *event)
         return;
     }
 
-    if (event->matches(QKeySequence::Undo) || event->matches(QKeySequence::Redo)) {
-        if (m_canvas) {
-            if (event->matches(QKeySequence::Undo)) m_canvas->undo();
-            else m_canvas->redo();
+    if (event->matches(QKeySequence::Undo) || event->matches(QKeySequence::Redo))
+    {
+        if (m_canvas)
+        {
+            if (event->matches(QKeySequence::Undo))
+                m_canvas->undo();
+            else
+                m_canvas->redo();
         }
         return;
     }
 
-    if (m_canvas && event->key() == Qt::Key_Z
-        && event->modifiers() == (snipaste::platform::primaryModifier() | Qt::ShiftModifier)) {
+    if (m_canvas && event->key() == Qt::Key_Z &&
+        event->modifiers() == (snipaste::platform::primaryModifier() | Qt::ShiftModifier))
+    {
         m_canvas->clearAnnotations();
         event->accept();
         return;
     }
 
-    if (event->key() == Qt::Key_Tab && !m_selectionConfirmed && !m_dragging) {
+    if (event->key() == Qt::Key_Tab && !m_selectionConfirmed && !m_dragging)
+    {
         m_elementMode = !m_elementMode;
         m_targetPoint = QPoint(-1, -1);
         updateHoverTarget();
         return;
     }
 
-    if (event->key() == Qt::Key_Alt && !event->isAutoRepeat()
-        && !m_selectionConfirmed && !m_dragging) {
+    if (event->key() == Qt::Key_Alt && !event->isAutoRepeat() && !m_selectionConfirmed && !m_dragging)
+    {
         // Snipaste summons the magnifier with Alt and toggles the two guide
         // lines with the same key.  The magnifier itself remains available
         // after the shortcut so a short Alt press never makes the capture
@@ -809,29 +854,43 @@ void SnipOverlay::keyPressEvent(QKeyEvent *event)
         return;
     }
 
-    if (event->key() == Qt::Key_Shift && !event->isAutoRepeat()
-        && m_showMagnifier && !m_selectionConfirmed && !m_dragging) {
+    if (event->key() == Qt::Key_Shift && !event->isAutoRepeat() && m_showMagnifier && !m_selectionConfirmed &&
+        !m_dragging)
+    {
         m_hexColor = !m_hexColor;
         update();
         return;
     }
 
-    if (event->key() == Qt::Key_C && event->modifiers() == Qt::NoModifier
-        && m_showMagnifier && !m_selectionConfirmed) {
+    if (event->key() == Qt::Key_C && event->modifiers() == Qt::NoModifier && m_showMagnifier &&
+        !m_selectionConfirmed)
+    {
         QApplication::clipboard()->setText(sampledColorText());
         return;
     }
 
-    if (!m_dragging && event->modifiers() == Qt::NoModifier) {
+    if (!m_dragging && event->modifiers() == Qt::NoModifier)
+    {
         QPoint delta;
-        switch (event->key()) {
-        case Qt::Key_W: delta = QPoint(0, -1); break;
-        case Qt::Key_S: delta = QPoint(0, 1); break;
-        case Qt::Key_A: delta = QPoint(-1, 0); break;
-        case Qt::Key_D: delta = QPoint(1, 0); break;
-        default: break;
+        switch (event->key())
+        {
+        case Qt::Key_W:
+            delta = QPoint(0, -1);
+            break;
+        case Qt::Key_S:
+            delta = QPoint(0, 1);
+            break;
+        case Qt::Key_A:
+            delta = QPoint(-1, 0);
+            break;
+        case Qt::Key_D:
+            delta = QPoint(1, 0);
+            break;
+        default:
+            break;
         }
-        if (!m_exchangeNavigationKeys && !delta.isNull()) {
+        if (!m_exchangeNavigationKeys && !delta.isNull())
+        {
             m_cursorPosition += delta;
             m_cursorPosition.setX(qBound(0, m_cursorPosition.x(), width() - 1));
             m_cursorPosition.setY(qBound(0, m_cursorPosition.y(), height() - 1));
@@ -840,12 +899,18 @@ void SnipOverlay::keyPressEvent(QKeyEvent *event)
             updateHoverTarget();
             return;
         }
-        if (m_exchangeNavigationKeys) {
-            if (event->key() == Qt::Key_Left) delta = QPoint(-1, 0);
-            if (event->key() == Qt::Key_Right) delta = QPoint(1, 0);
-            if (event->key() == Qt::Key_Up) delta = QPoint(0, -1);
-            if (event->key() == Qt::Key_Down) delta = QPoint(0, 1);
-            if (!delta.isNull()) {
+        if (m_exchangeNavigationKeys)
+        {
+            if (event->key() == Qt::Key_Left)
+                delta = QPoint(-1, 0);
+            if (event->key() == Qt::Key_Right)
+                delta = QPoint(1, 0);
+            if (event->key() == Qt::Key_Up)
+                delta = QPoint(0, -1);
+            if (event->key() == Qt::Key_Down)
+                delta = QPoint(0, 1);
+            if (!delta.isNull())
+            {
                 m_cursorPosition += delta;
                 m_cursorPosition.setX(qBound(0, m_cursorPosition.x(), width() - 1));
                 m_cursorPosition.setY(qBound(0, m_cursorPosition.y(), height() - 1));
@@ -857,9 +922,11 @@ void SnipOverlay::keyPressEvent(QKeyEvent *event)
         }
     }
 
-    if ((event->key() == Qt::Key_A && event->modifiers() == snipaste::platform::primaryModifier())
-        || (event->key() == Qt::Key_R && event->modifiers() == Qt::NoModifier)) {
-        if (event->key() == Qt::Key_A && event->modifiers() == snipaste::platform::primaryModifier()) {
+    if ((event->key() == Qt::Key_A && event->modifiers() == snipaste::platform::primaryModifier()) ||
+        (event->key() == Qt::Key_R && event->modifiers() == Qt::NoModifier))
+    {
+        if (event->key() == Qt::Key_A && event->modifiers() == snipaste::platform::primaryModifier())
+        {
             // Snipaste cycles the full-screen target on repeated primary+A:
             // current screen -> virtual desktop -> current screen.  The
             // first press must always establish the current-screen frame,
@@ -873,7 +940,8 @@ void SnipOverlay::keyPressEvent(QKeyEvent *event)
             return;
         }
         const QRect target = m_lastSelection;
-        if (!target.isEmpty()) {
+        if (!target.isEmpty())
+        {
             m_dragging = false;
             resetSelection();
             m_selection = target;
@@ -882,16 +950,16 @@ void SnipOverlay::keyPressEvent(QKeyEvent *event)
         return;
     }
 
-    if (event->key() == Qt::Key_S
-        && event->modifiers().testFlag(snipaste::platform::primaryModifier())
-        && event->modifiers().testFlag(Qt::AltModifier)
-        && m_copyAsFileMode != static_cast<int>(CopyAsFileMode::Disabled)) {
+    if (event->key() == Qt::Key_S && event->modifiers().testFlag(snipaste::platform::primaryModifier()) &&
+        event->modifiers().testFlag(Qt::AltModifier) &&
+        m_copyAsFileMode != static_cast<int>(CopyAsFileMode::Disabled))
+    {
         copySelection(true, true);
         return;
     }
 
-    if (event->key() == Qt::Key_S
-        && event->modifiers().testFlag(snipaste::platform::primaryModifier())) {
+    if (event->key() == Qt::Key_S && event->modifiers().testFlag(snipaste::platform::primaryModifier()))
+    {
         if (event->modifiers().testFlag(Qt::ShiftModifier))
             quickSaveSelection();
         else
@@ -899,27 +967,28 @@ void SnipOverlay::keyPressEvent(QKeyEvent *event)
         return;
     }
 
-    if (event->key() == Qt::Key_P
-        && event->modifiers() == snipaste::platform::primaryModifier()) {
+    if (event->key() == Qt::Key_P && event->modifiers() == snipaste::platform::primaryModifier())
+    {
         printSelection();
         return;
     }
 
-    if (event->key() == Qt::Key_T
-        && event->modifiers().testFlag(snipaste::platform::primaryModifier())) {
+    if (event->key() == Qt::Key_T && event->modifiers().testFlag(snipaste::platform::primaryModifier()))
+    {
         pasteSelection();
         return;
     }
 
-    if ((event->key() == Qt::Key_C
-         && event->modifiers().testFlag(snipaste::platform::primaryModifier()))
-        || (event->key() == Qt::Key_Insert
-            && event->modifiers().testFlag(snipaste::platform::primaryModifier()))) {
+    if ((event->key() == Qt::Key_C && event->modifiers().testFlag(snipaste::platform::primaryModifier())) ||
+        (event->key() == Qt::Key_Insert &&
+         event->modifiers().testFlag(snipaste::platform::primaryModifier())))
+    {
         copySelection();
         return;
     }
 
-    if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+    if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)
+    {
         executeConfiguredAction(m_enterAction, m_enterExit);
         return;
     }
@@ -929,7 +998,8 @@ void SnipOverlay::keyPressEvent(QKeyEvent *event)
 
 void SnipOverlay::keyReleaseEvent(QKeyEvent *event)
 {
-    if (event->key() == Qt::Key_Space && m_transformingSelection) {
+    if (event->key() == Qt::Key_Space && m_transformingSelection)
+    {
         m_movingSelection = false;
         updateSelectionCursor(m_cursorPosition);
         event->accept();
@@ -945,9 +1015,8 @@ void SnipOverlay::changeEvent(QEvent *event)
         return;
     const auto generation = m_sessionGeneration;
     QTimer::singleShot(0, this, [this, generation] {
-        if (generation != m_sessionGeneration || !m_captureActive
-            || !isVisible() || isActiveWindow() || QApplication::activePopupWidget()
-            || QApplication::activeModalWidget())
+        if (generation != m_sessionGeneration || !m_captureActive || !isVisible() || isActiveWindow() ||
+            QApplication::activePopupWidget() || QApplication::activeModalWidget())
             return;
         close();
     });
@@ -969,12 +1038,13 @@ void SnipOverlay::showEvent(QShowEvent *event)
     updateHoverTarget(false);
     updateToolbarGeometry();
     update();
-    if (m_detectElements && m_elementMode) {
+    if (m_detectElements && m_elementMode)
+    {
         const QPoint initialCursor = m_cursorPosition;
         const auto generation = m_sessionGeneration;
         QTimer::singleShot(120, this, [this, initialCursor, generation] {
-            if (generation != m_sessionGeneration || !m_captureActive || !isVisible() || m_selectionConfirmed || m_dragging
-                || m_cursorPosition != initialCursor)
+            if (generation != m_sessionGeneration || !m_captureActive || !isVisible() ||
+                m_selectionConfirmed || m_dragging || m_cursorPosition != initialCursor)
                 return;
             m_targetPoint = QPoint(-1, -1);
             m_targetHierarchy.clear();
@@ -1040,8 +1110,11 @@ void SnipOverlay::drawMagnifier(QPainter &painter) const
     painter.drawImage(target, crop);
     const qreal cellWidth = qreal(target.width()) / 19;
     const qreal cellHeight = qreal(target.height()) / 15;
-    if (m_magnifierGrid) {
-        QPen grid(QColor(190, 215, 245, 75)); grid.setCosmetic(true); painter.setPen(grid);
+    if (m_magnifierGrid)
+    {
+        QPen grid(QColor(190, 215, 245, 75));
+        grid.setCosmetic(true);
+        painter.setPen(grid);
         for (int x = 1; x < 19; ++x)
             painter.drawLine(QPointF(target.left() + x * cellWidth, target.top()),
                              QPointF(target.left() + x * cellWidth, target.bottom()));
@@ -1050,14 +1123,16 @@ void SnipOverlay::drawMagnifier(QPainter &painter) const
                              QPointF(target.right(), target.top() + y * cellHeight));
     }
     painter.setBrush(Qt::NoBrush);
-    if (m_magnifierBorder) {
+    if (m_magnifierBorder)
+    {
         painter.setPen(QPen(Qt::white, 1));
         painter.drawRect(target.adjusted(0, 0, -1, -1));
     }
-    if (m_magnifierAnchor) {
+    if (m_magnifierAnchor)
+    {
         painter.setPen(QPen(Qt::white, 1));
-        painter.drawRect(QRectF(target.left() + 9 * cellWidth, target.top() + 7 * cellHeight,
-                               cellWidth, cellHeight));
+        painter.drawRect(
+            QRectF(target.left() + 9 * cellWidth, target.top() + 7 * cellHeight, cellWidth, cellHeight));
     }
 
     const QRect info(target.left(), target.bottom() + 1, panelWidth, infoHeight);
@@ -1070,17 +1145,18 @@ void SnipOverlay::drawMagnifier(QPainter &painter) const
     const QPoint coordinates = m_screenGeometry.topLeft() + pixel;
     if (m_magnifierCoordinates)
         painter.drawText(info.adjusted(0, 3, 0, -infoHeight + 24), Qt::AlignCenter,
-            QStringLiteral("(%1, %2)").arg(coordinates.x()).arg(coordinates.y()));
+                         QStringLiteral("(%1, %2)").arg(coordinates.x()).arg(coordinates.y()));
     const QRect swatch(info.left() + 28, info.top() + 30, 13, 13);
     painter.fillRect(swatch, m_background.pixelColor(pixel));
     painter.drawRect(swatch);
     painter.drawText(QRect(info.left() + 49, info.top() + 24, 130, 26), Qt::AlignVCenter | Qt::AlignLeft,
                      sampledColorText());
-    if (m_magnifierHints) {
-    painter.drawText(QRect(info.left(), info.top() + 52, panelWidth, 20), Qt::AlignCenter,
-                     QStringLiteral("按 C 复制颜色值"));
-    painter.drawText(QRect(info.left(), info.top() + 71, panelWidth, 20), Qt::AlignCenter,
-                     QStringLiteral("按 Shift 切换 RGB/HEX"));
+    if (m_magnifierHints)
+    {
+        painter.drawText(QRect(info.left(), info.top() + 52, panelWidth, 20), Qt::AlignCenter,
+                         QStringLiteral("按 C 复制颜色值"));
+        painter.drawText(QRect(info.left(), info.top() + 71, panelWidth, 20), Qt::AlignCenter,
+                         QStringLiteral("按 Shift 切换 RGB/HEX"));
     }
     painter.restore();
 }
@@ -1115,55 +1191,70 @@ void SnipOverlay::drawShortcutHints(QPainter &painter) const
         const QFontMetrics metrics(font);
         int totalWidth = 0;
         const auto keyExtent = [&metrics](const QString &key) {
-            return key == QStringLiteral("mouse") ? 18 : key == QStringLiteral("/") ? 8
-                : qMax(18, metrics.horizontalAdvance(key) + 6);
+            return key == QStringLiteral("mouse") ? 18
+                   : key == QStringLiteral("/")   ? 8
+                                                  : qMax(18, metrics.horizontalAdvance(key) + 6);
         };
-        for (const QString &key : keys) totalWidth += keyExtent(key) + 3;
+        for (const QString &key : keys)
+            totalWidth += keyExtent(key) + 3;
         int x = panel.left() + 105 - totalWidth;
-        for (const QString &key : keys) {
+        for (const QString &key : keys)
+        {
             const int keyWidth = keyExtent(key);
             const QRect keyRect(x, y, keyWidth, 19);
             painter.setPen(QColor(185, 190, 195));
-            if (key == QStringLiteral("mouse")) {
+            if (key == QStringLiteral("mouse"))
+            {
                 const QRect mouse = keyRect.adjusted(3, 0, -3, 0);
                 painter.drawRoundedRect(mouse, 5, 5);
                 painter.drawLine(mouse.left(), mouse.top() + 8, mouse.right(), mouse.top() + 8);
                 painter.drawLine(mouse.center().x(), mouse.top() + 2, mouse.center().x(), mouse.top() + 7);
-            } else {
-                if (key != QStringLiteral("/")) painter.drawRect(keyRect);
-                painter.setPen(Qt::white); painter.drawText(keyRect, Qt::AlignCenter, key);
+            }
+            else
+            {
+                if (key != QStringLiteral("/"))
+                    painter.drawRect(keyRect);
+                painter.setPen(Qt::white);
+                painter.drawText(keyRect, Qt::AlignCenter, key);
             }
             x += keyWidth + 3;
         }
         painter.setPen(Qt::white);
         painter.drawText(QRect(panel.left() + 115, y - 1, 205, 22), Qt::AlignVCenter, description);
     };
-    row(0, {QStringLiteral("W"), QStringLiteral("A"), QStringLiteral("S"), QStringLiteral("D")}, QStringLiteral("将鼠标指针移动 1 像素"));
+    row(0, {QStringLiteral("W"), QStringLiteral("A"), QStringLiteral("S"), QStringLiteral("D")},
+        QStringLiteral("将鼠标指针移动 1 像素"));
     if (m_selectionConfirmed)
-        row(1, {QStringLiteral("↑"), QStringLiteral("↓"), QStringLiteral("←"), QStringLiteral("→")}, QStringLiteral("将截屏区域移动 1 像素"));
+        row(1, {QStringLiteral("↑"), QStringLiteral("↓"), QStringLiteral("←"), QStringLiteral("→")},
+            QStringLiteral("将截屏区域移动 1 像素"));
     else
         row(1, {QStringLiteral("Tab")}, QStringLiteral("切换检测窗口/检测界面元素"));
     row(2, {QStringLiteral("1"), QStringLiteral("2"), QStringLiteral("/"), QStringLiteral("mouse")},
-        m_selectionConfirmed ? QStringLiteral("从中心调整区域大小") : QStringLiteral("选择上一层/下一层界面元素"));
+        m_selectionConfirmed ? QStringLiteral("从中心调整区域大小")
+                             : QStringLiteral("选择上一层/下一层界面元素"));
     row(3, {QStringLiteral("Ctrl"), QStringLiteral("A")}, QStringLiteral("设置截屏区域为当前屏幕/全屏"));
     if (!m_selectionConfirmed)
-        row(4, {QStringLiteral("R"), QStringLiteral("Shift"), QStringLiteral("R")}, QStringLiteral("使用上一次截屏的区域"));
+        row(4, {QStringLiteral("R"), QStringLiteral("Shift"), QStringLiteral("R")},
+            QStringLiteral("使用上一次截屏的区域"));
     row(rows - 3, {QStringLiteral(","), QStringLiteral(".")}, QStringLiteral("回溯截屏历史"));
-    row(rows - 2, {QStringLiteral("`"), QStringLiteral("/"), QStringLiteral("!")}, QStringLiteral("显示/隐藏捕获的鼠标指针"));
+    row(rows - 2, {QStringLiteral("`"), QStringLiteral("/"), QStringLiteral("!")},
+        QStringLiteral("显示/隐藏捕获的鼠标指针"));
     row(rows - 1, {QStringLiteral("F5")}, QStringLiteral("刷新截图"));
     painter.restore();
 }
 
 void SnipOverlay::closeEvent(QCloseEvent *event)
 {
-    if (m_scrollCaptureActive) {
+    if (m_scrollCaptureActive)
+    {
         m_scrollCaptureActive = false;
         m_scrollAutoRunning = false;
         m_scrollCaptureBusy = false;
         // The low-level hook is process-wide; always remove it before the
         // overlay is destroyed, including Esc/window-manager close paths.
         stopScrollInputMonitoring();
-        if (m_scrollPanel) {
+        if (m_scrollPanel)
+        {
             m_scrollPanel->hide();
             m_scrollPanel->deleteLater();
             m_scrollPanel = nullptr;
@@ -1171,7 +1262,8 @@ void SnipOverlay::closeEvent(QCloseEvent *event)
         restoreScrollCaptureCursor();
         m_scrollWindow = 0;
     }
-    if (m_includeUnsavedHistory && !m_outputEmitted && m_selectionConfirmed) {
+    if (m_includeUnsavedHistory && !m_outputEmitted && m_selectionConfirmed)
+    {
         const QImage image = selectionImage();
         if (!image.isNull())
             emit unsavedScreenshotCaptured(image);
@@ -1180,9 +1272,12 @@ void SnipOverlay::closeEvent(QCloseEvent *event)
     }
     if (m_toolbar)
         m_toolbar->hide();
-    if (m_sizeToolbar) m_sizeToolbar->hide();
-    if (m_toolOptions) m_toolOptions->hide();
-    if (m_cornerRadiusPopup) m_cornerRadiusPopup->hide();
+    if (m_sizeToolbar)
+        m_sizeToolbar->hide();
+    if (m_toolOptions)
+        m_toolOptions->hide();
+    if (m_annotationOptions)
+        m_annotationOptions->closePopups();
     // The capture result has already been delivered synchronously above.
     // Drop the desktop-sized images before QWidget's deferred destruction so
     // a finished screenshot does not keep the entire monitor resident.
@@ -1193,11 +1288,13 @@ void SnipOverlay::closeEvent(QCloseEvent *event)
     // WA_DeleteOnClose path can be deferred behind that nested interaction;
     // deleteLater() is idempotent and guarantees the overlay is released on
     // the next event turn after the close event has been accepted.
-    if (event->isAccepted()) {
+    if (event->isAccepted())
+    {
         const bool wasActive = m_captureActive;
         m_captureActive = false;
         ++m_sessionGeneration;
-        if (m_reusable) {
+        if (m_reusable)
+        {
             hide();
             resize(1, 1);
             // A hidden QWidget retains its last full-screen backing buffer.
@@ -1216,13 +1313,18 @@ void SnipOverlay::releaseCaptureResources()
 {
     // Release the canvas pixels first, including the converted render cache
     // and any shared references to the original full-screen image.
-    if (m_preparedCanvas) {
+    if (m_preparedCanvas)
+    {
         m_preparedCanvas->hide();
         m_preparedCanvas->resetCapture();
         m_preparedCanvas->setObjectName(QStringLiteral("preparedSelectionCanvas"));
-    } else {
+    }
+    else
+    {
         delete m_canvas;
     }
+    if (m_annotationOptions)
+        m_annotationOptions->setCanvas(nullptr);
     m_canvas = nullptr;
 
     m_background = {};
@@ -1242,7 +1344,8 @@ void SnipOverlay::releaseCaptureResources()
     m_scrollScreen = nullptr;
     m_scrollGlobalSelection = {};
     m_scrollCaptureCount = 0;
-    if (m_scrollPreview) {
+    if (m_scrollPreview)
+    {
         m_scrollPreview->hide();
         m_scrollPreview->deleteLater();
         m_scrollPreview = nullptr;
@@ -1254,7 +1357,9 @@ void SnipOverlay::updateToolbarGeometry()
     if (!m_toolbar)
         return;
     updateSizeToolbar();
-    if (m_toolbarHidden || m_dragging || m_transformingSelection || !m_selectionConfirmed || !m_selection.isValid() || m_selection.isEmpty()) {
+    if (m_toolbarHidden || m_dragging || m_transformingSelection || !m_selectionConfirmed ||
+        !m_selection.isValid() || m_selection.isEmpty())
+    {
         m_toolbar->hide();
         return;
     }
@@ -1266,20 +1371,27 @@ void SnipOverlay::updateToolbarGeometry()
 
     int y = m_selection.bottom() + margin;
     bool insideSelection = false;
-    if (y + tbHeight > height() - 8) {
-        if (m_selection.height() >= tbHeight + margin * 2) {
+    if (y + tbHeight > height() - 8)
+    {
+        if (m_selection.height() >= tbHeight + margin * 2)
+        {
             y = m_selection.bottom() - tbHeight - margin;
             insideSelection = true;
-        } else if (m_selection.top() - tbHeight - margin >= 8) {
+        }
+        else if (m_selection.top() - tbHeight - margin >= 8)
+        {
             y = m_selection.top() - tbHeight - margin;
-        } else {
+        }
+        else
+        {
             y = m_selection.top() + margin;
             insideSelection = true;
         }
     }
 
     int x = m_selection.right() + 1 - tbWidth;
-    if (insideSelection) {
+    if (insideSelection)
+    {
         x = m_selection.right() - tbWidth - margin;
     }
     x = qBound(8, x, qMax(8, width() - tbWidth - 8));
@@ -1319,21 +1431,25 @@ QImage SnipOverlay::selectionImage() const
     if (result.isNull())
         return result;
 
-    if (m_roundedCorners) {
+    if (m_roundedCorners)
+    {
         QImage rounded(result.size(), QImage::Format_ARGB32_Premultiplied);
         rounded.fill(Qt::transparent);
         QPainter painter(&rounded);
         painter.setRenderHint(QPainter::Antialiasing);
         QPainterPath path;
-        path.addRoundedRect(QRectF(0, 0, rounded.width(), rounded.height()), m_captureCornerRadius, m_captureCornerRadius);
+        path.addRoundedRect(QRectF(0, 0, rounded.width(), rounded.height()), m_captureCornerRadius,
+                            m_captureCornerRadius);
         painter.setClipPath(path);
         painter.drawImage(0, 0, result);
         result = rounded;
     }
 
-    if (m_outputBorder && m_outputBorderWidth > 0) {
+    if (m_outputBorder && m_outputBorderWidth > 0)
+    {
         const int bw = m_outputBorderWidth;
-        QImage bordered(result.width() + bw * 2, result.height() + bw * 2, QImage::Format_ARGB32_Premultiplied);
+        QImage bordered(result.width() + bw * 2, result.height() + bw * 2,
+                        QImage::Format_ARGB32_Premultiplied);
         bordered.fill(Qt::transparent);
         QPainter p(&bordered);
         p.setRenderHint(QPainter::Antialiasing);
@@ -1341,22 +1457,27 @@ QImage SnipOverlay::selectionImage() const
         p.setPen(QPen(m_outputBorderColor, bw));
         p.setBrush(Qt::NoBrush);
         if (m_roundedCorners)
-            p.drawRoundedRect(QRectF(bw / 2.0, bw / 2.0, bordered.width() - bw, bordered.height() - bw), m_captureCornerRadius, m_captureCornerRadius);
+            p.drawRoundedRect(QRectF(bw / 2.0, bw / 2.0, bordered.width() - bw, bordered.height() - bw),
+                              m_captureCornerRadius, m_captureCornerRadius);
         else
             p.drawRect(QRectF(bw / 2.0, bw / 2.0, bordered.width() - bw, bordered.height() - bw));
         result = bordered;
     }
 
-    if (m_outputShadow && m_outputShadowBlur > 0) {
+    if (m_outputShadow && m_outputShadowBlur > 0)
+    {
         const int pad = m_outputShadowBlur / 2;
-        QImage shadowed(result.width() + pad * 2, result.height() + pad * 2, QImage::Format_ARGB32_Premultiplied);
+        QImage shadowed(result.width() + pad * 2, result.height() + pad * 2,
+                        QImage::Format_ARGB32_Premultiplied);
         shadowed.fill(Qt::transparent);
         QPainter p(&shadowed);
         p.setRenderHint(QPainter::Antialiasing);
-        for (int i = pad; i >= 1; --i) {
+        for (int i = pad; i >= 1; --i)
+        {
             int alpha = (m_outputShadowColor.alpha() * (pad - i + 1)) / (pad * 3);
             p.setPen(Qt::NoPen);
-            p.setBrush(QColor(m_outputShadowColor.red(), m_outputShadowColor.green(), m_outputShadowColor.blue(), alpha));
+            p.setBrush(QColor(m_outputShadowColor.red(), m_outputShadowColor.green(),
+                              m_outputShadowColor.blue(), alpha));
             p.drawRoundedRect(QRectF(pad - i, pad - i + 2, result.width() + i * 2, result.height() + i * 2),
                               m_roundedCorners ? m_captureCornerRadius + i : i,
                               m_roundedCorners ? m_captureCornerRadius + i : i);
@@ -1380,12 +1501,13 @@ void SnipOverlay::drawCapturedCursor(const QScreen *screen)
 
     QPixmap cursorPixmap = QCursor().pixmap();
     QPoint hotSpot = QCursor().hotSpot();
-    if (cursorPixmap.isNull()) {
+    if (cursorPixmap.isNull())
+    {
         cursorPixmap = QPixmap(24, 30);
         cursorPixmap.fill(Qt::transparent);
         QPainter cursorPainter(&cursorPixmap);
-        QPolygon arrow({QPoint(1, 1), QPoint(1, 25), QPoint(7, 19), QPoint(12, 29),
-                        QPoint(17, 26), QPoint(11, 17), QPoint(21, 17)});
+        QPolygon arrow({QPoint(1, 1), QPoint(1, 25), QPoint(7, 19), QPoint(12, 29), QPoint(17, 26),
+                        QPoint(11, 17), QPoint(21, 17)});
         cursorPainter.setPen(QPen(Qt::black, 2));
         cursorPainter.setBrush(Qt::white);
         cursorPainter.drawPolygon(arrow);
@@ -1399,8 +1521,8 @@ void SnipOverlay::drawCapturedCursor(const QScreen *screen)
     const QPoint target(qRound(cursorPosition.x() * scaleX), qRound(cursorPosition.y() * scaleY));
     const QSize targetSize(qMax(1, qRound(cursorPixmap.width() * scaleX)),
                            qMax(1, qRound(cursorPixmap.height() * scaleY)));
-    const QPixmap scaledCursor = cursorPixmap.scaled(targetSize, Qt::KeepAspectRatio,
-                                                     Qt::SmoothTransformation);
+    const QPixmap scaledCursor =
+        cursorPixmap.scaled(targetSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
     QPainter painter(&m_background);
     painter.drawPixmap(target - QPoint(qRound(hotSpot.x() * scaleX), qRound(hotSpot.y() * scaleY)),
                        scaledCursor);
@@ -1420,7 +1542,8 @@ void SnipOverlay::copySelection(bool closeAfter, bool copyAsFileShortcut)
     m_outputEmitted = true;
     copyImageToClipboard(image, m_copyAsFileMode, copyAsFileShortcut);
     playCaptureSound();
-    if (closeAfter) {
+    if (closeAfter)
+    {
         close();
     }
 }
@@ -1436,29 +1559,29 @@ void SnipOverlay::saveSelection(bool closeAfter)
     emit screenshotCapturedWithBackground(image, m_cleanBackground);
     m_outputEmitted = true;
     QString defaultName = snipaste::core::expandOutputFilePattern(
-        m_outputFileNamePattern.trimmed().isEmpty()
-            ? QStringLiteral("Snipaste_$yyyy-MM-dd_HH-mm-ss$.png")
-            : m_outputFileNamePattern,
+        m_outputFileNamePattern.trimmed().isEmpty() ? QStringLiteral("Snipaste_$yyyy-MM-dd_HH-mm-ss$.png")
+                                                    : m_outputFileNamePattern,
         QDateTime::currentDateTime());
     if (defaultName.trimmed().isEmpty())
         defaultName = QStringLiteral("snipaste.png");
-    if (m_rememberExtension && !m_lastSavedExtension.isEmpty()) {
+    if (m_rememberExtension && !m_lastSavedExtension.isEmpty())
+    {
         QFileInfo rememberedInfo(defaultName);
         const QString baseName = rememberedInfo.completeBaseName();
         if (!baseName.isEmpty())
-            defaultName = rememberedInfo.path() == QStringLiteral(".")
-                ? baseName + QChar('.') + m_lastSavedExtension
-                : QDir(rememberedInfo.path()).filePath(baseName + QChar('.') + m_lastSavedExtension);
+            defaultName =
+                rememberedInfo.path() == QStringLiteral(".")
+                    ? baseName + QChar('.') + m_lastSavedExtension
+                    : QDir(rememberedInfo.path()).filePath(baseName + QChar('.') + m_lastSavedExtension);
     }
     const bool hiddenForDialog = m_hideOnFileDialog && isVisible();
     if (hiddenForDialog)
         hide();
     QString path = QFileDialog::getSaveFileName(
-        this,
-        QStringLiteral("保存截图"),
-        defaultName,
+        this, QStringLiteral("保存截图"), defaultName,
         QStringLiteral("PNG 图片 (*.png);;JPEG 图片 (*.jpg *.jpeg);;所有文件 (*.*)"));
-    if (path.isEmpty()) {
+    if (path.isEmpty())
+    {
         if (hiddenForDialog)
             show();
         return;
@@ -1469,18 +1592,20 @@ void SnipOverlay::saveSelection(bool closeAfter)
     // remember the extension only when that preference is enabled.
     QFileInfo selectedInfo(path);
     QString extension = selectedInfo.suffix().trimmed().toLower();
-    if (extension.isEmpty()) {
-        extension = m_rememberExtension && !m_lastSavedExtension.isEmpty()
-            ? m_lastSavedExtension
-            : QStringLiteral("png");
+    if (extension.isEmpty())
+    {
+        extension = m_rememberExtension && !m_lastSavedExtension.isEmpty() ? m_lastSavedExtension
+                                                                           : QStringLiteral("png");
         path += QChar('.') + extension;
     }
-    if (!image.save(path, nullptr, m_outputImageQuality)) {
+    if (!image.save(path, nullptr, m_outputImageQuality))
+    {
         if (hiddenForDialog)
             show();
         return;
     }
-    if (m_rememberExtension) {
+    if (m_rememberExtension)
+    {
         m_lastSavedExtension = extension;
         emit fileSaved(path);
     }
@@ -1496,22 +1621,20 @@ void SnipOverlay::quickSaveSelection(bool closeAfter)
     if (image.isNull())
         return;
     const QString directory = m_quickSaveDirectory.trimmed().isEmpty()
-        ? QStandardPaths::writableLocation(QStandardPaths::PicturesLocation)
-        : m_quickSaveDirectory;
+                                  ? QStandardPaths::writableLocation(QStandardPaths::PicturesLocation)
+                                  : m_quickSaveDirectory;
     if (!QDir().mkpath(directory))
         return;
     QString fileName = snipaste::core::expandOutputFilePattern(
-        m_outputFileNamePattern.trimmed().isEmpty()
-            ? QStringLiteral("Snipaste_$yyyy-MM-dd_HH-mm-ss$.png")
-            : m_outputFileNamePattern,
+        m_outputFileNamePattern.trimmed().isEmpty() ? QStringLiteral("Snipaste_$yyyy-MM-dd_HH-mm-ss$.png")
+                                                    : m_outputFileNamePattern,
         QDateTime::currentDateTime());
     if (fileName.trimmed().isEmpty())
         fileName = QStringLiteral("snipaste.png");
     if (QFileInfo(fileName).suffix().trimmed().isEmpty())
         fileName += QStringLiteral(".png");
-    const QString path = QFileInfo(fileName).isAbsolute()
-        ? QDir::cleanPath(fileName)
-        : QDir(directory).filePath(fileName);
+    const QString path =
+        QFileInfo(fileName).isAbsolute() ? QDir::cleanPath(fileName) : QDir(directory).filePath(fileName);
     if (!image.save(path, nullptr, m_outputImageQuality))
         return;
     emit selectionCaptured(globalSelection());
@@ -1522,8 +1645,8 @@ void SnipOverlay::quickSaveSelection(bool closeAfter)
         playCaptureSound();
     emit quickSaveCompleted(path);
     if (m_quickSaveNotification)
-        QToolTip::showText(QCursor::pos(), QStringLiteral("已保存截图：%1").arg(path), nullptr,
-                           QRect(), 3000);
+        QToolTip::showText(QCursor::pos(), QStringLiteral("已保存截图：%1").arg(path), nullptr, QRect(),
+                           3000);
     if (closeAfter)
         close();
 }

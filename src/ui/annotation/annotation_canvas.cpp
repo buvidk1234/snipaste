@@ -4,14 +4,13 @@
 #include <QTextDocument>
 #include <utility>
 
-namespace snipaste::ui {
+namespace snipaste::ui
+{
 
 using core::isNonMovableBrush;
 using core::translateShape;
 
-AnnotationCanvas::AnnotationCanvas(QImage image, QWidget *parent)
-    : QWidget(parent)
-    , m_image(std::move(image))
+AnnotationCanvas::AnnotationCanvas(QImage image, QWidget *parent) : QWidget(parent), m_image(std::move(image))
 {
     m_image.setDevicePixelRatio(1);
     m_logicalImageSize = m_image.size();
@@ -37,7 +36,7 @@ AnnotationCanvas::AnnotationCanvas(QImage image, QWidget *parent)
     m_textEditor->document()->setDocumentMargin(0);
     m_textEditor->setPlaceholderText(QStringLiteral("输入文字"));
     m_textEditor->setToolTip(QStringLiteral("Enter 换行 · %1+Enter 完成 · Esc 取消")
-                             .arg(snipaste::platform::primaryModifierText()));
+                                 .arg(snipaste::platform::primaryModifierText()));
     m_textEditor->installEventFilter(this);
     m_textEditor->hide();
     connect(m_textEditor, &QPlainTextEdit::textChanged, this, [this] {
@@ -66,7 +65,8 @@ void AnnotationCanvas::setTool(Tool tool)
     if (m_rememberToolColors)
         m_toolStyles.insert(int(m_tool), ToolStyle{m_penColor, m_penWidth, m_penStyle});
     m_tool = tool;
-    if (m_rememberToolColors && m_toolStyles.contains(int(tool))) {
+    if (m_rememberToolColors && m_toolStyles.contains(int(tool)))
+    {
         const ToolStyle style = m_toolStyles.value(int(tool));
         const QColor oldColor = m_penColor;
         const qreal oldWidth = m_penWidth;
@@ -86,7 +86,8 @@ void AnnotationCanvas::setTool(Tool tool)
 
 void AnnotationCanvas::setPenColor(const QColor &color)
 {
-    if (color.isValid() && m_penColor != color) {
+    if (color.isValid() && m_penColor != color)
+    {
         m_penColor = color;
         m_toolStyles[int(m_tool)].color = color;
         updateToolCursor();
@@ -98,7 +99,8 @@ void AnnotationCanvas::setPenColor(const QColor &color)
 void AnnotationCanvas::setPenWidth(qreal width)
 {
     const qreal clamped = qBound<qreal>(1.0, width, 64.0);
-    if (!qFuzzyCompare(m_penWidth, clamped)) {
+    if (!qFuzzyCompare(m_penWidth, clamped))
+    {
         m_penWidth = clamped;
         m_toolStyles[int(m_tool)].width = clamped;
         updateToolCursor();
@@ -109,7 +111,8 @@ void AnnotationCanvas::setPenWidth(qreal width)
 
 void AnnotationCanvas::setPenStyle(Qt::PenStyle style)
 {
-    if (m_penStyle != style) {
+    if (m_penStyle != style)
+    {
         m_penStyle = style;
         updateToolCursor();
         emit penStyleChanged(m_penStyle);
@@ -156,7 +159,7 @@ void AnnotationCanvas::setCornerRadius(qreal radius)
 {
     m_cornerRadius = qBound<qreal>(0.0, radius, 100.0);
     if (m_selectedShape >= 0 && m_selectedShape < m_document.shapes().size())
-        m_document.shapes()[m_selectedShape].cornerRadius = m_cornerRadius;
+        m_document.editShape(m_selectedShape, [&](Shape &shape) { shape.cornerRadius = m_cornerRadius; });
     recordHistory();
     invalidateRenderCache();
     update();
@@ -166,7 +169,7 @@ void AnnotationCanvas::setMagnification(qreal factor)
 {
     m_magnification = qBound<qreal>(1.1, factor, 8.0);
     if (m_selectedShape >= 0 && m_selectedShape < m_document.shapes().size())
-        m_document.shapes()[m_selectedShape].magnification = m_magnification;
+        m_document.editShape(m_selectedShape, [&](Shape &shape) { shape.magnification = m_magnification; });
     recordHistory();
     invalidateRenderCache();
     update();
@@ -176,7 +179,7 @@ void AnnotationCanvas::setNumberStyle(int style)
 {
     m_numberStyle = qBound(0, style, 2);
     if (m_selectedShape >= 0 && m_selectedShape < m_document.shapes().size())
-        m_document.shapes()[m_selectedShape].numberStyle = m_numberStyle;
+        m_document.editShape(m_selectedShape, [&](Shape &shape) { shape.numberStyle = m_numberStyle; });
     recordHistory();
     invalidateRenderCache();
     updateToolCursor();
@@ -187,7 +190,7 @@ void AnnotationCanvas::setNumberSize(qreal size)
 {
     m_numberSize = qBound<qreal>(12.0, size, 96.0);
     if (m_selectedShape >= 0 && m_selectedShape < m_document.shapes().size())
-        m_document.shapes()[m_selectedShape].numberSize = m_numberSize;
+        m_document.editShape(m_selectedShape, [&](Shape &shape) { shape.numberSize = m_numberSize; });
     recordHistory();
     invalidateRenderCache();
     updateToolCursor();
@@ -198,7 +201,7 @@ void AnnotationCanvas::setShapeFilled(bool enabled)
 {
     m_shapeFilled = enabled;
     if (m_selectedShape >= 0 && m_selectedShape < m_document.shapes().size())
-        m_document.shapes()[m_selectedShape].filled = enabled;
+        m_document.editShape(m_selectedShape, [&](Shape &shape) { shape.filled = enabled; });
     recordHistory();
     invalidateRenderCache();
     update();
@@ -206,7 +209,8 @@ void AnnotationCanvas::setShapeFilled(bool enabled)
 
 void AnnotationCanvas::setArrowStyle(ArrowStyle style)
 {
-    if (m_arrowStyle != style) {
+    if (m_arrowStyle != style)
+    {
         m_arrowStyle = style;
         emit arrowStyleChanged(m_arrowStyle);
         update();
@@ -243,7 +247,8 @@ void AnnotationCanvas::setEffectShape(EffectShape shape)
 void AnnotationCanvas::setCanvasFrame(QPoint origin, QSizeF logicalSize, QRect outputViewport)
 {
     m_coordinateOrigin = origin;
-    if (logicalSize.isValid() && logicalSize.width() > 0.0 && logicalSize.height() > 0.0) {
+    if (logicalSize.isValid() && logicalSize.width() > 0.0 && logicalSize.height() > 0.0)
+    {
         m_logicalImageSize = logicalSize;
         m_hasFixedLogicalSize = true;
     }
@@ -262,14 +267,18 @@ void AnnotationCanvas::setCaptureImage(QImage image, QPointF annotationOffset, Q
     m_document.translate(annotationOffset);
     m_start += annotationOffset;
     m_current += annotationOffset;
-    for (auto &point : m_currentPoints) point += annotationOffset;
+    for (auto &point : m_currentPoints)
+        point += annotationOffset;
     image.setDevicePixelRatio(1);
     m_image = std::move(image);
     invalidateRenderCache();
-    if (logicalSize.isValid() && logicalSize.width() > 0.0 && logicalSize.height() > 0.0) {
+    if (logicalSize.isValid() && logicalSize.width() > 0.0 && logicalSize.height() > 0.0)
+    {
         m_logicalImageSize = logicalSize;
         m_hasFixedLogicalSize = true;
-    } else if (!m_hasFixedLogicalSize) {
+    }
+    else if (!m_hasFixedLogicalSize)
+    {
         m_logicalImageSize = m_image.size();
     }
     update();
@@ -302,7 +311,8 @@ AnnotationCanvas::Shape AnnotationCanvas::currentShape() const
     shape.effectShape = m_effectShape;
     shape.magnifierCutout = m_magnifierCutout;
     shape.magnifierConnectorStyle = m_magnifierConnectorStyle;
-    if (m_tool == Tool::Magnifier) {
+    if (m_tool == Tool::Magnifier)
+    {
         // The first drag selects the original pixels to magnify.  Keep that
         // rectangle as the inner/source frame and derive a larger display
         // frame around its centre.  This makes the dashed inner frame show
@@ -315,7 +325,8 @@ AnnotationCanvas::Shape AnnotationCanvas::currentShape() const
         // Use the selected magnification while keeping the selected source
         // rectangle at the center of the display frame.
         QSizeF targetSize(source.size() * m_magnification);
-        if (!m_image.isNull()) {
+        if (!m_image.isNull())
+        {
             // Keep the generated display frame on the canvas when a large
             // source region is selected near an image edge.
             targetSize.setWidth(qMin(targetSize.width(), qreal(m_image.width())));
@@ -327,12 +338,17 @@ AnnotationCanvas::Shape AnnotationCanvas::currentShape() const
         QRectF target(QPointF(source.center().x() - targetSize.width() / 2.0,
                               source.center().y() - targetSize.height() / 2.0),
                       targetSize);
-        if (!m_image.isNull()) {
+        if (!m_image.isNull())
+        {
             const QRectF bounds(QPointF(0, 0), QSizeF(m_image.size()));
-            if (target.left() < bounds.left()) target.moveLeft(bounds.left());
-            if (target.top() < bounds.top()) target.moveTop(bounds.top());
-            if (target.right() > bounds.right()) target.moveRight(bounds.right());
-            if (target.bottom() > bounds.bottom()) target.moveBottom(bounds.bottom());
+            if (target.left() < bounds.left())
+                target.moveLeft(bounds.left());
+            if (target.top() < bounds.top())
+                target.moveTop(bounds.top());
+            if (target.right() > bounds.right())
+                target.moveRight(bounds.right());
+            if (target.bottom() > bounds.bottom())
+                target.moveBottom(bounds.bottom());
         }
         shape.start = target.topLeft();
         shape.end = target.bottomRight();
@@ -359,20 +375,18 @@ QRectF AnnotationCanvas::imageRect() const
 {
     if (m_image.isNull())
         return {};
-    if (m_hasFixedLogicalSize && !m_logicalImageSize.isEmpty()) {
+    if (m_hasFixedLogicalSize && !m_logicalImageSize.isEmpty())
+    {
         // A capture canvas represents screen pixels at a fixed device scale.
         // Keep that scale while the selection frame changes so the old pixels
         // stay fixed and only the newly covered desktop area is revealed.
         return QRectF(QPointF(0, 0), m_logicalImageSize);
     }
     const QSizeF available = size();
-    const qreal scale = qMin(available.width() / m_image.width(),
-                             available.height() / m_image.height());
+    const qreal scale = qMin(available.width() / m_image.width(), available.height() / m_image.height());
     const QSizeF scaledSize = QSizeF(m_image.size()) * qMax<qreal>(0.01, scale);
     return QRectF((available.width() - scaledSize.width()) / 2.0,
-                  (available.height() - scaledSize.height()) / 2.0,
-                  scaledSize.width(),
-                  scaledSize.height());
+                  (available.height() - scaledSize.height()) / 2.0, scaledSize.width(), scaledSize.height());
 }
 
 QRect AnnotationCanvas::outputPixelRect() const
@@ -385,8 +399,7 @@ QRect AnnotationCanvas::outputPixelRect() const
     const int top = qRound(m_outputViewport.top() * sy);
     const int right = qRound((m_outputViewport.left() + m_outputViewport.width()) * sx);
     const int bottom = qRound((m_outputViewport.top() + m_outputViewport.height()) * sy);
-    return QRect(left, top, qMax(1, right - left), qMax(1, bottom - top))
-        .intersected(m_image.rect());
+    return QRect(left, top, qMax(1, right - left), qMax(1, bottom - top)).intersected(m_image.rect());
 }
 
 QPointF AnnotationCanvas::toImagePoint(const QPointF &point) const
@@ -431,7 +444,7 @@ void AnnotationCanvas::clearAnnotations()
     finishHistoryGesture();
     if (m_document.shapes().isEmpty())
         return;
-    m_document.shapes().clear();
+    m_document.clear();
     m_selectedShape = -1;
     invalidateRenderCache();
     recordHistory();

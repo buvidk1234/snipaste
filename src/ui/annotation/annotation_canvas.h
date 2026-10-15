@@ -2,10 +2,10 @@
 
 #include "core/annotation/annotation_document.h"
 #include <QColor>
-#include <QImage>
 #include <QHash>
-#include <QPointF>
+#include <QImage>
 #include <QPainterPath>
+#include <QPointF>
 #include <QRectF>
 #include <QString>
 #include <QVector>
@@ -17,13 +17,14 @@ class QPainter;
 class QPlainTextEdit;
 class QWheelEvent;
 
-namespace snipaste::ui {
+namespace snipaste::ui
+{
 
 class AnnotationCanvas final : public QWidget
 {
     Q_OBJECT
 
-public:
+  public:
     using Tool = core::AnnotationTool;
     using ArrowStyle = core::ArrowStyle;
     using EffectShape = core::EffectShape;
@@ -51,9 +52,17 @@ public:
     void setCornerRadius(qreal radius);
     qreal cornerRadius() const { return m_cornerRadius; }
     void setMagnification(qreal factor);
-    void setMagnifierCutout(bool enable) { m_magnifierCutout = enable; update(); }
+    void setMagnifierCutout(bool enable)
+    {
+        m_magnifierCutout = enable;
+        update();
+    }
     bool magnifierCutout() const { return m_magnifierCutout; }
-    void setMagnifierConnectorStyle(int style) { m_magnifierConnectorStyle = style; update(); }
+    void setMagnifierConnectorStyle(int style)
+    {
+        m_magnifierConnectorStyle = style;
+        update();
+    }
     int magnifierConnectorStyle() const { return m_magnifierConnectorStyle; }
     void setNumberStyle(int style);
     void setNumberSize(qreal size);
@@ -75,8 +84,7 @@ public:
     // Re-apply the cursor after the parent capture overlay has switched
     // mouse ownership from the selection handles to the annotation canvas.
     void refreshToolCursor() { updateToolCursor(); }
-    void setCaptureImage(QImage image, QPointF annotationOffset = {},
-                         QSizeF logicalSize = {});
+    void setCaptureImage(QImage image, QPointF annotationOffset = {}, QSizeF logicalSize = {});
     // Reset session state and release image buffers, keeping the text editor
     // and tool preferences ready for the next capture.
     void resetCapture();
@@ -90,14 +98,14 @@ public:
     bool canUndo() const { return m_document.canUndo(); }
     bool canRedo() const { return m_document.canRedo(); }
 
-signals:
+  signals:
     void historyChanged();
     void penWidthChanged(qreal width);
     void penColorChanged(const QColor &color);
     void penStyleChanged(Qt::PenStyle style);
     void arrowStyleChanged(ArrowStyle style);
 
-protected:
+  protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
@@ -107,15 +115,21 @@ protected:
     void wheelEvent(QWheelEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
 
-private:
+  private:
     using Shape = core::AnnotationShape;
-    struct ToolStyle {
+    struct ToolStyle
+    {
         QColor color = QColor(237, 28, 36);
         qreal width = 2;
         Qt::PenStyle penStyle = Qt::SolidLine;
     };
 
-    enum class MagnifierPart { None, Target, Source };
+    enum class MagnifierPart
+    {
+        None,
+        Target,
+        Source
+    };
 
     QRectF imageRect() const;
     QRect outputPixelRect() const;
@@ -151,6 +165,7 @@ private:
     // existing shape (effects can be particularly expensive).
     mutable QImage m_renderCache;
     mutable bool m_renderCacheValid = false;
+    mutable quint64 m_renderCacheRevision = 0;
     // Only the visible, scaled preview is cached, with a 16 MiB upper bound.
     // Native-pixel canvases continue to paint the shared source directly.
     mutable QImage m_previewBackground;
