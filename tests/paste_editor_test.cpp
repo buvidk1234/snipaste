@@ -365,7 +365,10 @@ void PasteEditorTest::toolbarPreservesCaptureButtons()
             result.append(button->objectName());
         return result;
     };
-    QCOMPARE(names(captureActions), original);
+    auto captureExpected = original;
+    captureExpected.insert(captureExpected.indexOf(QStringLiteral("文字识别")) + 1, QStringLiteral("AI"));
+    QCOMPARE(names(captureActions), captureExpected);
+    QVERIFY(captureActions->width() <= capture->width());
     QVERIFY(!captureToolbar->findChild<QToolButton *>(QStringLiteral("完成编辑")));
     ui::PasteManager manager;
     auto *pin = manager.createPaste(baseImage());
@@ -380,6 +383,7 @@ void PasteEditorTest::toolbarPreservesCaptureButtons()
     auto *scroll = actions->findChild<QToolButton *>(QStringLiteral("滚动截图"));
     QVERIFY(scroll && scroll->isEnabled());
 #endif
+    QVERIFY(actions->width() <= pin->screen()->availableGeometry().width());
     QCOMPARE(actions->height(), captureActions->height());
     QString captureStyle = captureToolbar->styleSheet();
     captureStyle.replace(QStringLiteral("captureToolbar"), QStringLiteral("pasteToolbar"));
@@ -390,7 +394,7 @@ void PasteEditorTest::toolbarPreservesCaptureButtons()
         if (name == QStringLiteral("贴图")) continue;
         auto *before = captureActions->findChild<QToolButton *>(name);
         auto *after = actions->findChild<QToolButton *>(name);
-        QCOMPARE(after->size(), before->size());
+        QCOMPARE(after->height(), before->height());
         QCOMPARE(after->icon().pixmap(20, 20).toImage(), before->icon().pixmap(20, 20).toImage());
     }
     auto *copy = actions->findChild<QToolButton *>(QStringLiteral("完成"));

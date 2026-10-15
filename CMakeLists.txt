@@ -89,6 +89,7 @@ set(CMAKE_AUTORCC ON)
 find_package(Qt6 6.12 REQUIRED COMPONENTS Core Gui Widgets Network Concurrent PrintSupport)
 
 set(SNIPASTE_CORE_SOURCES
+    src/core/ai/ai_client.cpp
     src/core/paste/image_transform.cpp
     src/core/paste/paste_state_store.cpp
     src/core/annotation/annotation_types.cpp
@@ -116,6 +117,8 @@ set(SNIPASTE_PLATFORM_SOURCES
 )
 
 set(SNIPASTE_UI_SOURCES
+    src/ui/ai/ai_dialog.cpp
+    src/ui/preferences/preferences_ai.cpp
     src/ui/annotation/annotation_options_geometry.cpp
     src/ui/annotation/annotation_options_brushes.cpp
     src/ui/annotation/annotation_options_effects.cpp
@@ -167,6 +170,7 @@ set(SNIPASTE_UI_SOURCES
     src/ui/snip/snip_controls.cpp
     src/ui/snip/snip_selection.cpp
     src/ui/snip/snip_ocr.cpp
+    src/ui/snip/snip_ai.cpp
     src/ui/recognition/ocr_overlay.cpp
     src/ui/snip/window_capture_overlay.cpp
     src/ui/snip/scroll_capture_panel.cpp
@@ -197,6 +201,7 @@ set(SNIPASTE_APP_HEADERS
 )
 
 set(SNIPASTE_CORE_HEADERS
+    src/core/ai/ai_client.h
     src/core/paste/image_transform.h
     src/core/paste/paste_state_store.h
     src/core/command/argument_parser.h
@@ -229,6 +234,7 @@ set(SNIPASTE_PLATFORM_HEADERS
 )
 
 set(SNIPASTE_UI_HEADERS
+    src/ui/ai/ai_dialog.h
     src/ui/annotation/annotation_options.h
     src/ui/annotation/annotation_toolbar_icons.h
     src/ui/annotation/annotation_option_widgets.h
@@ -621,6 +627,15 @@ if(BUILD_TESTING)
             ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
             TIMEOUT 60)
     endforeach()
+
+    qt_add_executable(snipaste_ai_tests tests/ai_test.cpp)
+    target_link_libraries(snipaste_ai_tests PRIVATE snipaste_app Qt6::Test)
+    snipaste_apply_compile_options(snipaste_ai_tests)
+    add_test(NAME ai COMMAND snipaste_ai_tests)
+    set_tests_properties(ai PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;SNIPASTE_TEST_ARTIFACTS=${CMAKE_CURRENT_BINARY_DIR}/qa"
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
+        TIMEOUT 45)
 
     qt_add_executable(snipaste_application_tests tests/application_controller_test.cpp)
     target_link_libraries(snipaste_application_tests PRIVATE snipaste_app Qt6::Test)

@@ -73,6 +73,8 @@ PreferencesDialog::PreferencesDialog(core::ConfigStore &config, QWidget *parent)
     auto *updatePage = createUpdatePage(tabs);
     tabs->addTab(updatePage, QStringLiteral("更新"));
 
+    tabs->addTab(createAiPage(tabs), QStringLiteral("AI"));
+
     auto *aboutPage = createAboutPage(tabs);
     tabs->addTab(aboutPage, QStringLiteral("关于"));
 

@@ -54,6 +54,11 @@ QIcon captureIcon(CaptureIcon kind, bool light)
             p.drawText(QRectF(3, 0, 14, 20), Qt::AlignCenter, QStringLiteral("A"));
             break;
         }
+        case CaptureIcon::Ai: {
+            QFont font = p.font(); font.setPixelSize(12); font.setBold(true); p.setFont(font);
+            p.drawText(QRectF(0, 1, 20, 18), Qt::AlignCenter, QStringLiteral("AI"));
+            break;
+        }
         case CaptureIcon::Share:
             p.drawLine(QPointF(4, 10), QPointF(15, 4));
             p.drawLine(QPointF(4, 10), QPointF(15, 16));
