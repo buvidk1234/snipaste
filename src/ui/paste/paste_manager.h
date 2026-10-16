@@ -7,6 +7,7 @@
 #include <QRect>
 #include <QSize>
 #include <QString>
+#include <QTimer>
 #include <functional>
 
 namespace snipaste::ui
@@ -21,6 +22,7 @@ class PasteManager final : public QObject
   public:
     explicit PasteManager(QObject *parent = nullptr);
     ~PasteManager() override;
+    void prepareEditorCache();
 
     PasteWindow *createPaste(const QImage &image);
     PasteWindow *pasteClipboard(const QImage &image);
@@ -98,6 +100,7 @@ class PasteManager final : public QObject
     };
 
     void applyWindowSettings(PasteWindow *window);
+    PasteWindow *createWindow(const QImage &image);
     void forEachWindow(const std::function<void(PasteWindow *)> &action);
     void prune();
     void setGroupVisible(int groupIndex, bool visible);
@@ -109,6 +112,8 @@ class PasteManager final : public QObject
     PasteWindow *restoreClosedAt(qsizetype index);
 
     QList<Group> m_groups;
+    QPointer<PasteWindow> m_preparedWindow;
+    QTimer m_prepareEditorTimer;
     int m_activeGroup = 0;
     QList<QPointer<PasteWindow>> m_selected;
     QList<QPointer<PasteWindow>> m_closed;

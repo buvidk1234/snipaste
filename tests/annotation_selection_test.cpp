@@ -51,6 +51,7 @@ class AnnotationSelectionTest : public QObject
 {
     Q_OBJECT
   private slots:
+    void optionsCreateOnlySelectedPages();
     void selectedStyleAndUndo();
     void reselectSynchronizesControls();
     void pointerFeedback_data();
@@ -61,6 +62,33 @@ class AnnotationSelectionTest : public QObject
     void arrowDropdownGeometryAndItems();
     void lineStyleMenusAndHistory();
 };
+
+void AnnotationSelectionTest::optionsCreateOnlySelectedPages()
+{
+    Canvas canvas(background());
+    ui::AnnotationOptions options(nullptr, [] {});
+    options.setCanvas(&canvas);
+    QCOMPARE(options.stack()->count(), 9);
+    QVERIFY(options.findChildren<QToolButton *>().isEmpty());
+    // Index zero is already current; the first click must still create it.
+    canvas.setPenColor(Qt::blue);
+    canvas.setPenWidth(8);
+    canvas.setTool(Canvas::Tool::Rectangle);
+    auto *shapePage = options.stack()->currentWidget();
+    QVERIFY(shapePage->findChild<QToolButton *>(QStringLiteral("annotationRectangle")));
+    QVERIFY(!options.findChild<QToolButton *>(QStringLiteral("annotationStartArrowStyle")));
+    QVERIFY(!options.findChild<QToolButton *>(QStringLiteral("annotationTextBold")));
+    QCOMPARE(canvas.penColor(), QColor(Qt::blue));
+    QCOMPARE(canvas.penWidth(), qreal(8));
+    canvas.setTool(Canvas::Tool::Text);
+    QVERIFY(options.findChild<QToolButton *>(QStringLiteral("annotationTextBold")));
+    canvas.setTextBold(true);
+    canvas.setTool(Canvas::Tool::Rectangle);
+    QCOMPARE(options.stack()->currentWidget(), shapePage);
+    canvas.setTool(Canvas::Tool::Text);
+    QVERIFY(options.findChild<QToolButton *>(QStringLiteral("annotationTextBold"))->isChecked());
+    QVERIFY(!options.findChild<QToolButton *>(QStringLiteral("annotationStartArrowStyle")));
+}
 
 void AnnotationSelectionTest::selectedStyleAndUndo()
 {
@@ -303,6 +331,8 @@ void AnnotationSelectionTest::arrowDropdownGeometryAndItems()
     ui::AnnotationOptions options(nullptr, [] {});
     options.setCanvas(&canvas);
 
+    canvas.setTool(Canvas::Tool::Arrow);
+
     auto *btnStartArrow = options.findChild<QToolButton *>(QStringLiteral("annotationStartArrowStyle"));
     QVERIFY(btnStartArrow);
     QCOMPARE(btnStartArrow->width(), 54);
@@ -348,6 +378,8 @@ void AnnotationSelectionTest::lineStyleMenusAndHistory()
     ui::AnnotationOptions options(nullptr, [] {});
     options.setCanvas(&canvas);
     canvas.show();
+    for (const auto tool : {Canvas::Tool::Rectangle, Canvas::Tool::Line, Canvas::Tool::Pen})
+        canvas.setTool(tool);
     const QList<Qt::PenStyle> expected{
         Qt::SolidLine, Qt::DashLine, Qt::DotLine, Qt::DashDotLine, Qt::DashDotDotLine};
     const auto menus = options.findChildren<QToolButton *>(QStringLiteral("annotationLineStyle"));

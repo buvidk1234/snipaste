@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/history/screenshot_history.h"
+#include "core/annotation/annotation_document.h"
 #include "core/scroll_stitcher.h"
 #include "core/scroll_capture_stability.h"
 
@@ -54,9 +55,12 @@ class SnipOverlay final : public QWidget
                       QRect initialSelection = {});
 
     void captureSelectionImmediately();
+    void startScrollCapture();
     // The global paste command uses the current selection while this
     // capture session is open, before it has entered clipboard/history.
     bool pasteSelection(bool closeAfter = true);
+    QImage pasteSourceImage() const;
+    core::AnnotationDocument pasteAnnotations() const;
     void setFixedSelectionSize(const QSize &size);
     using TargetDetector = std::function<QRect(QPoint, bool)>;
     // Asynchronous element callbacks must capture values, not GUI objects.
@@ -167,7 +171,7 @@ class SnipOverlay final : public QWidget
   private:
     SnipOverlay(QScreen *screen, QWidget *parent, bool reusable);
     QRect imageSelection() const;
-    QImage selectionImage() const;
+    QImage selectionImage(bool annotations = true) const;
     void createToolbar();
     void createSizeToolbar();
     void updateSizeToolbar();
@@ -194,7 +198,6 @@ class SnipOverlay final : public QWidget
     void leaveOcrMode();
     void clearOcrOverlay();
     void barcodeSelection();
-    void startScrollCapture();
     void captureScrollFrame();
     void pollScrollCaptureFrame(quint64 generation);
     void completeScrollCaptureFrame(const QImage &frame, bool settled);

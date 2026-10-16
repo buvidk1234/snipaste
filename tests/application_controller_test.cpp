@@ -11,14 +11,20 @@
 #include "ui/snip/snip_overlay.h"
 
 #include <QApplication>
+#include <QColorDialog>
+#include <QDialog>
 #include <QFile>
+#include <QFileDialog>
 #include <QElapsedTimer>
+#include <QInputDialog>
+#include <QMessageBox>
 #include <QScreen>
 #include <QStandardPaths>
 #include <QSpinBox>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
+#include <QWindow>
 
 using namespace snipaste;
 
@@ -120,6 +126,85 @@ class ApplicationControllerTest final : public QObject
         core::ScreenshotHistory reloaded;
         reloaded.loadFromDirectory(path);
         QVERIFY(reloaded.images().isEmpty());
+    }
+    void dialogDefaultsDoNotBlockTheApplication()
+    {
+        QTemporaryDir directory;
+        core::ConfigStore config(directory.filePath(QStringLiteral("config.ini")));
+        configureTest(config, directory.path());
+        platform::SingleInstance instance;
+        app::ApplicationController controller(*static_cast<QApplication *>(qApp), config, instance);
+
+        // Check before show(): native file/color dialogs consume these settings
+        // before the QWidget receives polish or show events.
+        QDialog dialog;
+        QMessageBox message;
+        QInputDialog input;
+        QFileDialog file;
+        QColorDialog color;
+        for (const auto *window : QList<QDialog *>{&dialog, &message, &input, &file, &color})
+        {
+            QCOMPARE(window->windowModality(), Qt::WindowModal);
+            QVERIFY(window->windowFlags().testFlag(Qt::WindowStaysOnTopHint));
+        }
+        ui::PreferencesDialog preferences(config);
+        QCOMPARE(preferences.windowModality(), Qt::NonModal);
+    }
+    void dialogsKeepUnrelatedPinsInteractive_data()
+    {
+        QTest::addColumn<bool>("parented");
+        QTest::newRow("standalone-dialog") << false;
+        QTest::newRow("pin-dialog") << true;
+    }
+    void dialogsKeepUnrelatedPinsInteractive()
+    {
+        QFETCH(bool, parented);
+        QTemporaryDir directory;
+        core::ConfigStore config(directory.filePath(QStringLiteral("config.ini")));
+        configureTest(config, directory.path());
+        platform::SingleInstance instance;
+        app::ApplicationController controller(*static_cast<QApplication *>(qApp), config, instance);
+        QImage image(240, 160, QImage::Format_RGB32);
+        image.fill(Qt::yellow);
+        ui::PasteWindow owner(image);
+        owner.showAtPosition(QPoint(100, 100));
+        ui::PasteWindow pin(image);
+        pin.showAtPosition(QPoint(400, 100));
+        QVERIFY(QTest::qWaitForWindowExposed(&owner));
+        QVERIFY(QTest::qWaitForWindowExposed(&pin));
+        const QPoint ownerPosition = owner.pos();
+        const QPoint pinPosition = pin.pos();
+        const QPoint hit(40, 40);
+        const QPoint delta(30, 30);
+        auto drag = [&](ui::PasteWindow &window) {
+            // QWidget overloads bypass Qt's modal input filtering.
+            const QPoint end = window.mapToGlobal(hit) + delta;
+            QTest::mousePress(window.windowHandle(), Qt::LeftButton, Qt::NoModifier, hit);
+            QTest::mouseMove(window.windowHandle(), hit + delta);
+            QTest::mouseRelease(window.windowHandle(), Qt::LeftButton, Qt::NoModifier,
+                                window.mapFromGlobal(end));
+        };
+        QDialog dialog(parented ? &owner : nullptr);
+        dialog.resize(160, 100);
+        dialog.move(pinPosition + QPoint(20, 20));
+        bool exercised = false;
+        bool abovePin = true;
+        QTimer::singleShot(0, &dialog, [&] {
+            exercised = true;
+            if (QGuiApplication::platformName() == QStringLiteral("windows"))
+                abovePin = QApplication::widgetAt(dialog.mapToGlobal(dialog.rect().center())) == &dialog;
+            drag(pin);
+            drag(owner);
+            dialog.accept();
+        });
+        QCOMPARE(dialog.exec(), int(QDialog::Accepted));
+        QVERIFY(exercised);
+        QVERIFY(abovePin);
+        QCOMPARE(pin.pos(), pinPosition + delta);
+        QCOMPARE(owner.pos(), parented ? ownerPosition : ownerPosition + delta);
+        const QPoint restoredPosition = owner.pos();
+        drag(owner);
+        QCOMPARE(owner.pos(), restoredPosition + delta);
     }
     void preferencesAllowCaptureWithoutBlockingInput()
     {

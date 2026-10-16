@@ -6,6 +6,7 @@
 #include "ui/clipboard_output.h"
 #include "ui/output/image_output.h"
 #include "ui/paste/paste_manager.h"
+#include "ui/paste/paste_window.h"
 #include <QApplication>
 #include <QClipboard>
 #include <QCursor>
@@ -84,16 +85,20 @@ void ScreenshotOutput::autoSave(const QImage &image)
                 qWarning() << "failed to auto-save screenshot" << directory;
         });
 }
-void ScreenshotOutput::showPaste(const QImage &image)
+void ScreenshotOutput::showPaste(const QImage &image, const QImage &source, const core::AnnotationDocument &annotations)
 {
     // Let the capture overlay process its close/repaint events first.  A
     // top-level paste window performs native window setup and image
     // scaling; doing that directly inside the toolbar click makes the
     // click visibly pause and leaves the selection overlay on screen.
     const QImage copy = image;
-    QTimer::singleShot(0, this, [this, copy] {
+    QTimer::singleShot(0, this, [this, copy, source, annotations] {
         if (!copy.isNull())
-            m_pastes.createPaste(copy);
+        {
+            auto *window = m_pastes.createPaste(copy);
+            if (window && !source.isNull() && !annotations.shapes().isEmpty())
+                window->setAnnotations(annotations, source);
+        }
     });
 }
 void ScreenshotOutput::execute(const QImage &image, const QString &spec)

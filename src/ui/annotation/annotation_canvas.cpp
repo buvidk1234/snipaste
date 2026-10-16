@@ -530,6 +530,14 @@ void AnnotationCanvas::documentRestored()
     update();
 }
 
+void AnnotationCanvas::setDocument(const core::AnnotationDocument &document)
+{
+    finishTextInput(false);
+    finishHistoryGesture();
+    m_document = document;
+    documentRestored();
+}
+
 QRectF AnnotationCanvas::imageRect() const
 {
     if (m_image.isNull())

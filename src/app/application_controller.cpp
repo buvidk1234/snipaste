@@ -9,10 +9,13 @@
 #include <QCursor>
 #include <QDateTime>
 #include <QDebug>
+#include <QEvent>
 #include <QLocalSocket>
 #include <QScreen>
 #include <QStandardPaths>
 #include <QTimer>
+#include <QWidget>
+#include <QWindow>
 #include <algorithm>
 
 namespace snipaste::app
@@ -25,6 +28,7 @@ ApplicationController::ApplicationController(QApplication &app, core::ConfigStor
       m_output(config, m_pastes), m_capture(config, m_history, m_output, m_pastes),
       m_input(config, m_commands, m_capture), m_tray(m_commands, config)
 {
+    m_app.installEventFilter(this);
     registerCaptureCommands();
     registerPasteCommands();
     registerUtilityCommands();
@@ -73,6 +77,34 @@ ApplicationController::ApplicationController(QApplication &app, core::ConfigStor
         });
 }
 ApplicationController::~ApplicationController() = default;
+
+bool ApplicationController::eventFilter(QObject *watched, QEvent *event)
+{
+    if (event->type() == QEvent::Create || event->type() == QEvent::Show)
+    {
+        auto *widget = qobject_cast<QWidget *>(watched);
+        if (widget && widget->windowType() == Qt::Dialog)
+        {
+            if (event->type() == QEvent::Create)
+            {
+                // Native dialogs read these settings before polish/show events.
+                // Only the owning window should be blocked; independent pins
+                // must remain movable even if they overlap the dialog.
+                widget->setWindowModality(Qt::WindowModal);
+                widget->setWindowFlag(Qt::WindowStaysOnTopHint);
+            }
+            else if (auto *parent = widget->parentWidget())
+            {
+                // Keep the native owner association when topmost flags change.
+                auto *window = widget->windowHandle();
+                auto *owner = parent->window()->windowHandle();
+                if (window && owner)
+                    window->setTransientParent(owner);
+            }
+        }
+    }
+    return QObject::eventFilter(watched, event);
+}
 
 void ApplicationController::start(const QStringList &arguments)
 {

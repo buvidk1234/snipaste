@@ -787,18 +787,6 @@ void SnipOverlay::paintSelectionFrame(QPainter &painter)
     if (!selection.isValid() || selection.isEmpty())
         return;
 
-    if (m_transformingSelection && !m_transformOriginSelection.isEmpty() &&
-        m_transformOriginSelection != selection)
-    {
-        // Keep the old frame visible while an edge is being dragged. It
-        // makes the newly covered desktop area obvious and keeps the
-        // resize gesture from looking like the image itself is scaling.
-        QPen oldFrame(QColor(255, 255, 255, 230), 1, Qt::DashLine);
-        painter.setPen(oldFrame);
-        painter.setBrush(Qt::NoBrush);
-        painter.drawRect(m_transformOriginSelection.adjusted(0, 0, -1, -1));
-    }
-
     QPen pen(QColor(QStringLiteral("#2889ed")));
     pen.setWidth(m_captureBorderWidth);
     painter.setRenderHint(QPainter::Antialiasing,
@@ -1601,6 +1589,8 @@ void SnipOverlay::releaseCaptureResources()
     invalidateTargetDetection();
     setHoverSelection({}, false);
     clearOcrOverlay();
+    if (m_annotationOptions)
+        m_annotationOptions->setCanvas(nullptr);
     // Release the canvas pixels first, including the converted render cache
     // and any shared references to the original full-screen image.
     if (m_preparedCanvas)
@@ -1613,8 +1603,6 @@ void SnipOverlay::releaseCaptureResources()
     {
         delete m_canvas;
     }
-    if (m_annotationOptions)
-        m_annotationOptions->setCanvas(nullptr);
     m_canvas = nullptr;
 
     m_background = {};
@@ -1717,13 +1705,14 @@ QRect SnipOverlay::imageSelection() const
     return result.intersected(m_background.rect());
 }
 
-QImage SnipOverlay::selectionImage() const
+QImage SnipOverlay::selectionImage(bool annotations) const
 {
     if (m_selection.isEmpty())
         return {};
     if (m_canvas)
         m_canvas->finishTextInput();
-    QImage result = m_canvas ? m_canvas->renderedImage() : m_background.copy(imageSelection());
+    QImage result = m_canvas ? (annotations ? m_canvas->renderedImage() : m_canvas->unannotatedImage())
+                             : m_background.copy(imageSelection());
     if (result.isNull())
         return result;
 

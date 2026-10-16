@@ -3,6 +3,7 @@
 #include <QColor>
 #include <QFrame>
 #include <QPointer>
+#include <array>
 #include <functional>
 #include <initializer_list>
 class QStackedLayout;
@@ -14,8 +15,10 @@ class AnnotationCanvas;
 class AnnotationOptions final : public QFrame
 {
   public:
-    AnnotationOptions(QWidget *parent, std::function<void()> refreshCursor);
+    AnnotationOptions(QWidget *parent, std::function<void()> refreshCursor,
+                      QObject *controlEventFilter = nullptr);
     void setCanvas(AnnotationCanvas *canvas);
+    void showPage(int index);
     QStackedLayout *stack() const { return m_toolOptionsStack; }
     void closePopups();
 
@@ -48,6 +51,8 @@ class AnnotationOptions final : public QFrame
     std::function<void()> m_refreshCursor;
     QPointer<AnnotationCanvas> m_canvas;
     QStackedLayout *m_toolOptionsStack = nullptr;
+    std::array<bool, 9> m_createdPages{};
+    QPointer<QObject> m_controlEventFilter;
     QList<QToolButton *> m_colorWatchers;
     QList<QPair<QToolButton *, QString>> m_paletteButtons;
     QList<QToolButton *> m_dynamicWidthButtons;

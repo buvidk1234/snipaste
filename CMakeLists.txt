@@ -85,6 +85,7 @@ set(SNIPASTE_UI_SOURCES
     src/ui/annotation/annotation_canvas_text.cpp
     src/ui/paste/paste_window_interaction.cpp
     src/ui/paste/paste_window_actions.cpp
+    src/ui/paste/paste_window_editor.cpp
     src/ui/paste/paste_window_drop.cpp
     src/ui/paste/paste_group_dialog.cpp
     src/ui/whiteboard/whiteboard_window.cpp
@@ -380,6 +381,24 @@ option(SNIPASTE_BUILD_TESTS "Build UI regression tests" OFF)
 if(SNIPASTE_BUILD_TESTS)
     enable_testing()
     find_package(Qt6 REQUIRED COMPONENTS Test)
+
+    qt_add_executable(snipaste_paste_editor_tests tests/paste_editor_test.cpp)
+    target_link_libraries(snipaste_paste_editor_tests PRIVATE snipaste_ui Qt6::Test)
+    snipaste_apply_compile_options(snipaste_paste_editor_tests)
+    add_test(NAME paste_editor COMMAND snipaste_paste_editor_tests
+        -o "${CMAKE_CURRENT_BINARY_DIR}/paste-editor-results.txt,txt")
+    set_tests_properties(paste_editor PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;SNIPASTE_TEST_ARTIFACTS=${CMAKE_CURRENT_BINARY_DIR}/qa"
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
+        TIMEOUT 60)
+    foreach(scale IN ITEMS 1.25 1.5 2)
+        add_test(NAME paste_editor_dpi_${scale} COMMAND snipaste_paste_editor_tests
+            -o "${CMAKE_CURRENT_BINARY_DIR}/paste-editor-results-${scale}.txt,txt")
+        set_tests_properties(paste_editor_dpi_${scale} PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_SCALE_FACTOR=${scale}"
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
+            TIMEOUT 60)
+    endforeach()
 
     qt_add_executable(snipaste_application_tests tests/application_controller_test.cpp)
     target_link_libraries(snipaste_application_tests PRIVATE snipaste_app Qt6::Test)

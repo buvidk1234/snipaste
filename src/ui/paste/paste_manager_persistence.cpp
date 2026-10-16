@@ -15,7 +15,7 @@ void PasteManager::loadState(const QString &directory)
         Group group{savedGroup.name, {}};
         for (const auto &pin : savedGroup.windows)
         {
-            auto *window = new PasteWindow(pin.image);
+            auto *window = createWindow(pin.image);
             applyWindowSettings(window);
             window->setActivateOnShow(true);
             window->restore(pin);

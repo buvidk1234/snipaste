@@ -32,7 +32,7 @@ void AnnotationOptions::syncStyleControls()
     case Tool::Magnifier: page = 7; break;
     case Tool::Eraser: page = 8; break;
     }
-    m_toolOptionsStack->setCurrentIndex(page);
+    showPage(page);
     updateDynamicWidthButtons(style.width);
     updateAllColorWatchers(style.color);
     const auto check = [this](const QString &name, bool checked) {

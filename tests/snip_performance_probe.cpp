@@ -6,13 +6,18 @@
 #include "ui/paste/paste_window.h"
 
 #include <QApplication>
+#include <QBackingStore>
 #include <QCryptographicHash>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFrame>
+#include <QGraphicsProxyWidget>
+#include <QGraphicsScene>
+#include <QGraphicsView>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPointer>
 #include <QScreen>
@@ -26,6 +31,7 @@
 #include <QTimer>
 #include <QVariantAnimation>
 #include <cstdio>
+#include <algorithm>
 #include <memory>
 #include <vector>
 
@@ -41,9 +47,14 @@ public:
     QWidget *hoverOverlay = nullptr;
     QElapsedTimer hoverClock;
     QJsonArray hoverPaints;
+    bool recordDragPaints = false;
+    QMap<QString, int> dragPaints;
 
     bool notify(QObject *receiver, QEvent *event) override
     {
+        if (recordDragPaints && event->type() == QEvent::Paint)
+            ++dragPaints[receiver->objectName().isEmpty()
+                ? QString::fromLatin1(receiver->metaObject()->className()) : receiver->objectName()];
         if (receiver != hoverOverlay || event->type() != QEvent::Paint)
             return QApplication::notify(receiver, event);
         const auto *paint = static_cast<QPaintEvent *>(event);
@@ -182,10 +193,171 @@ static QJsonObject imageFormats(QTemporaryDir &temporary)
     return {{"packageImageFormatsOk", formatsOk}, {"packageSvgOk", svgOk}};
 }
 
+static int pasteMemoryProbe(QApplication &app)
+{
+    QJsonArray samples;
+    QPointer<snipaste::ui::PasteWindow> inspected;
+    const auto settle = [] {
+        QEventLoop loop;
+        QTimer::singleShot(100, &loop, &QEventLoop::quit);
+        loop.exec();
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    };
+    const auto sample = [&](const char *stage) {
+        settle();
+        QJsonObject entry = resources();
+        entry["stage"] = QString::fromLatin1(stage);
+        entry["widgets"] = QApplication::allWidgets().size();
+        if (inspected)
+        {
+            entry["sourceKey"] = double(inspected->sourceImage().cacheKey());
+            entry["displayKey"] = double(inspected->displayedImage().cacheKey());
+            entry["backingPixels"] = inspected->backingStore()->size().width()
+                * inspected->backingStore()->size().height();
+            qint64 shadowPixels = 0;
+            for (auto *shadow : inspected->findChildren<QWidget *>(QStringLiteral("pasteShadow")))
+                if (auto *store = shadow->backingStore())
+                    shadowPixels += qint64(store->size().width()) * store->size().height();
+            entry["shadowBackingPixels"] = double(shadowPixels);
+            if (auto *view = inspected->findChild<QGraphicsView *>(QStringLiteral("pasteEditor")))
+                for (auto *item : view->scene()->items())
+                    if (auto *proxy = qgraphicsitem_cast<QGraphicsProxyWidget *>(item))
+                    {
+                        entry["proxyCacheMode"] = int(proxy->cacheMode());
+                        auto *canvas = qobject_cast<snipaste::ui::AnnotationCanvas *>(proxy->widget());
+                        entry["canvasSourceKey"] = double(canvas->unannotatedImage().cacheKey());
+                    }
+        }
+        samples.append(entry);
+    };
+    sample("application");
+    std::unique_ptr<snipaste::ui::SnipOverlay> capture(
+        snipaste::ui::SnipOverlay::createPrepared(app.primaryScreen()));
+    sample("capturePrepared");
+    snipaste::ui::PasteManager manager;
+    manager.setFlashNew(false);
+    manager.setActivateNew(false);
+    manager.setShadowEnabled(!app.arguments().contains(QStringLiteral("--no-shadow")));
+    sample("pastePrepared");
+    QImage source(3840, 2160, QImage::Format_ARGB32_Premultiplied);
+    source.fill(QColor(57, 62, 72));
+    sample("source4k");
+    for (int i = 0; i < 3; ++i)
+    {
+        auto *pin = manager.createPaste(source);
+        inspected = pin;
+        if (app.arguments().contains(QStringLiteral("--inverted")))
+            pin->restoreTransform(0, false, false, false, true, 1.0, false, true);
+        sample("pinVisible");
+        pin->setToolbarVisible(true);
+        sample("editorVisible");
+        pin->setToolbarVisible(false);
+        sample("editorClosed");
+        QKeyEvent close(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+        QApplication::sendEvent(pin, &close);
+        sample("pinClosed");
+    }
+    manager.destroyAll();
+    sample("pinsDestroyed");
+    source = {};
+    sample("sourceReleased");
+    for (int i = 0; i < 8; ++i)
+    {
+        QImage image(1920, 1080, QImage::Format_RGB32);
+        image.fill(QColor(57, 62, 72));
+        auto *pin = manager.createPaste(image);
+        pin->setToolbarVisible(true);
+        settle();
+        pin->close();
+        sample("createEditDestroy");
+    }
+    const QJsonObject report{{"platform", app.platformName()},
+        {"devicePixelRatio", app.primaryScreen()->devicePixelRatio()}, {"samples", samples}};
+    const QByteArray json = QJsonDocument(report).toJson();
+    std::fwrite(json.constData(), 1, size_t(json.size()), stdout);
+    return 0;
+}
+
+static int pasteDragProbe(PerformanceApplication &app)
+{
+    snipaste::ui::PasteManager manager;
+    manager.setFlashNew(false);
+    manager.setActivateNew(false);
+    manager.setShadowEnabled(!app.arguments().contains(QStringLiteral("--no-shadow")));
+    manager.prepareEditorCache();
+    QImage source(3840, 2160, QImage::Format_ARGB32_Premultiplied);
+    source.fill(QColor(57, 62, 72));
+    auto *pin = manager.createPaste(source);
+    pin->setObjectName(QStringLiteral("dragPin"));
+    pin->scaleBy(0.5);
+    QJsonArray scenarios;
+    bool unchanged = true;
+    const int scenarioCount = app.arguments().contains(QStringLiteral("--drag-plain")) ? 1 : 3;
+    for (int scenario = 0; scenario < scenarioCount; ++scenario)
+    {
+        pin->setToolbarVisible(scenario != 0);
+        if (scenario == 2)
+            pin->restoreTransform(0, false, false, false, true, 0.5, false, true);
+        QEventLoop settle;
+        QTimer::singleShot(100, &settle, &QEventLoop::quit);
+        settle.exec();
+        const auto sourceKey = pin->sourceImage().cacheKey();
+        const auto displayKey = pin->displayedImage().cacheKey();
+        const QPoint press = pin->rect().center();
+        const QPoint start = pin->mapToGlobal(press);
+        QMouseEvent down(QEvent::MouseButtonPress, press, start,
+                         Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(pin, &down);
+        // Selection changes the border once; measure the following movement.
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::UpdateRequest);
+        app.processEvents();
+        const double cpuBefore = resources()["cpuMs"].toDouble();
+        app.dragPaints.clear();
+        app.recordDragPaints = true;
+        std::vector<double> durations;
+        QPoint last;
+        for (int frame = 0; frame < 120; ++frame)
+        {
+            last = start + QPoint(frame < 60 ? frame * 2 : (120 - frame) * 2, (frame % 30) / 2);
+            QMouseEvent move(QEvent::MouseMove, pin->mapFromGlobal(last), last,
+                             Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+            QElapsedTimer timer;
+            timer.start();
+            QApplication::sendEvent(pin, &move);
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::UpdateRequest);
+            app.processEvents();
+            durations.push_back(timer.nsecsElapsed() / 1e6);
+        }
+        app.recordDragPaints = false;
+        QMouseEvent up(QEvent::MouseButtonRelease, pin->mapFromGlobal(last), last,
+                       Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(pin, &up);
+        unchanged = unchanged && sourceKey == pin->sourceImage().cacheKey()
+            && displayKey == pin->displayedImage().cacheKey();
+        std::sort(durations.begin(), durations.end());
+        QJsonObject paints;
+        for (auto it = app.dragPaints.cbegin(); it != app.dragPaints.cend(); ++it)
+            paints[it.key()] = it.value();
+        scenarios.append(QJsonObject{{"scenario", scenario}, {"frames", int(durations.size())},
+            {"medianMs", durations[durations.size() / 2]},
+            {"p95Ms", durations[size_t(durations.size() * 0.95)]}, {"maxMs", durations.back()},
+            {"cpuMs", resources()["cpuMs"].toDouble() - cpuBefore}, {"paints", paints}});
+    }
+    const QByteArray report = QJsonDocument(QJsonObject{{"platform", app.platformName()},
+        {"devicePixelRatio", pin->devicePixelRatioF()}, {"sourceUnchanged", unchanged},
+        {"scenarios", scenarios}}).toJson();
+    std::fwrite(report.constData(), 1, size_t(report.size()), stdout);
+    return unchanged ? 0 : 7;
+}
+
 int main(int argc, char **argv)
 {
     PerformanceApplication app(argc, argv);
     app.setQuitOnLastWindowClosed(false);
+    if (app.arguments().contains(QStringLiteral("--paste-drag")))
+        return pasteDragProbe(app);
+    if (app.arguments().contains(QStringLiteral("--paste-memory")))
+        return pasteMemoryProbe(app);
     if (app.arguments().contains(QStringLiteral("--hover-animation")))
         return hoverAnimationProbe(app);
     if (app.arguments().contains(QStringLiteral("--package-formats-only"))) {

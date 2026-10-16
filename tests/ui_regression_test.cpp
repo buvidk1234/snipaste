@@ -99,6 +99,8 @@ private slots:
     void proSizeRefreshAndOutput();
     void proHistoryAndSelectionShortcuts();
     void historyRestoresPairedGeometryAndBackground();
+    void historySelectionKeepsDesktopPixels_data();
+    void historySelectionKeepsDesktopPixels();
     void legacyHistoryUsesNeutralPreview();
     void proLayoutAndAnnotations();
     void magnifierFramesMoveIndependently();
@@ -143,6 +145,8 @@ private slots:
     void resizeSelectionEdgesAndCorners();
     void resizePreservesAnnotationsAndUndo();
     void moveSelectionAndClampToScreen();
+    void selectionTransformsHideOldFrame_data();
+    void selectionTransformsHideOldFrame();
     void pastePreservesOriginalPixels_data();
     void pastePreservesOriginalPixels();
     void pasteDefaultsOpaque();
@@ -1291,13 +1295,70 @@ void UiRegressionTest::moveSelectionAndClampToScreen()
     QPointer<ui::SnipOverlay> overlay = new ui::SnipOverlay(QGuiApplication::primaryScreen(),
         false, false, QRect(150, 140, 300, 220));
     overlay->show();
+    QImage background(overlay->size(), QImage::Format_RGB32);
+    background.fill(QColor(110, 150, 180));
+    overlay->setBackgroundProvider([background] { return background; });
+    QTest::keyClick(overlay, Qt::Key_F5);
+    QTRY_VERIFY(overlay->isVisible());
+    const QRect oldFrameStrip(149, 170, 3, 60);
+    const QImage maskedBackground = overlay->grab(QRect(100, 170, 3, 60)).toImage();
     QTest::mousePress(overlay, Qt::LeftButton, Qt::NoModifier, QPoint(240, 220));
     QTest::mouseMove(overlay, QPoint(340, 280));
+    // The previous frame must disappear during the drag and after release.
+    QCOMPARE(overlay->grab(oldFrameStrip).toImage(), maskedBackground);
     QTest::mouseRelease(overlay, Qt::LeftButton, Qt::NoModifier, QPoint(340, 280));
+    QCOMPARE(overlay->grab(oldFrameStrip).toImage(), maskedBackground);
     QCOMPARE(overlay->findChild<ui::AnnotationCanvas *>()->geometry(), QRect(250, 200, 300, 220));
     QTest::mousePress(overlay, Qt::LeftButton, Qt::NoModifier, QPoint(340, 280));
     QTest::mouseRelease(overlay, Qt::LeftButton, Qt::NoModifier, QPoint(-500, -500));
     QCOMPARE(overlay->findChild<ui::AnnotationCanvas *>()->geometry(), QRect(0, 0, 300, 220));
+    overlay->close();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+}
+
+void UiRegressionTest::selectionTransformsHideOldFrame_data()
+{
+    QTest::addColumn<QPoint>("handle");
+    QTest::addColumn<QPoint>("delta");
+    QTest::addColumn<QRect>("oldFrameStrip");
+    QTest::newRow("move-right") << QPoint(240, 220) << QPoint(100, 0) << QRect(149, 170, 3, 60);
+    QTest::newRow("move-down") << QPoint(240, 220) << QPoint(0, 160) << QRect(180, 139, 60, 3);
+    QTest::newRow("resize-left") << QPoint(150, 230) << QPoint(100, 0) << QRect(149, 170, 3, 60);
+    QTest::newRow("resize-right") << QPoint(449, 230) << QPoint(-100, 0) << QRect(447, 170, 3, 60);
+    QTest::newRow("resize-top") << QPoint(300, 140) << QPoint(0, 100) << QRect(180, 139, 60, 3);
+    QTest::newRow("resize-bottom") << QPoint(300, 359) << QPoint(0, -100) << QRect(180, 357, 60, 3);
+}
+
+void UiRegressionTest::selectionTransformsHideOldFrame()
+{
+    QFETCH(QPoint, handle);
+    QFETCH(QPoint, delta);
+    QFETCH(QRect, oldFrameStrip);
+    QPointer<ui::SnipOverlay> overlay = new ui::SnipOverlay(QGuiApplication::primaryScreen(),
+        false, false, QRect(150, 140, 300, 220));
+    overlay->setExitOnFocusLoss(false);
+    QImage background(overlay->size(), QImage::Format_RGB32);
+    background.fill(QColor(110, 150, 180));
+    overlay->setBackgroundProvider([background] { return background; });
+    overlay->show();
+    QTest::keyClick(overlay, Qt::Key_F5);
+    QTRY_VERIFY(overlay->isVisible());
+    const auto snapshot = [&] {
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::UpdateRequest);
+        const auto *buffer = dynamic_cast<const QImage *>(overlay->backingStore()->paintDevice());
+        return buffer ? buffer->copy() : QImage();
+    };
+    QTRY_VERIFY(!snapshot().isNull());
+    const qreal dpr = overlay->devicePixelRatioF();
+    const QRect pixels(qRound(oldFrameStrip.x() * dpr), qRound(oldFrameStrip.y() * dpr),
+                       qRound(oldFrameStrip.width() * dpr), qRound(oldFrameStrip.height() * dpr));
+    QImage expected = snapshot().copy(pixels);
+    expected.fill(snapshot().pixelColor(qRound(40 * dpr), qRound(100 * dpr)));
+    QTest::mousePress(overlay, Qt::LeftButton, Qt::NoModifier, handle);
+    QTest::mouseMove(overlay, handle + delta);
+    QTRY_COMPARE(snapshot().copy(pixels), expected);
+    QTest::mouseRelease(overlay, Qt::LeftButton, Qt::NoModifier, handle + delta);
+    QTRY_COMPARE(snapshot().copy(pixels), expected);
     overlay->close();
     QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
 }
@@ -1311,7 +1372,8 @@ void UiRegressionTest::preparedOverlayReusesControlsAndReleasesPixels()
     QVERIFY(toolbar && preparedCanvas && editor);
     QVERIFY(!overlay->isVisible());
     QVERIFY(preparedCanvas->fullRenderedImage().isNull());
-    const auto controlCount = overlay->findChildren<QWidget *>().size();
+    auto controlCount = overlay->findChildren<QWidget *>().size();
+    QVERIFY(!overlay->findChild<QToolButton *>(QStringLiteral("annotationTextBold")));
     QSignalSpy closed(overlay.get(), &ui::SnipOverlay::sessionClosed);
     for (int session = 0; session < 3; ++session) {
         overlay->beginCapture(QGuiApplication::primaryScreen());
@@ -1334,6 +1396,8 @@ void UiRegressionTest::preparedOverlayReusesControlsAndReleasesPixels()
         preparedCanvas->setTool(ui::AnnotationCanvas::Tool::Text);
         QTest::mouseClick(preparedCanvas, Qt::LeftButton, Qt::NoModifier, QPoint(70, 70));
         editor->setPlainText(QStringLiteral("pending text from old capture"));
+        if (session == 0)
+            controlCount = overlay->findChildren<QWidget *>().size();
         overlay->close();
         QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
         QCOMPARE(closed.count(), session + 1);
@@ -1788,7 +1852,8 @@ void UiRegressionTest::historyRestoresPairedGeometryAndBackground()
         auto *canvas = overlay->findChild<ui::AnnotationCanvas *>();
         QVERIFY(canvas);
         QCOMPARE(canvas->geometry(), expected);
-        QCOMPARE(canvas->renderedImage(), history.imageAt(index));
+        const QImage saved = history.imageAt(index);
+        QCOMPARE(canvas->renderedImage().convertToFormat(saved.format()), saved);
         QCOMPARE(overlay->captureGeometry().region, expected);
         QTest::keyClick(overlay, Qt::Key_Return);
         QCOMPARE(captured.count(), index + 1);
@@ -1796,7 +1861,58 @@ void UiRegressionTest::historyRestoresPairedGeometryAndBackground()
         QCOMPARE(restoredBackground.size(), sourceDesktop * 2);
         QCOMPARE(restoredBackground.pixelColor(0, 0), colors.at(2 - index));
         QCOMPARE(restoredBackground.pixelColor(region.x() * 2, region.y() * 2), colors.at(2 - index));
-        QCOMPARE(captured.last().at(0).value<QImage>(), history.imageAt(index));
+        QCOMPARE(captured.last().at(0).value<QImage>().convertToFormat(saved.format()), saved);
+    }
+    overlay->close();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+}
+
+void UiRegressionTest::historySelectionKeepsDesktopPixels_data()
+{
+    QTest::addColumn<qreal>("sourceScale");
+    for (qreal scale : {1.0, 1.25, 1.5, 2.0})
+        QTest::newRow(qPrintable(QString::number(scale))) << scale;
+}
+
+void UiRegressionTest::historySelectionKeepsDesktopPixels()
+{
+    QFETCH(qreal, sourceScale);
+    const QSize desktop(640, 480);
+    QImage background(QSize(qRound(desktop.width() * sourceScale), qRound(desktop.height() * sourceScale)),
+                      QImage::Format_RGB32);
+    for (int y = 0; y < background.height(); ++y)
+        for (int x = 0; x < background.width(); ++x)
+            background.setPixel(x, y, qRgb(x % 256, y % 256, (x * 37 + y * 19) % 256));
+    const QList<QRect> regions{QRect(81, 79, 173, 117), QRect(53, 55, 283, 179)};
+    core::ScreenshotHistory history;
+    for (const QRect &region : regions) {
+        const QRect pixels = platform::screenCapturePixelRect(QRect(QPoint(), desktop), background.size(), region);
+        history.add(background.copy(pixels), background, {region, desktop});
+    }
+    QTemporaryDir directory;
+    QVERIFY(history.saveToDirectory(directory.path()));
+    history.loadFromDirectory(directory.path());
+    QPointer<ui::SnipOverlay> overlay = overlayForTest();
+    overlay->resize(desktop);
+    overlay->setCaptureHistory(history.images(), history.geometries(), history.backgrounds(),
+        [&history](int index) { return history.backgroundAt(index); },
+        [&history](int index) { return history.imageAt(index); });
+    const QRect sample(110, 110, 60, 35);
+    for (int index = 0; index < history.size(); ++index) {
+        QTest::keyClick(overlay, Qt::Key_Comma);
+        auto *canvas = overlay->findChild<ui::AnnotationCanvas *>(QStringLiteral("selectionCanvas"));
+        QVERIFY(canvas);
+        const QImage saved = history.imageAt(index);
+        QCOMPARE(canvas->renderedImage().convertToFormat(saved.format()), saved);
+        const QImage inside = overlay->grab(sample).toImage();
+        canvas->hide();
+        QCOMPARE(inside, overlay->grab(sample).toImage());
+        canvas->show();
+        // Expanding a historical crop must reveal the desktop, without
+        // stretching the old crop across the new selection.
+        QTest::keyClick(overlay, Qt::Key_A, platform::primaryModifier());
+        QCOMPARE(canvas->geometry(), overlay->rect());
+        QCOMPARE(canvas->renderedImage().convertToFormat(background.format()), background);
     }
     overlay->close();
     QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
@@ -3008,7 +3124,12 @@ void UiRegressionTest::pasteOutlineSurvivesFlashAndZoom()
                 const int y = side == 2 ? inset : side == 3 ? buffer->height() - 1 - inset
                                                                            : buffer->height() / 2;
                 const QColor color = buffer->pixelColor(x, y);
-                visible |= color.red() > 220 && color.green() > 160 && color.blue() < 100;
+                // Neutral, selected and multicolor flash outlines all differ
+                // from the unchanged image, including the dim flash phase.
+                const QColor background = source.pixelColor(0, 0);
+                visible |= qAbs(color.red() - background.red()) > 10 ||
+                    qAbs(color.green() - background.green()) > 10 ||
+                    qAbs(color.blue() - background.blue()) > 10;
             }
             if (!visible)
                 return false;
@@ -3017,18 +3138,18 @@ void UiRegressionTest::pasteOutlineSurvivesFlashAndZoom()
     };
     QTest::qWait(20);
     saveFrame(QStringLiteral("initial"));
-    QVERIFY(outlineVisible());
+    QCOMPARE(outlineVisible(), shadow);
     QTRY_VERIFY_WITH_TIMEOUT(!pin->isFlashing(), 1500);
     QTest::qWait(20);
     saveFrame(QStringLiteral("idle"));
-    QVERIFY2(outlineVisible(), "The permanent outline disappeared after the initial flash ended.");
+    QCOMPARE(outlineVisible(), shadow);
     for (int step = 0; step < 26; ++step) {
         const QPointF point(pin->rect().center());
         QWheelEvent wheel(point, pin->mapToGlobal(point.toPoint()), {}, QPoint(0, -120),
                           Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
         QApplication::sendEvent(pin, &wheel);
         QTest::qWait(10);
-        QVERIFY2(outlineVisible(), "Wheel zoom must retain a visible outline on all four edges.");
+        QCOMPARE(outlineVisible(), shadow);
     }
     QCOMPARE(pin->scale(), qreal(0.1));
     saveFrame(QStringLiteral("small"));

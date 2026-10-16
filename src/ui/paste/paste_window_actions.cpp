@@ -3,7 +3,9 @@
 #include "ui/paste/paste_window.h"
 
 #include "platform/keyboard.h"
+#include "core/recognition/ocr_service.h"
 #include "ui/annotation/annotation_canvas.h"
+#include "ui/annotation/annotation_toolbar_icons.h"
 
 #include <QActionGroup>
 #include <QApplication>
@@ -14,17 +16,22 @@
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
+#include <QFrame>
+#include <QFutureWatcher>
 #include <QFormLayout>
-#include <QGraphicsDropShadowEffect>
 #include <QHBoxLayout>
 #include <QInputDialog>
+#include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QSpinBox>
+#include <QToolButton>
+#include <QVBoxLayout>
 #include <QWidgetAction>
+#include <QtConcurrentRun>
 
 namespace snipaste::ui
 {
@@ -67,31 +74,40 @@ void PasteWindow::cropImage()
     const QRect crop(QPoint(left->value(), top->value()), QSize(width->value(), height->value()));
     if (crop.isEmpty() || crop == bounds)
         return;
-    m_sourceImage = m_sourceImage.copy(crop);
+    setSourceImage(m_sourceImage.copy(crop));
     m_thumbnailMode = false;
     m_scale = 1.0;
     rebuildImage();
 }
 void PasteWindow::applySelectionThumbnail(const QRect &selection)
 {
+    if (m_canvas)
+        m_canvas->finishTextInput();
+    rebuildImage();
     if (m_image.isNull())
         return;
     const QRect clipped = selection.intersected(rect());
     if (clipped.width() < 2 || clipped.height() < 2)
         return;
 
-    const qreal ratio = m_disableDpiScaling ? 1.0 : devicePixelRatioF();
-    const QRect imageRect(qRound(clipped.left() * ratio), qRound(clipped.top() * ratio),
-                          qRound(clipped.width() * ratio), qRound(clipped.height() * ratio));
+    const QPoint position = mapToGlobal(clipped.topLeft());
+    const qreal scale = m_scale;
+    const qreal ratioX = qreal(m_image.width()) / width();
+    const qreal ratioY = qreal(m_image.height()) / height();
+    const int left = qRound(clipped.x() * ratioX);
+    const int top = qRound(clipped.y() * ratioY);
+    const QRect imageRect(left, top, qRound((clipped.x() + clipped.width()) * ratioX) - left,
+                          qRound((clipped.y() + clipped.height()) * ratioY) - top);
     const QImage cropped = m_image.copy(imageRect.intersected(m_image.rect()));
     if (cropped.isNull())
         return;
 
     setSourceImage(cropped);
     m_thumbnailMode = true;
-    m_scaleBeforeThumbnail = 1.0;
-    m_scale = 1.0;
+    m_scaleBeforeThumbnail = scale;
+    m_scale = scale;
     rebuildImage();
+    move(position);
 }
 void PasteWindow::editSize()
 {
@@ -167,11 +183,102 @@ void PasteWindow::editColorCard()
         return;
     QImage replacement(m_sourceImage.size(), QImage::Format_ARGB32_Premultiplied);
     replacement.fill(selected);
-    m_sourceImage = std::move(replacement);
+    setSourceImage(replacement);
     rebuildImage();
 }
+void PasteWindow::populateOutputMenu(QMenu *menu)
+{
+    auto *widgetAction = new QWidgetAction(menu);
+    auto *panel = new QFrame(menu);
+    panel->setObjectName(QStringLiteral("outputOptionsPanel"));
+    panel->setStyleSheet(QStringLiteral(
+        "QFrame#outputOptionsPanel { background: #ffffff; border-radius: 6px; }"
+        "QLabel { color: #111111; font-size: 13px; font-weight: normal; }"
+        "QCheckBox { color: #111111; font-size: 13px; spacing: 5px; }"
+        "QSpinBox { border: 1px solid #c4c9cf; border-radius: 2px; padding: 2px 4px; background: white; font-size: 12px; }"));
+    auto *layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(12, 10, 12, 10);
+    layout->setSpacing(8);
+    layout->addWidget(new QLabel(QStringLiteral("输出选项:"), panel));
+    const auto addRow = [this, panel, layout](const QString &label, bool checked, int value,
+        int maximum, const QColor &color, const std::function<void(bool)> &setChecked,
+        const std::function<void(int)> &setValue, const std::function<void(const QColor &)> &setColor) {
+        auto *row = new QHBoxLayout;
+        row->setSpacing(8);
+        auto *check = new QCheckBox(label, panel);
+        check->setChecked(checked);
+        auto *spin = new QSpinBox(panel);
+        spin->setRange(0, maximum);
+        spin->setValue(value);
+        spin->setFixedWidth(52);
+        auto *button = new QToolButton(panel);
+        button->setFixedSize(22, 22);
+        button->setIcon(annotation::makeColorSwatchIcon(color));
+        row->addWidget(check);
+        row->addWidget(spin);
+        row->addWidget(button);
+        layout->addLayout(row);
+        connect(check, &QCheckBox::toggled, panel, setChecked);
+        connect(spin, qOverload<int>(&QSpinBox::valueChanged), panel, setValue);
+        connect(button, &QToolButton::clicked, panel, [this, button, color, setColor] {
+            const QColor selected = QColorDialog::getColor(color, this, QStringLiteral("选择颜色"),
+                                                           QColorDialog::ShowAlphaChannel);
+            if (selected.isValid())
+            {
+                button->setIcon(annotation::makeColorSwatchIcon(selected));
+                setColor(selected);
+            }
+        });
+    };
+    addRow(QStringLiteral("阴影:"), m_shadowEnabled, m_shadowSize, 100, m_shadowColor,
+        [this](bool enabled) { setShadowEnabled(enabled); },
+        [this](int size) { m_shadowSize = size; updateShadow(); },
+        [this](const QColor &color) { m_shadowColor = color; updateShadow(); });
+    addRow(QStringLiteral("边框:"), m_borderEnabled, m_borderWidth, 50, m_borderColor,
+        [this](bool enabled) { m_borderEnabled = enabled; updateBorder(); },
+        [this](int width) { m_borderWidth = width; updateBorder(); },
+        [this](const QColor &color) { m_borderColor = color; updateBorder(); });
+    widgetAction->setDefaultWidget(panel);
+    menu->addAction(widgetAction);
+}
+
+void PasteWindow::extractText()
+{
+    if (m_canvas)
+        m_canvas->finishTextInput();
+    rebuildImage();
+    if (!m_sourceText.isEmpty())
+        QApplication::clipboard()->setText(m_sourceText);
+    else if (!findChild<QFutureWatcherBase *>(QStringLiteral("pasteOcrWatcher")))
+    {
+        auto *watcher = new QFutureWatcher<core::OcrResult>(this);
+        watcher->setObjectName(QStringLiteral("pasteOcrWatcher"));
+        connect(watcher, &QFutureWatcher<core::OcrResult>::finished, this, [this, watcher] {
+            const auto result = watcher->result();
+            watcher->deleteLater();
+            if (result.success && !result.text.trimmed().isEmpty())
+                QApplication::clipboard()->setText(result.text);
+            else
+                QMessageBox::information(this, QStringLiteral("提取文字"),
+                    result.error.isEmpty() ? QStringLiteral("没有识别到文字。") : result.error);
+        });
+        const QImage image = m_image;
+        watcher->setFuture(QtConcurrent::run([image] { return core::OcrService::recognize(image); }));
+    }
+}
+
 void PasteWindow::contextMenuEvent(QContextMenuEvent *event)
 {
+    if (event->reason() == QContextMenuEvent::Mouse &&
+        (m_suppressContextMenu || m_selectionThumbnailDragging))
+    {
+        m_suppressContextMenu = false;
+        event->accept();
+        return;
+    }
+    if (m_canvas)
+        m_canvas->finishTextInput();
+    rebuildImage();
     if (mouseModifierMatches(mouseAction(16, QStringLiteral("Shift")), event->modifiers()) &&
         mouseButtonMatches(mouseAction(17, QStringLiteral("\u53f3\u952e\u5355\u51fb")), Qt::RightButton,
                            false) &&
@@ -184,79 +291,12 @@ void PasteWindow::contextMenuEvent(QContextMenuEvent *event)
 
     QMenu menu;
     QAction *copyAction = menu.addAction(QStringLiteral("\u590d\u5236\u56fe\u50cf"));
+    copyAction->setShortcut(QKeySequence::Copy);
     QAction *saveAction = menu.addAction(QStringLiteral("\u56fe\u50cf\u53e6\u5b58\u4e3a\u2026"));
+    saveAction->setShortcut(QKeySequence::Save);
 
     QMenu *outputMenu = menu.addMenu(QStringLiteral("\u8f93\u51fa\u9009\u9879"));
-    const auto colorButtonStyle = [](QPushButton *button, const QColor &color) {
-        button->setStyleSheet(QStringLiteral("QPushButton { background-color: %1; border: 1px solid #777; }")
-                                  .arg(color.name(QColor::HexArgb)));
-    };
-    const auto addOutputRow =
-        [this, outputMenu, colorButtonStyle](const QString &label, bool checked, int value,
-                                             const QColor &color, const std::function<void(bool)> &setChecked,
-                                             const std::function<void(int)> &setValue,
-                                             const std::function<void(const QColor &)> &setColor) {
-            auto *row = new QWidget(outputMenu);
-            auto *layout = new QHBoxLayout(row);
-            layout->setContentsMargins(8, 2, 8, 2);
-            layout->setSpacing(5);
-            auto *check = new QCheckBox(label, row);
-            check->setChecked(checked);
-            auto *spin = new QSpinBox(row);
-            spin->setRange(0, 128);
-            spin->setValue(value);
-            spin->setFixedWidth(52);
-            auto *button = new QPushButton(row);
-            button->setFixedSize(28, 22);
-            colorButtonStyle(button, color);
-            layout->addWidget(check);
-            layout->addStretch(1);
-            layout->addWidget(spin);
-            layout->addWidget(button);
-            auto *action = new QWidgetAction(outputMenu);
-            action->setText(label);
-            action->setDefaultWidget(row);
-            outputMenu->addAction(action);
-            QObject::connect(check, &QCheckBox::toggled, outputMenu, setChecked);
-            QObject::connect(spin, qOverload<int>(&QSpinBox::valueChanged), outputMenu, setValue);
-            QObject::connect(
-                button, &QPushButton::clicked, outputMenu, [this, button, colorButtonStyle, setColor] {
-                    const QColor selected =
-                        QColorDialog::getColor(Qt::black, this, QStringLiteral("\u9009\u62e9\u989c\u8272"),
-                                               QColorDialog::ShowAlphaChannel);
-                    if (!selected.isValid())
-                        return;
-                    colorButtonStyle(button, selected);
-                    setColor(selected);
-                });
-        };
-    addOutputRow(
-        QStringLiteral("\u9634\u5f71"), m_shadowEnabled, m_shadowSize, m_shadowColor,
-        [this](bool enabled) { setShadowEnabled(enabled); },
-        [this](int size) {
-            m_shadowSize = size;
-            if (auto *shadow = qobject_cast<QGraphicsDropShadowEffect *>(graphicsEffect()))
-                shadow->setBlurRadius(size);
-        },
-        [this](const QColor &color) {
-            m_shadowColor = color;
-            if (auto *shadow = qobject_cast<QGraphicsDropShadowEffect *>(graphicsEffect()))
-                shadow->setColor(color);
-        });
-    addOutputRow(
-        QStringLiteral("\u8fb9\u6846"), m_borderEnabled, m_borderWidth, m_borderColor,
-        [this](bool enabled) {
-            m_borderEnabled = enabled;
-            update();
-        },
-        [this](int width) {
-            m_borderWidth = qMax(0, width);
-            update();
-        },
-        [this](const QColor &color) {
-            m_borderColor = color;
-            update();
-        });
+    populateOutputMenu(outputMenu);
 
     QAction *extractTextAction = menu.addAction(QStringLiteral("\u63d0\u53d6\u6587\u5b57\u5e76\u590d\u5236"));
     QAction *helpKeysAction = nullptr;
@@ -269,6 +309,7 @@ void PasteWindow::contextMenuEvent(QContextMenuEvent *event)
     QAction *toolbarAction = menu.addAction(QStringLiteral("\u663e\u793a\u5de5\u5177\u6761"));
     toolbarAction->setCheckable(true);
     toolbarAction->setChecked(m_showToolbar);
+    toolbarAction->setShortcut(QKeySequence(Qt::Key_Space));
     QAction *annotationsAction = menu.addAction(QStringLiteral("\u663e\u793a\u6807\u6ce8"));
     annotationsAction->setCheckable(true);
     annotationsAction->setChecked(m_showAnnotations);
@@ -332,17 +373,24 @@ void PasteWindow::contextMenuEvent(QContextMenuEvent *event)
     QMenu *processingMenu = menu.addMenu(QStringLiteral("\u56fe\u50cf\u5904\u7406"));
     QAction *rotateLeftAction = processingMenu->addAction(QStringLiteral("\u5411\u5de6\u65cb\u8f6c"));
     QAction *rotateRightAction = processingMenu->addAction(QStringLiteral("\u5411\u53f3\u65cb\u8f6c"));
+    rotateRightAction->setShortcut(QKeySequence(Qt::Key_1));
+    rotateLeftAction->setShortcut(QKeySequence(Qt::Key_2));
     QAction *flipHorizontalAction = processingMenu->addAction(QStringLiteral("\u6c34\u5e73\u7ffb\u8f6c"));
     QAction *flipVerticalAction = processingMenu->addAction(QStringLiteral("\u5782\u76f4\u7ffb\u8f6c"));
+    flipHorizontalAction->setShortcut(QKeySequence(Qt::Key_3));
+    flipVerticalAction->setShortcut(QKeySequence(Qt::Key_4));
     QAction *grayscaleAction = processingMenu->addAction(QStringLiteral("\u7070\u5ea6\u663e\u793a"));
     grayscaleAction->setCheckable(true);
     grayscaleAction->setChecked(m_grayscale);
+    grayscaleAction->setShortcut(QKeySequence(Qt::Key_5));
     QAction *invertedAction = processingMenu->addAction(QStringLiteral("\u53cd\u8272\u663e\u793a"));
     invertedAction->setCheckable(true);
     invertedAction->setChecked(m_inverted);
+    invertedAction->setShortcut(QKeySequence(Qt::Key_6));
 
     menu.addSeparator();
     QAction *pasteAction = menu.addAction(QStringLiteral("\u7c98\u8d34"));
+    pasteAction->setShortcut(QKeySequence::Paste);
     QAction *replaceFileAction = menu.addAction(QStringLiteral("\u66ff\u6362\u4e3a\u6587\u4ef6\u2026"));
     QMenu *groupMenu = menu.addMenu(QStringLiteral("\u79fb\u52a8\u5230\u5206\u7ec4"));
     if (m_pasteManager)
@@ -366,7 +414,9 @@ void PasteWindow::contextMenuEvent(QContextMenuEvent *event)
     viewFolderAction->setEnabled(false);
     menu.addSeparator();
     QAction *closeAction = menu.addAction(QStringLiteral("\u5173\u95ed"));
+    closeAction->setShortcut(QKeySequence(snipaste::platform::primaryModifier() | Qt::Key_W));
     QAction *destroyAction = menu.addAction(QStringLiteral("\u9500\u6bc1"));
+    destroyAction->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_Escape));
     QMenu *infoMenu = menu.addMenu(QStringLiteral("%1 \u00d7 %2").arg(width()).arg(height()));
     if (m_pasteManager)
     {
@@ -420,23 +470,22 @@ void PasteWindow::contextMenuEvent(QContextMenuEvent *event)
     }
     else if (selected == extractTextAction)
     {
-        if (!m_sourceText.isEmpty())
-            QApplication::clipboard()->setText(m_sourceText);
+        extractText();
     }
-    else if (selected == helpKeysAction)
+    else if (selected && selected == helpKeysAction)
     {
         QMessageBox::information(this, QStringLiteral("贴图快捷键"),
-                                 QStringLiteral("Ctrl/Command+C 复制，Ctrl/Command+Alt+S 复制为文件，"
-                                                "滚轮缩放，Esc 执行关闭操作。"));
+                                 QStringLiteral("Space 显示/隐藏工具条，Enter 完成编辑，Esc 收起工具条或关闭贴图。\n"
+                                                "Ctrl/Command+1…9 选择标注工具，B 画笔，T 文字，N 序号，E 橡皮擦。\n"
+                                                "Ctrl/Command+C 复制，Ctrl/Command+S 保存，Ctrl/Command+Z 撤销。"));
     }
     else if (selected == toolbarAction)
     {
-        m_showToolbar = toolbarAction->isChecked();
+        setToolbarVisible(toolbarAction->isChecked());
     }
     else if (selected == annotationsAction)
     {
-        m_showAnnotations = annotationsAction->isChecked();
-        update();
+        setAnnotationsVisible(annotationsAction->isChecked());
     }
     else if (selected == shadowAction)
     {

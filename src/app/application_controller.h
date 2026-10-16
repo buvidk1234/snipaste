@@ -31,6 +31,9 @@ class ApplicationController final : public QObject
     void start(const QStringList &arguments);
     bool dispatchArguments(const QStringList &arguments, bool quitAfterFlow = true);
 
+  protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
+
   private:
     void dispatchCaptureArguments(const QCommandLineParser &parser, const QString &command);
     void dispatchPasteArguments(const QCommandLineParser &parser, const QStringList &positionalArguments);

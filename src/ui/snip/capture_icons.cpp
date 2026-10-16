@@ -3,11 +3,17 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
+#include <QHash>
 
 namespace snipaste::ui {
 
 QIcon captureIcon(CaptureIcon kind, bool light)
 {
+    static QHash<int, QIcon> cache;
+    const int key = int(kind) * 2 + int(light);
+    const auto cached = cache.constFind(key);
+    if (cached != cache.cend())
+        return cached.value();
     QIcon icon;
     for (int size : {16, 20, 24, 32, 40, 48}) {
       for (const auto mode : {QIcon::Normal, QIcon::Disabled}) {
@@ -172,6 +178,10 @@ QIcon captureIcon(CaptureIcon kind, bool light)
             p.drawPolygon(QPolygonF{QPointF(-4, -7), QPointF(4, -7), QPointF(3, -5),
                 QPointF(3, 1), QPointF(6, 4), QPointF(-6, 4), QPointF(-3, 1), QPointF(-3, -5)});
             p.drawLine(QPointF(0, 4), QPointF(0, 10));
+            break;
+        case CaptureIcon::FinishEditing:
+            p.setPen(QPen(ink, 1.8, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            p.drawPolyline(QPolygonF{QPointF(3, 10), QPointF(8, 15), QPointF(17, 4)});
             break;
         case CaptureIcon::Finish:
             p.drawPolyline(QPolygonF{QPointF(7, 3), QPointF(16, 3), QPointF(16, 15)});
@@ -339,6 +349,7 @@ QIcon captureIcon(CaptureIcon kind, bool light)
        }
       }
     }
+    cache.insert(key, icon);
     return icon;
 }
 

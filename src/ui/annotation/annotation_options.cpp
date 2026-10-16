@@ -347,21 +347,49 @@ void AnnotationOptions::updateAllColorWatchers(const QColor &color)
         }
     }
 }
-AnnotationOptions::AnnotationOptions(QWidget *parent, std::function<void()> refreshCursor)
-    : QFrame(parent), m_refreshCursor(std::move(refreshCursor))
+AnnotationOptions::AnnotationOptions(QWidget *parent, std::function<void()> refreshCursor,
+                                     QObject *controlEventFilter)
+    : QFrame(parent), m_refreshCursor(std::move(refreshCursor)), m_controlEventFilter(controlEventFilter)
 {
     setObjectName(QStringLiteral("captureOptions"));
     m_toolOptionsStack = new annotation::SubtoolbarStackedLayout(this);
 
-    m_toolOptionsStack->addWidget(createShapesPage());
-    m_toolOptionsStack->addWidget(createLinesPage());
-    m_toolOptionsStack->addWidget(createPenPage());
-    m_toolOptionsStack->addWidget(createMarkerPage());
-    m_toolOptionsStack->addWidget(createMosaicPage());
-    m_toolOptionsStack->addWidget(createTextPage());
-    m_toolOptionsStack->addWidget(createNumberPage());
-    m_toolOptionsStack->addWidget(createMagnifierPage());
-    m_toolOptionsStack->addWidget(createEraserPage());
+    // Preserve tool indices without constructing hundreds of unused controls
+    // in every prepared or restored pin's toolbar.
+    for (size_t index = 0; index < m_createdPages.size(); ++index)
+        m_toolOptionsStack->addWidget(new QWidget(this));
+}
+void AnnotationOptions::showPage(int index)
+{
+    if (index < 0 || index >= int(m_createdPages.size()))
+        return;
+    if (!m_createdPages[index])
+    {
+        using PageFactory = QWidget *(AnnotationOptions::*)();
+        static constexpr PageFactory factories[] = {
+            &AnnotationOptions::createShapesPage, &AnnotationOptions::createLinesPage,
+            &AnnotationOptions::createPenPage, &AnnotationOptions::createMarkerPage,
+            &AnnotationOptions::createMosaicPage, &AnnotationOptions::createTextPage,
+            &AnnotationOptions::createNumberPage, &AnnotationOptions::createMagnifierPage,
+            &AnnotationOptions::createEraserPage};
+        const QSignalBlocker blocker(m_toolOptionsStack);
+        const int current = m_toolOptionsStack->currentIndex();
+        QWidget *placeholder = m_toolOptionsStack->widget(index);
+        QWidget *page = (this->*factories[index])();
+        m_createdPages[index] = true;
+        m_toolOptionsStack->removeWidget(placeholder);
+        delete placeholder;
+        m_toolOptionsStack->insertWidget(index, page);
+        m_toolOptionsStack->setCurrentIndex(current);
+        if (m_controlEventFilter)
+        {
+            page->installEventFilter(m_controlEventFilter);
+            for (auto *widget : page->findChildren<QWidget *>())
+                if (!widget->isWindow())
+                    widget->installEventFilter(m_controlEventFilter);
+        }
+    }
+    m_toolOptionsStack->setCurrentIndex(index);
 }
 void AnnotationOptions::setCanvas(AnnotationCanvas *canvas)
 {
@@ -377,7 +405,9 @@ void AnnotationOptions::setCanvas(AnnotationCanvas *canvas)
     connect(m_canvas, &AnnotationCanvas::annotationStyleChanged, this, &AnnotationOptions::syncStyleControls);
     connect(m_canvas, &AnnotationCanvas::penStyleChanged, this, &AnnotationOptions::syncStyleControls);
     connect(m_canvas, &AnnotationCanvas::arrowStyleChanged, this, &AnnotationOptions::syncStyleControls);
-    syncStyleControls();
+    m_currentAnnotationColor = m_canvas->penColor();
+    if (isVisible() && m_createdPages[m_toolOptionsStack->currentIndex()])
+        syncStyleControls();
 }
 void AnnotationOptions::closePopups()
 {

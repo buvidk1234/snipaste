@@ -109,7 +109,7 @@ void AnnotationOptions::syncTextControls()
     if (!m_canvas || m_canvas->tool() != AnnotationCanvas::Tool::Text)
         return;
     const auto style = m_canvas->annotationStyle();
-    m_toolOptionsStack->setCurrentIndex(5);
+    showPage(5);
     const auto check = [this](const QString &name, bool enabled) {
         if (auto *button = findChild<QToolButton *>(name))
         {

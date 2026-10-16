@@ -6,6 +6,7 @@
 
 #include <QApplication>
 #include <QClipboard>
+#include <QFrame>
 
 namespace snipaste::ui
 {
@@ -80,10 +81,55 @@ quint64 imageFingerprint(const QImage &image)
 PasteManager::PasteManager(QObject *parent) : QObject(parent)
 {
     m_groups.append(Group{QStringLiteral("默认组"), {}});
+    m_prepareEditorTimer.setSingleShot(true);
+    connect(&m_prepareEditorTimer, &QTimer::timeout, this, &PasteManager::prepareEditorCache);
+    m_prepareEditorTimer.start(0);
+}
+
+void PasteManager::prepareEditorCache()
+{
+    const auto prepare = [](PasteWindow *window) {
+        window->createEditor();
+        window->m_toolbar->ensurePolished();
+        window->m_toolbar->setFixedSize(window->m_toolbar->sizeHint());
+        window->m_toolbar->winId();
+    };
+    // Also warm restored pins, one per idle turn, before the first edit.
+    for (const auto &group : m_groups)
+        for (const auto &window : group.windows)
+            if (window && !window->m_toolbar)
+            {
+                prepare(window.data());
+                m_prepareEditorTimer.start(0);
+                return;
+            }
+    if (m_preparedWindow)
+        return;
+    m_preparedWindow = new PasteWindow({});
+    m_preparedWindow->setObjectName(QStringLiteral("preparedPasteWindow"));
+    prepare(m_preparedWindow.data());
+}
+
+PasteWindow *PasteManager::createWindow(const QImage &image)
+{
+    PasteWindow *window = m_preparedWindow.data();
+    m_preparedWindow = nullptr;
+    if (window)
+    {
+        window->setObjectName(QString());
+        window->setSourceImage(image);
+    }
+    else
+        window = new PasteWindow(image);
+    // Keep one empty editor ready; visible pins retain their own edit state.
+    m_prepareEditorTimer.start(0);
+    return window;
 }
 
 PasteManager::~PasteManager()
 {
+    m_prepareEditorTimer.stop();
+    delete m_preparedWindow.data();
     // Top-level widgets have no QWidget parent; the manager owns their lifetime.
     for (const Group &group : m_groups)
     {
@@ -107,7 +153,7 @@ PasteWindow *PasteManager::createPaste(const QImage &image)
     if (m_groups.isEmpty())
         m_groups.append(Group{QStringLiteral("默认组"), {}});
 
-    auto *window = new PasteWindow(image);
+    auto *window = createWindow(image);
     applyWindowSettings(window);
     m_groups[m_activeGroup].windows.append(window);
     connectWindow(window);
@@ -529,6 +575,7 @@ void PasteManager::setRestoreCount(int count)
 
 void PasteManager::onWindowClosed(PasteWindow *window)
 {
+    window->setSelected(false);
     m_selected.removeAll(window);
     m_closed.removeAll(window);
     m_closed.append(window);
@@ -738,6 +785,9 @@ bool PasteManager::soloMode() const
 
 void PasteManager::clearSelection()
 {
+    for (const auto &window : m_selected)
+        if (window)
+            window->setSelected(false);
     m_selected.clear();
     if (m_soloMode)
     {
@@ -757,7 +807,10 @@ void PasteManager::selectAllVisible()
     {
         for (const QPointer<PasteWindow> &window : group.windows)
         {
-            if (window && window->isVisible() && !window->isSoloHidden())
+            const bool selected = window && window->isVisible() && !window->isSoloHidden();
+            if (window)
+                window->setSelected(selected);
+            if (selected)
                 m_selected.append(window);
         }
     }
@@ -908,7 +961,11 @@ void PasteManager::prune()
     for (qsizetype index = m_selected.size() - 1; index >= 0; --index)
     {
         if (!m_selected.at(index) || m_selected.at(index)->state() != PasteWindow::State::Active)
+        {
+            if (m_selected.at(index))
+                m_selected.at(index)->setSelected(false);
             m_selected.removeAt(index);
+        }
     }
     for (qsizetype index = m_closed.size() - 1; index >= 0; --index)
     {
@@ -947,11 +1004,16 @@ void PasteManager::onWindowActivated(PasteWindow *window, Qt::KeyboardModifiers 
             m_selected.removeAt(index);
         else
             m_selected.append(window);
+        window->setSelected(index < 0);
     }
     else
     {
+        for (const auto &selected : m_selected)
+            if (selected && selected != window)
+                selected->setSelected(false);
         m_selected.clear();
         m_selected.append(window);
+        window->setSelected(true);
     }
 }
 

@@ -13,6 +13,8 @@
 #include <QTextBlock>
 #include <QTextDocument>
 #include <QTextEdit>
+#include <QTextLayout>
+#include <QTimer>
 
 namespace snipaste::ui
 {
@@ -117,6 +119,16 @@ void AnnotationCanvas::updateTextEditorGeometry()
         m_textEditor->setFont(textFont);
     Shape preview = m_textShape;
     preview.text = m_textEditor->toPlainText();
+    // IME preedit is visible in the layout but absent from toPlainText().
+    for (auto block = m_textEditor->document()->begin(); block.isValid(); block = block.next())
+    {
+        const QTextLayout *layout = block.layout();
+        if (layout && !layout->preeditAreaText().isEmpty())
+        {
+            preview.text.insert(block.position() + layout->preeditAreaPosition(), layout->preeditAreaText());
+            break;
+        }
+    }
     // Font hinting can change glyph extents at non-native preview scales.
     // Measure using the font size actually displayed by the editor.
     preview.fontSize = textFont.pixelSize();
@@ -198,6 +210,9 @@ void AnnotationCanvas::finishTextInput(bool commit)
 
 bool AnnotationCanvas::eventFilter(QObject *watched, QEvent *event)
 {
+    if (watched == m_textEditor && m_textEditing && event->type() == QEvent::InputMethod)
+        // Measure after Qt updates the preedit layout, including cancellation.
+        QTimer::singleShot(0, this, &AnnotationCanvas::updateTextEditorGeometry);
     if (m_textEditing && (watched == m_textEditor || watched == m_textEditor->viewport()) &&
         handleTextEditorPointer(watched, event))
         return true;

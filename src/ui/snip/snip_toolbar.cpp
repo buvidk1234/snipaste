@@ -56,7 +56,7 @@ void SnipOverlay::createToolbar()
     row->setSpacing(0);
     stack->addWidget(actions);
 
-    m_annotationOptions = new AnnotationOptions(m_toolbar, [this] { refreshAnnotationCursor(); });
+    m_annotationOptions = new AnnotationOptions(m_toolbar, [this] { refreshAnnotationCursor(); }, this);
     m_toolOptions = m_annotationOptions;
     m_toolOptionsStack = m_annotationOptions->stack();
     stack->addWidget(m_toolOptions, 0, Qt::AlignLeft);
@@ -116,7 +116,7 @@ void SnipOverlay::createToolbar()
                 const auto toolKind = static_cast<AnnotationCanvas::Tool>(
                     b->property("annotationTool").isValid() ? b->property("annotationTool").toInt()
                                                             : int(kind));
-                m_toolOptionsStack->setCurrentIndex(pageIndex);
+                m_annotationOptions->showPage(pageIndex);
                 m_canvas->setTool(toolKind);
                 refreshAnnotationCursor();
                 QTimer::singleShot(0, this, [this] { refreshAnnotationCursor(); });
@@ -222,6 +222,19 @@ void SnipOverlay::createToolbar()
     tool(CaptureIcon::Number, QStringLiteral("序号"), AnnotationCanvas::Tool::Number, 6);
     tool(CaptureIcon::Magnifier, QStringLiteral("放大镜标注"), AnnotationCanvas::Tool::Magnifier, 7);
     tool(CaptureIcon::Eraser, QStringLiteral("橡皮擦"), AnnotationCanvas::Tool::Eraser, 8);
+    for (auto *b : toolGroup->buttons())
+    {
+        const int number = b->property("pageIndex").toInt() + 1;
+        QString letter;
+        if (number == 3) letter = QStringLiteral("B");
+        if (number == 6) letter = QStringLiteral("T");
+        if (number == 7) letter = QStringLiteral("N");
+        if (number == 9) letter = QStringLiteral("E");
+        b->setProperty("toolKey", letter);
+        QString keys = snipaste::platform::primaryShortcutText(QString::number(number));
+        if (!letter.isEmpty()) keys += QStringLiteral(" / ") + letter;
+        b->setToolTip(QStringLiteral("%1 (%2)").arg(b->toolTip(), keys));
+    }
     separator();
     connect(button(CaptureIcon::Ocr, QStringLiteral("文字识别"), QStringLiteral("识别选区文字")),
             &QToolButton::clicked, this, &SnipOverlay::ocrSelection);
@@ -336,9 +349,8 @@ void SnipOverlay::confirmSelection()
     setHoverSelection({}, false);
     if (!m_toolbar)
         createToolbar();
-    // Keep normal captures in full-screen image coordinates.  A history item
-    // can have a pixel size that differs from the current desktop frame, so it
-    // remains a compact canvas until the user changes the selection.
+    // Saved desktops use the same full-frame coordinates as normal captures.
+    // A legacy history item without a desktop keeps its original image size.
     const bool historyOverride = !m_selectionImageOverride.isNull();
     QImage image = historyOverride ? m_selectionImageOverride : m_background;
     m_selectionImageOverride = {};
@@ -348,6 +360,7 @@ void SnipOverlay::confirmSelection()
     m_canvas->setCanvasFrame(historyOverride ? QPoint() : m_selection.topLeft(),
                              historyOverride ? QSizeF(m_selection.size()) : QSizeF(size()),
                              historyOverride ? QRect() : m_selection);
+    m_canvas->setBackgroundVisible(historyOverride);
     // These bindings belong to the current selection. Child/editor bindings
     // stay intact when the prepared canvas is reused.
     disconnect(m_canvas, nullptr, this, nullptr);

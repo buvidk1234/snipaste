@@ -2,6 +2,7 @@
 #include "ui/clipboard_output.h"
 #include "platform/screen_capture.h"
 #include "ui/snip/capture_icons.h"
+#include "ui/snip/capture_support.h"
 #include "ui/annotation/annotation_canvas.h"
 #include "platform/keyboard.h"
 
@@ -48,8 +49,6 @@
 
 namespace snipaste::ui {
 
-namespace {
-
 #ifdef Q_OS_WIN
 bool showNativeShare(QWidget *owner, const QImage &image)
 {
@@ -95,6 +94,8 @@ bool showNativeShare(QWidget *owner, const QImage &image)
     }
 }
 #endif
+
+namespace {
 
 QIcon makeColorSwatchIcon(const QColor &color)
 {
@@ -505,7 +506,8 @@ void SnipOverlay::navigateHistory(int direction)
             if (historicalBackground.isNull() && m_captureHistoryBackgroundLoader)
                 historicalBackground = m_captureHistoryBackgroundLoader(next);
         }
-        if (!historicalBackground.isNull()) {
+        const bool hasHistoricalBackground = !historicalBackground.isNull();
+        if (hasHistoricalBackground) {
             historicalBackground.setDevicePixelRatio(1);
             // Display the original frame even if resolution/DPI has changed.
             // Both the frame and its selection map to the current viewport.
@@ -538,7 +540,17 @@ void SnipOverlay::navigateHistory(int direction)
         }
         m_selection = restored;
         QPainter painter(&m_background);
-        painter.drawImage(imageSelection(), image);
+        // Composite in the original desktop's pixel coordinates. Mapping the
+        // rounded display selection back to pixels can rescale the saved crop.
+        const QRect target = hasHistoricalBackground
+            ? platform::screenCapturePixelRect(QRect(QPoint(), geometry.desktopSize),
+                                               m_background.size(), geometry.region)
+            : imageSelection();
+        painter.drawImage(target, image);
+        // The canvas and the surrounding desktop must share one transform,
+        // including when this historical selection is moved or resized.
+        if (hasHistoricalBackground)
+            m_selectionImageOverride = {};
     }
     if (!m_selection.isEmpty()) confirmSelection();
     else updateHoverTarget();
@@ -549,6 +561,26 @@ bool SnipOverlay::handleProShortcut(QKeyEvent *event)
 {
     const int key = event->key();
     const auto modifiers = event->modifiers();
+    if (m_selectionConfirmed && m_toolbar &&
+        ((modifiers == snipaste::platform::primaryModifier() && key >= Qt::Key_1 && key <= Qt::Key_9) ||
+         (modifiers == Qt::NoModifier && (key == Qt::Key_B || key == Qt::Key_T || key == Qt::Key_N || key == Qt::Key_E))))
+    {
+        for (auto *button : m_toolbar->findChildren<QToolButton *>())
+        {
+            if (!button->property("annotationTool").isValid())
+                continue;
+            if ((modifiers == snipaste::platform::primaryModifier() &&
+                 button->property("pageIndex").toInt() + 1 == key - Qt::Key_0) ||
+                (modifiers == Qt::NoModifier && !button->property("toolKey").toString().isEmpty() &&
+                 button->property("toolKey").toString() == QKeySequence(key).toString()))
+            {
+                m_toolbarHidden = false;
+                if (!button->isChecked()) button->click();
+                updateToolbarGeometry();
+                return true;
+            }
+        }
+    }
     if (key == Qt::Key_F5) { refreshBackground(); return true; }
     if (key == Qt::Key_QuoteLeft || key == Qt::Key_Exclam) { toggleCapturedCursor(); return true; }
     if (key == Qt::Key_Comma || key == Qt::Key_Period) { navigateHistory(key == Qt::Key_Comma ? 1 : -1); return true; }
@@ -628,6 +660,23 @@ bool SnipOverlay::handleProShortcut(QKeyEvent *event)
     return false;
 }
 
+QImage SnipOverlay::pasteSourceImage() const
+{
+    return selectionImage(false);
+}
+
+core::AnnotationDocument SnipOverlay::pasteAnnotations() const
+{
+    if (!m_canvas)
+        return {};
+    m_canvas->finishTextInput();
+    auto document = m_canvas->selectionDocument();
+    const int padding = (m_outputBorder ? m_outputBorderWidth : 0) +
+                        (m_outputShadow ? m_outputShadowBlur / 2 : 0);
+    document.translate(QPointF(padding, padding));
+    return document;
+}
+
 void SnipOverlay::wheelEvent(QWheelEvent *event)
 {
     if (!m_wheelEnabled) {
@@ -649,8 +698,8 @@ void SnipOverlay::showOutputMenu(const QPoint &position, bool shareOnly)
     menu->setAttribute(Qt::WA_DeleteOnClose);
 
     if (shareOnly) {
-        menu->addAction(QStringLiteral("复制图像"), this, [this] { copySelection(); });
-        menu->addAction(QStringLiteral("复制图像文件"), this, [this] {
+        menu->addAction(QStringLiteral("复制图像"), this, [this] { copySelection(); })->setShortcut(QKeySequence::Copy);
+        auto *copyFile = menu->addAction(QStringLiteral("复制图像文件"), this, [this] {
             const QImage image = selectionImage();
             if (image.isNull()) return;
             if (!copyImageToClipboard(image, CopyAsFileMode::Always))
@@ -660,7 +709,9 @@ void SnipOverlay::showOutputMenu(const QPoint &position, bool shareOnly)
             emit screenshotCapturedWithBackground(image, m_cleanBackground);
             close();
         });
-        menu->addAction(QStringLiteral("保存图像…"), this, [this] { saveSelection(); });
+        if (m_copyAsFileMode != static_cast<int>(CopyAsFileMode::Disabled))
+            copyFile->setShortcut(QKeySequence(snipaste::platform::primaryModifier() | Qt::ALT | Qt::Key_S));
+        menu->addAction(QStringLiteral("保存图像…"), this, [this] { saveSelection(); })->setShortcut(QKeySequence::Save);
 #ifdef Q_OS_WIN
         if (QGuiApplication::platformName() != QStringLiteral("offscreen")) {
             menu->addAction(QStringLiteral("系统分享"), this, [this] {
@@ -764,9 +815,17 @@ void SnipOverlay::showOutputMenu(const QPoint &position, bool shareOnly)
     auto *a5 = menu->addAction(QStringLiteral("打印"), this, [this] { printSelection(); });
     auto *a6 = menu->addAction(QStringLiteral("贴到屏幕"), this, [this] { pasteSelection(); });
     auto *a7 = menu->addAction(QStringLiteral("输入截屏尺寸…"), this, &SnipOverlay::showSizeEditor);
-    auto *a8 = menu->addAction(QStringLiteral("刷新截图 (F5)"), this, &SnipOverlay::refreshBackground);
+    auto *a8 = menu->addAction(QStringLiteral("刷新截图"), this, &SnipOverlay::refreshBackground);
     auto *a9 = menu->addAction(QStringLiteral("二维码 / 条形码"), this, &SnipOverlay::barcodeSelection);
     auto *hints = menu->addAction(QStringLiteral("快捷键提示"));
+    a1->setShortcut(QKeySequence::Copy);
+    if (m_copyAsFileMode != static_cast<int>(CopyAsFileMode::Disabled))
+        a2->setShortcut(QKeySequence(snipaste::platform::primaryModifier() | Qt::ALT | Qt::Key_S));
+    a3->setShortcut(QKeySequence::Save);
+    a4->setShortcut(QKeySequence(snipaste::platform::primaryModifier() | Qt::SHIFT | Qt::Key_S));
+    a5->setShortcut(QKeySequence::Print);
+    a6->setShortcut(QKeySequence(snipaste::platform::primaryModifier() | Qt::Key_T));
+    a8->setShortcut(QKeySequence(Qt::Key_F5));
     hints->setCheckable(true); hints->setChecked(m_showShortcutHints);
     connect(hints, &QAction::toggled, this, [this](bool enabled) { m_showShortcutHints = enabled; update(); });
 

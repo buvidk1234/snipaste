@@ -3,6 +3,8 @@
 #include "ui/paste/paste_window.h"
 
 #include "platform/keyboard.h"
+#include "ui/annotation/annotation_canvas.h"
+#include "ui/annotation/annotation_options.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -11,10 +13,13 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QGraphicsView>
+#include <QFrame>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QScreen>
 #include <QStandardPaths>
+#include <QToolButton>
 #include <QWheelEvent>
 
 namespace snipaste::ui
@@ -55,6 +60,8 @@ bool PasteWindow::mouseButtonMatches(const QString &value, Qt::MouseButton butto
 }
 void PasteWindow::mousePressEvent(QMouseEvent *event)
 {
+    if (event->button() == Qt::RightButton)
+        m_suppressContextMenu = false;
     if (mouseModifierMatches(mouseAction(10, QStringLiteral("无")), event->modifiers()) &&
         mouseButtonMatches(mouseAction(11, QStringLiteral("中键单击")), event->button(), false))
     {
@@ -88,6 +95,8 @@ void PasteWindow::mousePressEvent(QMouseEvent *event)
         m_selectionThumbnailMoved = false;
         m_selectionThumbnailOrigin = event->position().toPoint();
         m_selectionThumbnailCurrent = m_selectionThumbnailOrigin;
+        updateEditorGeometry();
+        update();
         event->accept();
         return;
     }
@@ -121,6 +130,7 @@ void PasteWindow::mouseMoveEvent(QMouseEvent *event)
         {
             m_selectionThumbnailDragging = true;
             m_selectionThumbnailMoved = true;
+            m_suppressContextMenu = true;
         }
         if (m_selectionThumbnailDragging)
         {
@@ -184,6 +194,7 @@ void PasteWindow::mouseReleaseEvent(QMouseEvent *event)
         m_selectionThumbnailCandidate = false;
         m_selectionThumbnailDragging = false;
         m_selectionThumbnailMoved = false;
+        m_suppressContextMenu = dragged;
         if (dragged)
         {
             applySelectionThumbnail(selection);
@@ -192,6 +203,7 @@ void PasteWindow::mouseReleaseEvent(QMouseEvent *event)
             return;
         }
         update();
+        updateEditorGeometry();
         // A right click without movement remains a normal context-menu click.
     }
     if (event->button() == Qt::LeftButton && m_pressed)
@@ -318,6 +330,65 @@ void PasteWindow::resizeFromPointer(const QPoint &globalPosition)
 void PasteWindow::keyPressEvent(QKeyEvent *event)
 {
     const Qt::KeyboardModifiers modifiers = event->modifiers();
+    const bool plain = modifiers == Qt::NoModifier;
+    const bool primary = modifiers == snipaste::platform::primaryModifier();
+    if (plain && event->key() == Qt::Key_Space)
+    {
+        if (!event->isAutoRepeat())
+            setToolbarVisible(!m_showToolbar);
+        event->accept();
+        return;
+    }
+    if (m_showToolbar && plain && (event->key() == Qt::Key_Escape ||
+        event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter))
+    {
+        setToolbarVisible(false);
+        event->accept();
+        return;
+    }
+    if ((primary && event->key() >= Qt::Key_1 && event->key() <= Qt::Key_9) ||
+        (plain && (event->key() == Qt::Key_B || event->key() == Qt::Key_T ||
+                   event->key() == Qt::Key_N || event->key() == Qt::Key_E)))
+    {
+        setToolbarVisible(true);
+        for (auto *button : m_toolbar->findChildren<QToolButton *>())
+        {
+            if ((primary && button->property("toolNumber").toInt() == event->key() - Qt::Key_0) ||
+                (plain && !button->property("toolKey").toString().isEmpty() &&
+                 button->property("toolKey").toString() == QKeySequence(event->key()).toString()))
+            {
+                if (!button->isChecked())
+                    button->click();
+                event->accept();
+                return;
+            }
+        }
+    }
+    if (m_showToolbar && m_canvas)
+    {
+        if (plain && event->key() == Qt::Key_Tab &&
+            (m_canvas->tool() == AnnotationCanvas::Tool::Line || m_canvas->tool() == AnnotationCanvas::Tool::Arrow))
+        {
+            if (auto *toggle = m_annotationOptions->findChild<QToolButton *>(QStringLiteral("annotationToggleArrow")))
+                toggle->click();
+            event->accept();
+            return;
+        }
+        const bool history = modifiers.testFlag(snipaste::platform::primaryModifier()) &&
+                             (event->key() == Qt::Key_Z || event->key() == Qt::Key_Y);
+        const bool editing = !m_editor->testAttribute(Qt::WA_TransparentForMouseEvents);
+        if (history || (editing && plain && (event->key() == Qt::Key_Delete ||
+            event->key() == Qt::Key_Backspace || event->key() == Qt::Key_BracketLeft ||
+            event->key() == Qt::Key_BracketRight || event->key() == Qt::Key_1 || event->key() == Qt::Key_2)))
+        {
+            if (plain && (event->key() == Qt::Key_1 || event->key() == Qt::Key_2))
+                m_canvas->adjustToolSize(event->key() == Qt::Key_1 ? 1 : -1);
+            else
+                QApplication::sendEvent(m_canvas, event);
+            event->accept();
+            return;
+        }
+    }
     if (event->key() == Qt::Key_Escape && modifiers.testFlag(Qt::ShiftModifier))
     {
         if (m_shiftEscapeAction == QStringLiteral("关闭贴图"))
@@ -341,6 +412,9 @@ void PasteWindow::keyPressEvent(QKeyEvent *event)
     {
         if (event->key() == Qt::Key_S && modifiers.testFlag(Qt::AltModifier) && m_copyAsFileShortcutEnabled)
         {
+            if (m_canvas)
+                m_canvas->finishTextInput();
+            rebuildImage();
             emit copyAsFileRequested(this);
             event->accept();
             return;
@@ -360,7 +434,7 @@ void PasteWindow::keyPressEvent(QKeyEvent *event)
         }
         if (event->key() == Qt::Key_C || event->key() == Qt::Key_Insert)
         {
-            emit copyRequested(this);
+            copyImage();
             event->accept();
             return;
         }
@@ -385,7 +459,10 @@ void PasteWindow::keyPressEvent(QKeyEvent *event)
             {
                 if (QFileInfo(path).suffix().isEmpty())
                     path += QStringLiteral(".png");
-                m_sourceImage.save(path);
+                if (m_canvas)
+                    m_canvas->finishTextInput();
+                rebuildImage();
+                m_image.save(path);
             }
             event->accept();
             return;

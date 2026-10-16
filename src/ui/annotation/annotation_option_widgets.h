@@ -30,7 +30,7 @@ class SubtoolbarStackedLayout : public QStackedLayout
     {
         if (QWidget *w = currentWidget())
         {
-            return w->sizeHint();
+            return w->sizeHint().expandedTo(QSize(0, 0));
         }
         return QStackedLayout::sizeHint();
     }

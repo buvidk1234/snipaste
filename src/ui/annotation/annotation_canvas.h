@@ -83,6 +83,9 @@ class AnnotationCanvas final : public QWidget
     // captured desktop.  This lets strokes start outside the selection and
     // remain available if the selection is later expanded.
     void setCanvasFrame(QPoint origin, QSizeF logicalSize, QRect outputViewport);
+    // The snipping overlay already draws the committed desktop and marks.
+    // Painting that background again in a child can change fractional-DPI sampling.
+    void setBackgroundVisible(bool visible) { m_backgroundVisible = visible; update(); }
     EffectShape effectShape() const { return m_effectShape; }
     void setAutoSelectOnCreation(bool enabled) { m_autoSelectOnCreation = enabled; }
     // Re-apply the cursor after the parent capture overlay has switched
@@ -100,6 +103,8 @@ class AnnotationCanvas final : public QWidget
     }
     void finishTextInput(bool commit = true);
     QImage renderedImage(bool includePendingText = true) const;
+    QImage unannotatedImage() const;
+    core::AnnotationDocument selectionDocument() const;
     QImage fullRenderedImage(bool includePendingText = true) const;
     // Background shared by the canvas and its parent during text editing.
     QImage displayImage() const;
@@ -110,6 +115,7 @@ class AnnotationCanvas final : public QWidget
     bool canUndo() const { return m_document.canUndo(); }
     bool canRedo() const { return m_document.canRedo(); }
     const core::AnnotationDocument &document() const { return m_document; }
+    void setDocument(const core::AnnotationDocument &document);
     int selectedShapeIndex() const { return m_selectedShape; }
 
   signals:
@@ -184,6 +190,7 @@ class AnnotationCanvas final : public QWidget
     bool canCacheBackground() const;
 
     QImage m_image;
+    bool m_backgroundVisible = true;
     QSizeF m_logicalImageSize;
     bool m_hasFixedLogicalSize = false;
     QPoint m_coordinateOrigin;

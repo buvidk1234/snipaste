@@ -22,7 +22,8 @@ void AnnotationCanvas::paintEvent(QPaintEvent *event)
     }
     const QRectF frame = imageRect();
     const QRectF localFrame = frame.translated(-QPointF(m_coordinateOrigin));
-    paintBackground(painter, display, localFrame);
+    if (m_backgroundVisible)
+        paintBackground(painter, display, localFrame);
     const qreal scale = frame.width() / qMax(1, m_image.width());
     painter.save();
     painter.translate(localFrame.topLeft());
@@ -232,6 +233,19 @@ QImage AnnotationCanvas::renderedImage(bool includePendingText) const
     return crop.isEmpty() ? full : full.copy(crop);
 }
 
+QImage AnnotationCanvas::unannotatedImage() const
+{
+    const QRect crop = outputPixelRect();
+    return crop.isEmpty() ? m_image : m_image.copy(crop);
+}
+
+core::AnnotationDocument AnnotationCanvas::selectionDocument() const
+{
+    core::AnnotationDocument document = m_document;
+    document.translate(-QPointF(outputPixelRect().topLeft()));
+    return document;
+}
+
 void AnnotationCanvas::updateImageRegion(const QRectF &imageRegion)
 {
     const QRectF frame = imageRect().translated(-QPointF(m_coordinateOrigin));
@@ -265,7 +279,9 @@ bool AnnotationCanvas::canCacheBackground() const
 
 void AnnotationCanvas::paintBackground(QPainter &painter, const QImage &display, const QRectF &frame) const
 {
-    if (!usesScaledBackground() || !canCacheBackground())
+    // A proxy's view applies DPI and zoom. Caching at the widget's own DPI
+    // would resample the source once here and again in the view.
+    if (graphicsProxyWidget() || !usesScaledBackground() || !canCacheBackground())
     {
         m_previewBackground = {};
         painter.drawImage(frame, display);

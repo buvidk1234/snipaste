@@ -1,16 +1,58 @@
 #include "ui/paste/paste_window.h"
 #include "core/paste/image_transform.h"
 #include "platform/desktop_integration.h"
+#include "ui/annotation/annotation_canvas.h"
 
 #include <QCloseEvent>
+#include <QBackingStore>
 #include <QCursor>
-#include <QGraphicsDropShadowEffect>
+#include <QGraphicsView>
 #include <QGuiApplication>
 #include <QPainter>
 #include <QScreen>
+#include <QSignalBlocker>
 
 namespace snipaste::ui
 {
+namespace
+{
+class PasteShadowWindow final : public QWidget
+{
+  public:
+    explicit PasteShadowWindow(QWidget *owner)
+        : QWidget(owner, Qt::Tool | Qt::FramelessWindowHint |
+            Qt::WindowTransparentForInput | Qt::WindowDoesNotAcceptFocus)
+    {
+        setObjectName(QStringLiteral("pasteShadow"));
+        setAttribute(Qt::WA_TranslucentBackground);
+        setAttribute(Qt::WA_ShowWithoutActivating);
+        setAttribute(Qt::WA_QuitOnClose, false);
+    }
+    int margin = 0;
+    QColor color;
+    QSize extent;
+    QPoint offset;
+
+  protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setBrush(Qt::NoBrush);
+        painter.translate(-offset);
+        for (int distance = 1; distance <= margin; ++distance)
+        {
+            QColor stroke = color;
+            const qreal strength = 1.0 - qreal(distance) / (margin + 1);
+            stroke.setAlphaF(stroke.alphaF() * strength * strength * 0.6);
+            painter.setPen(QPen(stroke, 1));
+            painter.drawRoundedRect(QRectF(QPointF(), QSizeF(extent)).adjusted(margin - distance + 0.5,
+                margin - distance + 0.5, -margin + distance - 0.5, -margin + distance - 0.5),
+                distance, distance);
+        }
+    }
+};
+}
 
 PasteWindow::PasteWindow(QImage image, QWidget *parent) : QWidget(parent)
 {
@@ -39,20 +81,32 @@ PasteWindow::PasteWindow(QImage image, QWidget *parent) : QWidget(parent)
             m_flashTimer.stop();
             m_flashActive = false;
             m_flashBorder = false;
-            update();
+            updateBorder();
             return;
         }
         m_flashBorder = (m_flashStep % 2) == 0;
-        update();
+        updateBorder();
     });
 
-    auto *shadow = new QGraphicsDropShadowEffect(this);
-    shadow->setBlurRadius(m_shadowSize);
-    shadow->setOffset(0, 3);
-    shadow->setColor(m_shadowColor);
-    setGraphicsEffect(shadow);
-
     setSourceImage(image);
+}
+
+PasteWindow::~PasteWindow()
+{
+    // Tear down the embedded editor while the image/state members still exist.
+    // Proxy focus changes during QWidget destruction can otherwise emit history.
+    if (m_canvas)
+    {
+        m_canvas->disconnect(this);
+        m_canvas->finishTextInput(false);
+    }
+    delete m_toolbar;
+    m_toolbar = nullptr;
+    m_annotationOptions = nullptr;
+    delete m_editor;
+    m_editor = nullptr;
+    m_canvas = nullptr;
+    m_canvasProxy = nullptr;
 }
 
 void PasteWindow::showAtCursor()
@@ -114,11 +168,8 @@ void PasteWindow::flash()
     m_flashStep = 0;
     m_flashActive = true;
     m_flashBorder = true;
-    // Keep the synchronous state of a restored pin intact.  The first timer
-    // tick applies the optional transparency pulse after the caller has had a
-    // chance to finish its restore/activation work.
     m_flashTimer.start(80);
-    update();
+    updateBorder();
 }
 
 void PasteWindow::setFlashTransparency(bool enabled)
@@ -180,9 +231,74 @@ bool PasteWindow::clickThrough() const
 void PasteWindow::setShadowEnabled(bool enabled)
 {
     m_shadowEnabled = enabled;
-    if (auto *shadow = qobject_cast<QGraphicsDropShadowEffect *>(graphicsEffect()))
-        shadow->setEnabled(enabled);
-    update();
+    updateShadow();
+    updateBorder();
+}
+
+void PasteWindow::updateBorder()
+{
+    const int width = qMax(3, m_borderWidth + 1);
+    const int dirtyWidth = qMax(width, m_previousBorderUpdateWidth);
+    m_previousBorderUpdateWidth = width;
+    const QRegion edges = QRegion(rect()).subtracted(
+        QRegion(rect().adjusted(dirtyWidth, dirtyWidth, -dirtyWidth, -dirtyWidth)));
+    update(edges);
+    if (m_editor)
+        m_editor->viewport()->update(edges);
+}
+
+void PasteWindow::setSelected(bool selected)
+{
+    if (m_selected == selected)
+        return;
+    m_selected = selected;
+    updateBorder();
+}
+
+void PasteWindow::updateShadow()
+{
+    if (!isVisible() || !m_shadowEnabled || m_shadowSize <= 0)
+    {
+        for (auto *shadow : m_shadowWindows)
+        {
+            if (!shadow)
+                continue;
+            shadow->hide();
+            if (auto *store = shadow->backingStore())
+                store->resize(QSize(1, 1));
+        }
+        return;
+    }
+    const int margin = qMax(1, m_shadowSize);
+    const QSize extent = size() + QSize(margin * 2, margin * 2);
+    // Layered windows allocate a surface even for transparent pixels. Four
+    // narrow surfaces preserve the same shadow without an image-sized hole.
+    const std::array<QRect, 4> edges = {
+        QRect(0, 0, extent.width(), margin),
+        QRect(0, margin, margin, height()),
+        QRect(margin + width(), margin, margin, height()),
+        QRect(0, margin + height(), extent.width(), margin)};
+    for (size_t index = 0; index < m_shadowWindows.size(); ++index)
+    {
+        if (!m_shadowWindows[index])
+            m_shadowWindows[index] = new PasteShadowWindow(this);
+        auto *shadow = static_cast<PasteShadowWindow *>(m_shadowWindows[index]);
+        const bool repaint = shadow->margin != margin || shadow->color != m_shadowColor ||
+            shadow->extent != extent || shadow->offset != edges[index].topLeft();
+        shadow->setWindowFlag(Qt::WindowStaysOnTopHint, m_alwaysOnTop);
+        shadow->margin = margin;
+        shadow->color = m_shadowColor;
+        shadow->extent = extent;
+        shadow->offset = edges[index].topLeft();
+        shadow->setGeometry(edges[index].translated(pos() - QPoint(margin, margin)));
+        if (auto *store = shadow->backingStore())
+            if (store->size() != shadow->size())
+                store->resize(shadow->size());
+        if (repaint)
+            shadow->update();
+        if (!shadow->isVisible())
+            shadow->show();
+    }
 }
 
 bool PasteWindow::shadowEnabled() const
@@ -391,8 +507,26 @@ void PasteWindow::restoreTransform(int rotationQuarterTurns, bool flipHorizontal
 bool PasteWindow::event(QEvent *event)
 {
     const bool handled = QWidget::event(event);
+    if (event->type() == QEvent::Show)
+        if (auto *store = backingStore())
+            store->resize(size());
     if (event->type() == QEvent::DevicePixelRatioChange)
         updateDisplaySize();
+    if (event->type() == QEvent::Move)
+    {
+        updateShadow();
+        updateToolbarPosition();
+    }
+    if (event->type() == QEvent::Show || event->type() == QEvent::Hide ||
+        event->type() == QEvent::Resize ||
+        event->type() == QEvent::WindowStateChange)
+    {
+        updateShadow();
+        updateEditorGeometry();
+    }
+    if (event->type() == QEvent::Hide)
+        if (auto *store = backingStore())
+            store->resize(QSize(1, 1));
     return handled;
 }
 
@@ -400,6 +534,7 @@ void PasteWindow::closeEvent(QCloseEvent *event)
 {
     // QWidget::close is permanent destruction; Esc/double-click use hidePaste.
     m_state = State::Destroyed;
+    setToolbarVisible(false);
     QWidget::closeEvent(event);
 }
 
@@ -414,9 +549,6 @@ void PasteWindow::paintEvent(QPaintEvent *)
     const bool nativeSize = qAbs(qreal(width()) * ratio - qreal(m_image.width())) < 0.5 &&
                             qAbs(qreal(height()) * ratio - qreal(m_image.height())) < 0.5;
     painter.setRenderHint(QPainter::SmoothPixmapTransform, m_smoothScale && !nativeSize);
-    const qreal flashOpacity = m_flashActive && m_flashTransparency && !m_flashBorder ? 0.45 : 1.0;
-    painter.save();
-    painter.setOpacity(flashOpacity);
     if (m_backgroundMode == QStringLiteral("白色"))
         painter.fillRect(rect(), QColor(255, 255, 255, 245));
     else if (m_backgroundMode == QStringLiteral("黑色"))
@@ -425,8 +557,8 @@ void PasteWindow::paintEvent(QPaintEvent *)
         painter.fillRect(rect(), m_customBackgroundColor);
     else if (m_backgroundMode != QStringLiteral("透明"))
         painter.fillRect(rect(), QColor(255, 255, 255, 245));
-    painter.drawImage(rect(), m_image);
-    painter.restore();
+    if (!m_editor || !m_editor->isVisible())
+        painter.drawImage(rect(), m_image);
 
     if (m_selectionThumbnailDragging && m_selectionThumbnailMoved)
     {
@@ -439,10 +571,22 @@ void PasteWindow::paintEvent(QPaintEvent *)
             painter.drawRect(clipped.adjusted(0, 0, -1, -1));
     }
 
-    if (m_borderEnabled || m_flashBorder)
+    if (!m_editor || !m_editor->isVisible())
+        paintBorder(painter);
+}
+
+void PasteWindow::paintBorder(QPainter &painter) const
+{
+    if (m_shadowEnabled && (m_borderEnabled || m_flashBorder))
     {
-        QPen border(m_flashBorder ? QColor(255, 205, 60, 255) : m_borderColor);
-        border.setWidth(m_borderWidth);
+        static const std::array<QColor, 3> flashColors = {
+            QColor(100, 180, 250), QColor(183, 143, 242), QColor(92, 211, 176)};
+        QColor color = m_flashBorder ? flashColors[size_t(m_flashStep / 2) % flashColors.size()]
+            : (m_selected || m_showToolbar ? QColor(115, 175, 235, 235) : m_borderColor);
+        if (m_flashActive && m_flashTransparency && !m_flashBorder)
+            color.setAlphaF(color.alphaF() * 0.25);
+        QPen border(color);
+        border.setWidth(m_flashBorder ? qMax(2, m_borderWidth) : m_borderWidth);
         painter.setPen(border);
         painter.setBrush(Qt::NoBrush);
         // Keep the entire stroke inside the window. Integer QRect endpoints
@@ -459,6 +603,13 @@ void PasteWindow::setSourceImage(const QImage &image)
 
     m_sourceImage = image;
     m_sourceText.clear();
+    if (m_canvas)
+    {
+        const QSignalBlocker blocker(m_canvas);
+        m_canvas->resetCapture();
+        m_canvas->setCaptureImage(image);
+        m_canvas->resize(image.size());
+    }
 
     m_rotationQuarterTurns = 0;
     m_flipHorizontal = false;
@@ -474,9 +625,11 @@ void PasteWindow::rebuildImage()
     if (m_sourceImage.isNull())
         return;
 
+    const QImage source = m_canvas && m_showAnnotations ? m_canvas->renderedImage() : m_sourceImage;
     m_image = core::transformImage(
-        m_sourceImage, {m_rotationQuarterTurns, m_flipHorizontal, m_flipVertical, m_grayscale, m_inverted});
+        source, {m_rotationQuarterTurns, m_flipHorizontal, m_flipVertical, m_grayscale, m_inverted});
     updateDisplaySize();
+    updateEditorGeometry();
     update();
 }
 
@@ -505,6 +658,7 @@ void PasteWindow::hidePaste()
 {
     if (m_state != State::Active)
         return;
+    setToolbarVisible(false);
     // Thumbnail mode is a transient viewing aid.  Returning a pin to the
     // hidden/closed state must keep its normal transform so that reviving it
     // does not unexpectedly change its size.

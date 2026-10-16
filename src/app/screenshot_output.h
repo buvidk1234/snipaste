@@ -1,5 +1,6 @@
 #pragma once
 #include <QImage>
+#include "core/annotation/annotation_document.h"
 #include <QObject>
 namespace snipaste::core
 {
@@ -17,7 +18,7 @@ class ScreenshotOutput final : public QObject
     ScreenshotOutput(core::ConfigStore &config, ui::PasteManager &pastes, QObject *parent = nullptr);
     void autoSave(const QImage &image);
     void execute(const QImage &image, const QString &spec);
-    void showPaste(const QImage &image);
+    void showPaste(const QImage &image, const QImage &source = {}, const core::AnnotationDocument &annotations = {});
 
   private:
     int imageQuality() const;

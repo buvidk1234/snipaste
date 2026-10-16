@@ -191,10 +191,14 @@ void CaptureController::start(const CaptureRequest &request)
     if (pinAfterCapture)
     {
         QObject::connect(m_activeOverlay, &snipaste::ui::SnipOverlay::screenshotCaptured, this,
-                         [this](const QImage &image) { m_output.showPaste(image); });
+                         [this](const QImage &image) {
+                             m_output.showPaste(image, m_activeOverlay->pasteSourceImage(), m_activeOverlay->pasteAnnotations());
+                         });
     }
     QObject::connect(m_activeOverlay, &snipaste::ui::SnipOverlay::pasteRequested, this,
-                     [this](const QImage &image) { m_output.showPaste(image); });
+                     [this](const QImage &image) {
+                         m_output.showPaste(image, m_activeOverlay->pasteSourceImage(), m_activeOverlay->pasteAnnotations());
+                     });
     QObject::connect(
         m_activeOverlay, &snipaste::ui::SnipOverlay::annotateRequested, [this](const QImage &image) {
             const QRect captureRegion = m_lastSelection;

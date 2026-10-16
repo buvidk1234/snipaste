@@ -14,7 +14,7 @@ enum class CaptureIcon { Rectangle, Ellipse, Line, Arrow, Pen, Marker, Mosaic, B
                          SwapDirection,
                          TextBold, TextItalic, TextOutline, TextBackground,
                          NumberFilled, NumberDoubleRing, NumberOutline,
-                         MagnifierCutout, MagnifierBorder };
+                         MagnifierCutout, MagnifierBorder, FinishEditing };
 
 QIcon captureIcon(CaptureIcon kind, bool light = false);
 

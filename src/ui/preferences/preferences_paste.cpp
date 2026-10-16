@@ -164,7 +164,7 @@ QWidget *PreferencesDialog::createPastePage(QWidget *parent)
     pasteVirtualDesktopCheck->setObjectName(QStringLiteral("pasteVirtualDesktopCheck"));
     addPasteBehaviorCheck(controls->pasteResetTransformCheck, QStringLiteral("缩略图变换‘重置’操作"),
                           QStringLiteral("paste/resetTransform"), true);
-    addPasteBehaviorCheck(controls->pasteFlashTransparencyCheck, QStringLiteral("边框闪烁时使窗口回归半透明"),
+    addPasteBehaviorCheck(controls->pasteFlashTransparencyCheck, QStringLiteral("边框闪烁时淡化边缘"),
                           QStringLiteral("paste/flashTransparency"), true);
     addPasteBehaviorCheck(controls->pasteFlashOnGroupSwitchCheck,
                           QStringLiteral("切换到另一分组时自动闪烁贴图"),

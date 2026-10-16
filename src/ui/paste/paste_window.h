@@ -7,6 +7,7 @@
 #include <QTimer>
 #include <QTransform>
 #include <QWidget>
+#include <array>
 
 class QContextMenuEvent;
 class QDragEnterEvent;
@@ -15,15 +16,23 @@ class QKeyEvent;
 class QMouseEvent;
 class QWheelEvent;
 class QUrl;
+class QFrame;
+class QGraphicsView;
+class QGraphicsProxyWidget;
+class QMenu;
+class QPainter;
 
 namespace snipaste::core
 {
 struct PasteWindowState;
+class AnnotationDocument;
 }
 namespace snipaste::ui
 {
 
 class PasteManager;
+class AnnotationCanvas;
+class AnnotationOptions;
 
 class PasteWindow final : public QWidget
 {
@@ -37,6 +46,7 @@ class PasteWindow final : public QWidget
     };
 
     explicit PasteWindow(QImage image, QWidget *parent = nullptr);
+    ~PasteWindow() override;
 
     void showAtCursor();
     void showAtPosition(const QPoint &globalPosition);
@@ -50,12 +60,19 @@ class PasteWindow final : public QWidget
     void restoreClosed();
     const QImage &sourceImage() const;
     const QImage &displayedImage() const;
+    void setAnnotations(const core::AnnotationDocument &document, const QImage &source = {});
+    void setToolbarVisible(bool visible);
+    bool toolbarVisible() const { return m_showToolbar; }
+    void setAnnotationsVisible(bool visible);
+    bool annotationsVisible() const { return m_showAnnotations; }
     void setSourceText(const QString &text);
     const QString &sourceText() const;
     bool clickThrough() const;
     void setClickThrough(bool enabled);
     void setShadowEnabled(bool enabled);
     bool shadowEnabled() const;
+    void setSelected(bool selected);
+    bool selected() const { return m_selected; }
     void setResizeEnabled(bool enabled);
     bool resizeEnabled() const;
     void setExchangeNavigationKeys(bool enabled);
@@ -106,6 +123,7 @@ class PasteWindow final : public QWidget
 
   protected:
     bool event(QEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
@@ -120,6 +138,7 @@ class PasteWindow final : public QWidget
 
   private:
     friend class PasteManager;
+    friend class PasteEditorView;
     core::PasteWindowState snapshot() const;
     void restore(const core::PasteWindowState &state);
     void downloadDroppedImage(const QUrl &url);
@@ -138,6 +157,18 @@ class PasteWindow final : public QWidget
     void applySelectionThumbnail(const QRect &selection);
     void editSize();
     void editColorCard();
+    void createEditor();
+    void updateEditorGeometry();
+    void updateToolbarPosition();
+    void updateShadow();
+    void paintBorder(QPainter &painter) const;
+    void updateBorder();
+    void copyImage();
+    void saveImage();
+    void extractText();
+    void populateOutputMenu(QMenu *menu);
+    void showShareMenu(const QPoint &position);
+    void startScrollCapture();
     Qt::Edges resizeEdgesAt(const QPoint &position) const;
     void resizeFromPointer(const QPoint &globalPosition);
     void updateResizeCursor(const QPoint &position);
@@ -160,6 +191,7 @@ class PasteWindow final : public QWidget
     bool m_alwaysOnTop = true;
     bool m_clickThrough = false;
     bool m_shadowEnabled = true;
+    bool m_selected = false;
     bool m_resizeEnabled = true;
     bool m_exchangeNavigationKeys = false;
     bool m_smoothScale = true;
@@ -188,18 +220,22 @@ class PasteWindow final : public QWidget
     qreal m_scaleBeforeThumbnail = 1.0;
     PasteManager *m_pasteManager = nullptr;
     bool m_copyAsFileShortcutEnabled = false;
-    bool m_showToolbar = true;
+    bool m_showToolbar = false;
     bool m_showAnnotations = true;
-    // A pin should remain distinguishable from the desktop even when its
-    // shadow is disabled or the captured pixels are dark.  Keep this as a
-    // lightweight one-pixel edge; the per-pin context menu can still turn it
-    // off when an unobstructed export is needed.
+    AnnotationCanvas *m_canvas = nullptr;
+    QGraphicsView *m_editor = nullptr;
+    QGraphicsProxyWidget *m_canvasProxy = nullptr;
+    QFrame *m_toolbar = nullptr;
+    AnnotationOptions *m_annotationOptions = nullptr;
+    std::array<QWidget *, 4> m_shadowWindows{};
+    // The outline is a screen decoration controlled by the shadow switch.
     bool m_borderEnabled = true;
     int m_shadowSize = 32;
-    QColor m_shadowColor = QColor(0, 0, 0, 150);
+    QColor m_shadowColor = QColor(60, 68, 80, 100);
     int m_borderWidth = 1;
     // Keep the visible outline after the introductory flash has finished.
-    QColor m_borderColor = QColor(255, 205, 60, 255);
+    QColor m_borderColor = QColor(220, 225, 232, 220);
+    int m_previousBorderUpdateWidth = 0;
     QColor m_customBackgroundColor = QColor(255, 255, 255, 245);
     QPoint m_dragOffset;
     QPoint m_pressPosition;
@@ -209,6 +245,7 @@ class PasteWindow final : public QWidget
     bool m_selectionThumbnailCandidate = false;
     bool m_selectionThumbnailDragging = false;
     bool m_selectionThumbnailMoved = false;
+    bool m_suppressContextMenu = false;
     QPoint m_selectionThumbnailOrigin;
     QPoint m_selectionThumbnailCurrent;
     Qt::Edges m_resizeEdges;

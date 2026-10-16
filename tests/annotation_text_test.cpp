@@ -9,6 +9,7 @@
 #include <QClipboard>
 #include <QComboBox>
 #include <QDir>
+#include <QInputMethodEvent>
 #include <QLineF>
 #include <QPlainTextEdit>
 #include <QMouseEvent>
@@ -35,6 +36,8 @@ class AnnotationTextTest : public QObject
     void outputWhileReediting();
     void multilineViewport_data();
     void multilineViewport();
+    void imePreeditExpandsEditor_data();
+    void imePreeditExpandsEditor();
     void textBoxResizeAndPointer();
     void textScaling_data();
     void textScaling();
@@ -161,6 +164,76 @@ void AnnotationTextTest::multilineViewport()
     }
     canvas.finishTextInput();
     QCOMPARE(canvas.renderedImage(), pending);
+}
+
+void AnnotationTextTest::imePreeditExpandsEditor_data()
+{
+    QTest::addColumn<qreal>("scale");
+    QTest::newRow("half-size-preview") << qreal(0.5);
+    QTest::newRow("native-size") << qreal(1);
+    QTest::newRow("enlarged-preview") << qreal(1.5);
+}
+
+void AnnotationTextTest::imePreeditExpandsEditor()
+{
+    QFETCH(qreal, scale);
+    QImage image(1280, 840, QImage::Format_RGB32);
+    image.fill(Qt::white);
+    ui::AnnotationCanvas canvas(image);
+    canvas.resize(qRound(image.width() * scale), qRound(image.height() * scale));
+    canvas.show();
+    canvas.setTool(ui::AnnotationCanvas::Tool::Text);
+    auto *editor = canvas.findChild<QPlainTextEdit *>(QStringLiteral("annotationTextEditor"));
+    QVERIFY(editor);
+    QTest::mouseClick(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(80, 80));
+    QCoreApplication::processEvents();
+    const int emptyWidth = editor->width();
+    const QPoint anchor = editor->pos();
+    const auto preedit = [editor](const QString &text) {
+        QInputMethodEvent event(text, {});
+        QApplication::sendEvent(editor, &event);
+        QCoreApplication::processEvents();
+    };
+    preedit(QStringLiteral("zhongwen"));
+    QVERIFY(editor->width() > emptyWidth);
+    const int shortWidth = editor->width();
+    preedit(QStringLiteral("zhongwenshurufa"));
+    QVERIFY(editor->width() > shortWidth);
+    QCOMPARE(editor->toPlainText(), QString());
+    QCOMPARE(canvas.renderedImage(), image);
+    QCOMPARE(editor->pos(), anchor);
+    QCOMPARE(editor->horizontalScrollBar()->value(), 0);
+    QVERIFY(editor->viewport()->rect().contains(editor->cursorRect()));
+    preedit(QStringLiteral("zhongwen"));
+    QCOMPARE(editor->width(), shortWidth);
+    preedit(QString());
+    QCOMPARE(editor->width(), emptyWidth);
+
+    // Compose in the middle of a later line, preserving the committed suffix.
+    const QString text = QStringLiteral("A\nPrefix suffix");
+    editor->setPlainText(text);
+    QTextCursor cursor = editor->textCursor();
+    cursor.setPosition(text.indexOf(QStringLiteral("suffix")));
+    editor->setTextCursor(cursor);
+    QCoreApplication::processEvents();
+    const int committedWidth = editor->width();
+    preedit(QStringLiteral("zhongwenshurufa"));
+    QVERIFY(editor->width() > committedWidth);
+    QVERIFY(editor->viewport()->width() >=
+            editor->fontMetrics().horizontalAdvance(QStringLiteral("Prefix zhongwenshurufasuffix")));
+    QCOMPARE(editor->toPlainText(), text);
+    QInputMethodEvent commit;
+    commit.setCommitString(QStringLiteral("中文"));
+    QApplication::sendEvent(editor, &commit);
+    QCoreApplication::processEvents();
+    QCOMPARE(editor->toPlainText(), QStringLiteral("A\nPrefix 中文suffix"));
+    const int confirmedWidth = editor->width();
+    preedit(QStringLiteral("zhongwenshurufa"));
+    QVERIFY(editor->width() > confirmedWidth);
+    preedit(QString());
+    QCOMPARE(editor->width(), confirmedWidth);
+    editor->undo();
+    QCOMPARE(editor->toPlainText(), text);
 }
 
 void AnnotationTextTest::textBoxResizeAndPointer()
