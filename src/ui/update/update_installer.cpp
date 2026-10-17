@@ -23,11 +23,10 @@ namespace snipaste::ui {
 
 QString updateInstallationDirectory(QString *error)
 {
-    QString destination;
-    QString writableDirectory;
 #ifdef Q_OS_WIN
-    destination = QCoreApplication::applicationDirPath();
-    writableDirectory = destination;
+    // The Windows EXE installer requests elevation for protected directories.
+    Q_UNUSED(error);
+    return QCoreApplication::applicationDirPath();
 #elif defined(Q_OS_MACOS)
     const QString executable = QCoreApplication::applicationFilePath();
     const QString suffix = QStringLiteral("/Contents/MacOS/snipaste");
@@ -36,13 +35,8 @@ QString updateInstallationDirectory(QString *error)
             *error = QStringLiteral("请使用发布的 snipaste.app 进行自动安装。");
         return {};
     }
-    destination = executable.chopped(suffix.size());
-    writableDirectory = QFileInfo(destination).absolutePath();
-#else
-    if (error)
-        *error = QStringLiteral("当前平台不支持自动安装。");
-    return {};
-#endif
+    const QString destination = executable.chopped(suffix.size());
+    const QString writableDirectory = QFileInfo(destination).absolutePath();
     QTemporaryFile probe(writableDirectory + QStringLiteral("/.snipaste-update-XXXXXX"));
     if (!probe.open()) {
         if (error)
@@ -50,6 +44,11 @@ QString updateInstallationDirectory(QString *error)
         return {};
     }
     return destination;
+#else
+    if (error)
+        *error = QStringLiteral("当前平台不支持自动安装。");
+    return {};
+#endif
 }
 
 bool launchUpdateInstaller(const QString &archive, const QString &temporaryDirectory,
@@ -58,6 +57,16 @@ bool launchUpdateInstaller(const QString &archive, const QString &temporaryDirec
     const QString destination = updateInstallationDirectory(error);
     if (destination.isEmpty())
         return false;
+#ifdef Q_OS_WIN
+    // ZIP updates run without elevation; protected installations need the EXE.
+    if (!archive.endsWith(QStringLiteral(".exe"), Qt::CaseInsensitive)) {
+        QTemporaryFile probe(destination + QStringLiteral("/.snipaste-update-XXXXXX"));
+        if (!probe.open()) {
+            *error = QStringLiteral("此安装目录需要管理员权限，请下载 EXE 安装包进行更新。");
+            return false;
+        }
+    }
+#endif
     initializeUpdateScripts();
 #ifdef Q_OS_WIN
     const QString scriptName = QStringLiteral("install-windows.ps1");
@@ -90,11 +99,17 @@ bool launchUpdateInstaller(const QString &archive, const QString &temporaryDirec
                                                QStringLiteral("--config"), configPath}},
     };
 #ifdef Q_OS_WIN
-    const QSettings registration(QStringLiteral("HKEY_CURRENT_USER\\Software\\snipaste-open-source"),
-                                 QSettings::NativeFormat);
-    settings.insert(QStringLiteral("portable"),
-                    QDir::cleanPath(registration.value(QStringLiteral("InstallDir")).toString())
-                        .compare(QDir::cleanPath(destination), Qt::CaseInsensitive) != 0);
+    bool registered = false;
+    for (const QString &hive : {QStringLiteral("HKEY_LOCAL_MACHINE"), QStringLiteral("HKEY_CURRENT_USER")}) {
+        const QSettings registration(hive + QStringLiteral("\\Software\\snipaste-open-source"),
+                                     QSettings::NativeFormat);
+        if (QDir::cleanPath(registration.value(QStringLiteral("InstallDir")).toString())
+                .compare(QDir::cleanPath(destination), Qt::CaseInsensitive) == 0) {
+            registered = true;
+            break;
+        }
+    }
+    settings.insert(QStringLiteral("portable"), !registered);
 #endif
     const QString manifest = QDir(temporaryDirectory).filePath(QStringLiteral("install.json"));
     QSaveFile file(manifest);

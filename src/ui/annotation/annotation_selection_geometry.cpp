@@ -14,9 +14,8 @@ QRectF selectionRect(const Shape &shape)
         return textBoxRect(shape).adjusted(-4, -4, 4, 4);
     if (shape.tool == Tool::Number)
     {
-        Shape unrotated = shape;
-        unrotated.rotation = 0;
-        return shapeBounds(unrotated);
+        const qreal diameter = shape.numberSize;
+        return QRectF(shape.start - QPointF(diameter / 2, diameter / 2), QSizeF(diameter, diameter));
     }
     return QRectF(shape.start, shape.end).normalized();
 }

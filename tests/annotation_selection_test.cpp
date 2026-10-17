@@ -1,6 +1,8 @@
 #include "ui/annotation/annotation_canvas.h"
 #include "ui/annotation/annotation_options.h"
 #include "ui/annotation/annotation_dialog.h"
+#include "ui/annotation/annotation_renderer.h"
+#include "ui/annotation/annotation_selection_geometry.h"
 #include "ui/snip/snip_overlay.h"
 #include <QApplication>
 #include <QComboBox>
@@ -8,6 +10,7 @@
 #include <QListWidget>
 #include <QMenu>
 #include <QMouseEvent>
+#include <QPainter>
 #include <QScreen>
 #include <QStackedLayout>
 #include <QTest>
@@ -61,7 +64,139 @@ class AnnotationSelectionTest : public QObject
     void smallRectangleEdgeYieldsToMove();
     void arrowDropdownGeometryAndItems();
     void lineStyleMenusAndHistory();
+    void numberCursorMatchesStamp_data();
+    void numberCursorMatchesStamp();
+    void numberSelectionFitsBadge();
+    void numberModeSelectsExistingShape_data();
+    void numberModeSelectsExistingShape();
 };
+
+void AnnotationSelectionTest::numberModeSelectsExistingShape_data()
+{
+    QTest::addColumn<int>("tool");
+    QTest::addColumn<QPoint>("hit");
+    QTest::addColumn<int>("page");
+    QTest::newRow("rectangle") << int(Canvas::Tool::Rectangle) << QPoint(80, 105) << 0;
+    QTest::newRow("arrow") << int(Canvas::Tool::Arrow) << QPoint(160, 130) << 1;
+}
+
+void AnnotationSelectionTest::numberModeSelectsExistingShape()
+{
+    QFETCH(int, tool);
+    QFETCH(QPoint, hit);
+    QFETCH(int, page);
+    const auto targetTool = Canvas::Tool(tool);
+    Canvas canvas(background());
+    canvas.resize(640, 420);
+    canvas.setAutoSelectOnCreation(true);
+    ui::AnnotationOptions options(nullptr, [] {});
+    options.setCanvas(&canvas);
+    canvas.show();
+    canvas.setTool(targetTool);
+    drag(&canvas, {80, 80}, {240, 180});
+    canvas.setTool(Canvas::Tool::Number);
+    QTest::mouseClick(&canvas, Qt::LeftButton, Qt::NoModifier, {400, 300});
+    const auto shapes = canvas.document().shapes();
+    const QImage before = canvas.renderedImage();
+    QCOMPARE(options.stack()->currentIndex(), 6);
+    QTest::mouseClick(&canvas, Qt::LeftButton, Qt::NoModifier, hit);
+    QCOMPARE(canvas.tool(), targetTool);
+    QCOMPARE(canvas.selectedShapeIndex(), 0);
+    QCOMPARE(options.stack()->currentIndex(), page);
+    QVERIFY(canvas.document().shapes() == shapes);
+    QCOMPARE(canvas.renderedImage(), before);
+    QCOMPARE(canvas.document().nextNumber(), 2);
+    drag(&canvas, hit, hit + QPoint(12, 10));
+    QCOMPARE(canvas.document().shapes().size(), 2);
+    QCOMPARE(canvas.document().shapes().first().start, shapes.first().start + QPointF(12, 10));
+    canvas.undo();
+    QVERIFY(canvas.document().shapes() == shapes);
+    canvas.setTool(Canvas::Tool::Number);
+    QTest::mouseClick(&canvas, Qt::LeftButton, Qt::NoModifier, {500, 300});
+    QCOMPARE(canvas.document().shapes().size(), 3);
+    QCOMPARE(canvas.document().shapes().last().text, QStringLiteral("2"));
+}
+
+void AnnotationSelectionTest::numberCursorMatchesStamp_data()
+{
+    QTest::addColumn<qreal>("scale");
+    QTest::addColumn<qreal>("size");
+    QTest::addColumn<int>("style");
+    for (const qreal scale : {0.5, 1.0, 1.5})
+        for (const qreal size : {12.0, 24.0, 96.0})
+            for (int style = 0; style < 3; ++style)
+                QTest::newRow(qPrintable(QStringLiteral("%1-%2-%3").arg(scale).arg(size).arg(style)))
+                    << scale << size << style;
+}
+
+void AnnotationSelectionTest::numberCursorMatchesStamp()
+{
+    QFETCH(qreal, scale);
+    QFETCH(qreal, size);
+    QFETCH(int, style);
+    Canvas canvas(background());
+    canvas.setMinimumSize(0, 0);
+    canvas.resize(qRound(640 * scale), qRound(420 * scale));
+    canvas.setAutoSelectOnCreation(false);
+    canvas.setTool(Canvas::Tool::Number);
+    canvas.setNumberSize(size);
+    canvas.setNumberStyle(style);
+    canvas.setTextFontFamily(QStringLiteral("Arial"));
+    canvas.show();
+    const QPoint position(qRound(200 * scale), qRound(200 * scale));
+    QImage tenthPreview;
+    for (int number = 1; number <= 10; ++number)
+    {
+        const QCursor cursor = canvas.cursor();
+        const QImage preview = cursor.pixmap().toImage().convertToFormat(QImage::Format_ARGB32_Premultiplied);
+        QCOMPARE(preview.devicePixelRatio(), canvas.devicePixelRatioF());
+        QVERIFY(preview.deviceIndependentSize().width() >= size * scale + 2);
+        QTest::mouseClick(&canvas, Qt::LeftButton, Qt::NoModifier, position);
+        QCOMPARE(canvas.document().shapes().size(), number);
+        const auto &stamp = canvas.document().shapes().last();
+        QCOMPARE(stamp.text, QString::number(number));
+        QImage expected(preview.size(), QImage::Format_ARGB32_Premultiplied);
+        expected.setDevicePixelRatio(preview.devicePixelRatio());
+        expected.fill(Qt::transparent);
+        QPainter painter(&expected);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.translate(cursor.hotSpot());
+        painter.scale(scale, scale);
+        painter.translate(-stamp.start);
+        ui::annotation::AnnotationRenderer(background().size()).drawShape(painter, stamp);
+        painter.end();
+        QCOMPARE(preview, expected);
+        if (number == 10)
+            tenthPreview = preview;
+    }
+    const QImage nextPreview = canvas.cursor().pixmap().toImage();
+    canvas.undo();
+    QCOMPARE(canvas.cursor().pixmap().toImage().convertToFormat(QImage::Format_ARGB32_Premultiplied), tenthPreview);
+    canvas.redo();
+    QCOMPARE(canvas.cursor().pixmap().toImage(), nextPreview);
+}
+
+void AnnotationSelectionTest::numberSelectionFitsBadge()
+{
+    core::AnnotationShape shape;
+    shape.tool = Canvas::Tool::Number;
+    shape.start = shape.end = QPointF(100, 100);
+    for (const qreal size : {12.0, 24.0, 96.0})
+        for (const qreal width : {2.0, 16.0, 64.0})
+            for (int style = 0; style < 3; ++style)
+            {
+                shape.numberSize = size;
+                shape.width = width;
+                shape.numberStyle = style;
+                const QRectF frame = ui::annotation::selectionRect(shape);
+                QCOMPARE(frame.center(), shape.start);
+                QCOMPARE(frame.size(), QSizeF(size, size));
+                const auto anchor = ui::annotation::selectionHandles(frame)[0];
+                ui::annotation::resizeShape(shape, 4, QPointF(4, 4));
+                QCOMPARE(ui::annotation::selectionHandles(ui::annotation::selectionRect(shape))[0], anchor);
+                shape.start = shape.end = QPointF(100, 100);
+            }
+}
 
 void AnnotationSelectionTest::optionsCreateOnlySelectedPages()
 {

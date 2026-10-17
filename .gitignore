@@ -27,6 +27,7 @@ release-build-output.txt
 *.user
 
 # IDE metadata
+CMakeUserPresets.json
 .vs/
 .vscode/*.log
 

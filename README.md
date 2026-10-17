@@ -1,48 +1,66 @@
 # snipaste
 
-一个支持 Windows 与 macOS 的开源截屏、贴图和标注工具，操作方式和快捷键参考 Snipaste 2.x。
+一个截屏、贴图和标注工具。
 
-## 使用方法
+## 使用
 
-启动后，程序常驻系统托盘，默认操作如下：
+从 [GitHub Releases](https://github.com/buvidk1234/snipaste/releases) 下载对应平台的安装包，包内已包含 Qt 运行库。
 
-- **F1**：开始截图，框选区域后可标注、复制、保存或贴到屏幕。
-- **F3**：将剪贴板中的图片或文字贴到屏幕。
-- **Shift + F3**：隐藏或显示所有贴图。
-- **Space**：选中贴图后显示或隐藏标注工具条；点击对号或按 **Enter** 完成编辑并保留贴图，**Esc** 优先收起工具条，再执行关闭操作。
-- **Ctrl + 1…9**：选择形状、线条、画笔、荧光笔、马赛克、文字、序号、放大镜、橡皮擦；也可使用 **B / T / N / E** 选择画笔、文字、序号、橡皮擦。macOS 使用 Command 代替 Ctrl。
-- **右键贴图**：切换标注显示、窗口阴影和置顶；菜单右侧显示快捷键，工具条悬浮提示显示对应按键。直接从截图贴到屏幕的标注可继续编辑，标注及显示设置会随贴图恢复。
-- **右键托盘图标**：打开菜单，调整首选项、管理贴图或退出程序。
-- **检查更新**：在托盘菜单或“首选项 → 更新”中检查，点击“立即更新”后自动下载、校验、安装并重启，无需手动解压。也可设置启动时和定期检查。
+- Windows：运行 `windows-x64-setup.exe`，以管理员权限安装到 `C:\Program Files\Snipaste`（可自选目录），完成后从开始菜单启动；也可解压 `windows-x64.zip`，直接运行 `snipaste.exe`。
+- macOS：解压 `macos-universal.zip`，将 `snipaste.app` 拖入“应用程序”。首次运行需在系统设置中授予“屏幕录制”和“辅助功能”权限。
+
+- **F1**：截图。
+- **F3**：将剪贴板内容贴到屏幕。
+
+更多操作可自行探索。
+
+## 构建
+
+构建配置只有两个文件：[CMakeLists.txt](CMakeLists.txt) 定义构建、测试和打包规则，[CMakePresets.json](CMakePresets.json) 保存平台和 Debug / Release 参数。本地和 CI 使用相同命令，产物位于 `build/<preset>/`。
+
+依赖：CMake 3.28+、Ninja、Qt 6.12+、C++20 编译器。3.28 是最低要求，CMake 4.x 可以直接使用。
 
 ### Windows
 
-普通用户推荐下载 `snipaste-版本号-windows-x64-setup.exe`，按向导安装。安装包自带 Qt，无需管理员权限，并提供开始菜单入口和卸载功能。
-
-ZIP 便携版继续提供，解压后直接运行 `snipaste.exe`。两种版本都支持程序内更新。
-
-从源码运行需要 Qt 6、CMake、Ninja、MSVC 和 Windows SDK。在项目根目录打开 PowerShell，执行：
+安装 Visual Studio 2022 或更新版本的“使用 C++ 的桌面开发”工作负载（含 Windows SDK），以及 Qt 的 MSVC 2022 x64 组件。在 **Developer PowerShell for VS** 中执行：
 
 ```powershell
-# 构建并启动
-.\scripts\windows\run-dev.ps1
-
-# 生成便携版 ZIP，输出到 dist/ 目录
-.\scripts\windows\run-dev.ps1 -Configuration Release -Package
-
-# 生成 EXE 安装包和 ZIP（需要安装 NSIS 3，或设置 NSIS_ROOT）
-.\scripts\windows\package.ps1 -Installer
+$env:QT_ROOT = 'C:/Qt/6.12.0/msvc2022_64' # 改为实际路径
+cmake --preset windows-msvc-debug
+cmake --build --preset windows-msvc-debug
 ```
-
-脚本默认使用 `D:/Qt/6.12.0/msvc2022_64`；Qt 安装在其他位置时，先设置 `QT_ROOT` 环境变量。
 
 ### macOS
 
-安装 Xcode Command Line Tools 后，在项目根目录执行：
+安装 Xcode Command Line Tools 和上述依赖后执行：
 
 ```bash
-brew install qtbase cmake ninja
-./scripts/macos/run-dev.sh
+export QT_ROOT="$HOME/Qt/6.12.0/macos" # 改为实际路径
+cmake --preset macos-debug
+cmake --build --preset macos-debug
 ```
 
-首次运行时，在“系统设置 → 隐私与安全性”中允许“屏幕录制”和“辅助功能”，然后重新启动程序。
+将 Preset 名称中的 `debug` 改为 `release` 即构建 Release。Debug 默认只编译主程序，Release 默认同时编译测试。macOS Debug 使用本机架构，Release 使用 `x86_64;arm64` 通用架构，最低支持 macOS 14.4。
+
+### 运行、测试、打包
+
+以下以 Windows 为例；macOS 使用对应的 `macos-debug` / `macos-release`：
+
+```powershell
+cmake --build --preset windows-msvc-debug --target run
+cmake --build --preset windows-msvc-debug --target all
+ctest --preset windows-msvc-debug
+cmake --build --preset windows-msvc-release --target package
+```
+
+`run` 会编译并启动程序，等待从托盘菜单退出程序后才结束。运行测试前用 `--target all` 编译测试程序。同一构建目录中的构建命令应依次执行。
+
+打包前先配置并构建 Release，发布包输出到 `dist/`，包含 Qt 运行库和 SHA-256 校验文件。Windows 还需要 NSIS 3（`makensis.exe` 在 `PATH` 中，或设置 `NSIS_ROOT`）。macOS 当前使用 ad-hoc 签名，尚未公证。
+
+只构建应用可在配置时加 `-DBUILD_TESTING=OFF`。个人配置放入不纳入版本控制的 `CMakeUserPresets.json`。`scripts/` 中仅保留安装和自动更新代码。
+
+## 自动检查与发布
+
+[CI](.github/workflows/ci.yml) 在提交和 PR 时构建、测试并检查安装；OCR 测试依赖系统环境，单独运行并允许失败。
+
+更新 `CMakeLists.txt` 中的版本后，推送匹配的 `vX.Y.Z` 或 `vX.Y.Z-rc.1` 标签，由 [Release](.github/workflows/release.yml) 构建、测试、打包并上传 GitHub Releases。发布到其他仓库时设置 `SNIPASTE_RELEASE_REPOSITORY` 变量和 `RELEASE_TOKEN` Secret。

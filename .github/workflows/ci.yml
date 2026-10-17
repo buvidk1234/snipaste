@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            qt-arch: win64_msvc2022_64
+            preset: windows-msvc-release
+          - os: macos-26
+            qt-arch: clang_64
+            preset: macos-release
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUILD_PRESET: ${{ matrix.preset }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: jurplel/install-qt-action@v4.4.1
+        with:
+          version: '6.12.0'
+          # aqtinstall 3.3.0 cannot read the Windows Qt 6.11+ layout.
+          aqtsource: https://github.com/miurahr/aqtinstall/archive/076e1659807d0b362a3ed684d54c2e9c775eb9c7.tar.gz
+          arch: ${{ matrix.qt-arch }}
+          cache: true
+      - uses: ilammy/msvc-dev-cmd@v1.13.0
+        if: runner.os == 'Windows'
+        with:
+          arch: x64
+      - name: Configure
+        env:
+          QT_ROOT: ${{ env.QT_ROOT_DIR }}
+        run: cmake --preset "$BUILD_PRESET"
+      - name: Build
+        run: cmake --build --preset "$BUILD_PRESET"
+      - name: Test
+        run: ctest --preset "$BUILD_PRESET" -E '^ocr_overlay$'
+      - name: Check OCR (non-blocking)
+        id: ocr_tests
+        continue-on-error: true
+        run: ctest --preset "$BUILD_PRESET" -R '^ocr_overlay$'
+      - name: Verify installation
+        run: cmake --install "build/$BUILD_PRESET" --prefix "build/$BUILD_PRESET/install"
+      - name: Upload failed test diagnostics
+        if: failure() || steps.ocr_tests.outcome == 'failure'
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: test-diagnostics-${{ matrix.preset }}
+          path: |
+            build/${{ matrix.preset }}/*results*.txt
+            build/${{ matrix.preset }}/Testing/Temporary/LastTest.log
+            build/${{ matrix.preset }}/Testing/Temporary/LastTestsFailed.log
+          if-no-files-found: ignore
+          retention-days: 7

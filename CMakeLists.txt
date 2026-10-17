@@ -10,9 +10,47 @@ set(SNIPASTE_RELEASE_VERSION "" CACHE STRING "Release version, including an opti
 if(SNIPASTE_RELEASE_VERSION STREQUAL "")
     set(SNIPASTE_RELEASE_VERSION "${PROJECT_VERSION}")
 endif()
+if(NOT SNIPASTE_RELEASE_VERSION MATCHES "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$")
+    message(FATAL_ERROR "Invalid release version: ${SNIPASTE_RELEASE_VERSION}")
+endif()
+string(REGEX REPLACE "-.*$" "" snipaste_base_version "${SNIPASTE_RELEASE_VERSION}")
+if(NOT snipaste_base_version STREQUAL PROJECT_VERSION)
+    message(FATAL_ERROR "Release version ${SNIPASTE_RELEASE_VERSION} must match project VERSION ${PROJECT_VERSION}")
+endif()
+if(SNIPASTE_RELEASE_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+-(.+)$")
+    string(REPLACE "." ";" snipaste_prerelease_identifiers "${CMAKE_MATCH_1}")
+    foreach(identifier IN LISTS snipaste_prerelease_identifiers)
+        if(identifier MATCHES "^0[0-9]+$")
+            message(FATAL_ERROR "Numeric prerelease identifiers cannot have leading zeroes")
+        endif()
+    endforeach()
+endif()
 set(SNIPASTE_UPDATE_REPOSITORY "buvidk1234/snipaste" CACHE STRING "GitHub repository hosting update releases")
 
-include(cmake/MsvcNinjaDependencies.cmake)
+# Keep Ninja header tracking correct with localized MSVC console output.
+if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja")
+    set(snipaste_dependency_probe_dir "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/snipaste-dependency-probe")
+    file(MAKE_DIRECTORY "${snipaste_dependency_probe_dir}")
+    file(WRITE "${snipaste_dependency_probe_dir}/snipaste-dependency-probe.h" "#pragma once\n")
+    file(WRITE "${snipaste_dependency_probe_dir}/probe.cpp" "#include \"snipaste-dependency-probe.h\"\n")
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env "VSLANG=1033"
+            "${CMAKE_CXX_COMPILER}" /nologo /showIncludes /EP
+            "${snipaste_dependency_probe_dir}/probe.cpp"
+        OUTPUT_VARIABLE snipaste_dependency_probe_output
+        ERROR_VARIABLE snipaste_dependency_probe_error
+        RESULT_VARIABLE snipaste_dependency_probe_result
+        ENCODING AUTO
+    )
+    string(REGEX MATCH "(^|[\r\n])([^\r\n]*:)[ \t]+[^\r\n]*snipaste-dependency-probe[.]h"
+        snipaste_dependency_probe_match "${snipaste_dependency_probe_output}${snipaste_dependency_probe_error}")
+    if(NOT snipaste_dependency_probe_result EQUAL 0 OR NOT snipaste_dependency_probe_match)
+        message(FATAL_ERROR "Could not detect the MSVC /showIncludes prefix for Ninja dependency tracking.")
+    endif()
+    set(CMAKE_CXX_CL_SHOWINCLUDES_PREFIX "${CMAKE_MATCH_2}")
+    set(CMAKE_CL_SHOWINCLUDES_PREFIX "${CMAKE_CXX_CL_SHOWINCLUDES_PREFIX}")
+    list(PREPEND CMAKE_CXX_COMPILER_LAUNCHER "${CMAKE_COMMAND}" -E env "VSLANG=1033")
+endif()
 
 if(APPLE)
     # Carbon, AppKit, CoreGraphics, Accessibility and Vision are exposed
@@ -286,11 +324,13 @@ qt_add_library(snipaste_ui STATIC
     ${SNIPASTE_UI_SOURCES}
     ${SNIPASTE_UI_HEADERS}
 )
+# Parse stable Qt headers once for the UI translation units.
+target_precompile_headers(snipaste_ui PRIVATE <QtWidgets/QtWidgets>)
 
 qt_add_resources(snipaste_ui "update_scripts"
     PREFIX "/update"
-    BASE "${CMAKE_CURRENT_SOURCE_DIR}/scripts/updates"
-    FILES scripts/updates/install-windows.ps1 scripts/updates/install-macos.sh
+    BASE "${CMAKE_CURRENT_SOURCE_DIR}/scripts"
+    FILES scripts/install-windows.ps1 scripts/install-macos.sh
 )
 target_compile_definitions(snipaste_ui PRIVATE
     SNIPASTE_UPDATE_REPOSITORY=\"${SNIPASTE_UPDATE_REPOSITORY}\")
@@ -373,13 +413,140 @@ snipaste_apply_compile_options(snipaste)
 snipaste_apply_compile_options(snipaste_app)
 
 install(TARGETS snipaste
-    RUNTIME DESTINATION bin
+    RUNTIME DESTINATION .
     BUNDLE DESTINATION .
 )
 
-option(SNIPASTE_BUILD_TESTS "Build UI regression tests" OFF)
-if(SNIPASTE_BUILD_TESTS)
-    enable_testing()
+# Deploy the same self-contained installation for cmake --install and packages.
+set(snipaste_deploy_options)
+if(WIN32)
+    install(CODE "set(QT_DEPLOY_BIN_DIR .)\nset(QT_DEPLOY_PLUGINS_DIR .)")
+    list(APPEND snipaste_deploy_options --no-opengl-sw --no-system-d3d-compiler)
+elseif(APPLE)
+    list(APPEND snipaste_deploy_options -codesign=-)
+endif()
+qt_generate_deploy_app_script(
+    TARGET snipaste
+    OUTPUT_SCRIPT snipaste_deploy_script
+    NO_TRANSLATIONS
+    NO_COMPILER_RUNTIME
+    DEPLOY_TOOL_OPTIONS ${snipaste_deploy_options}
+)
+install(SCRIPT "${snipaste_deploy_script}")
+if(MSVC)
+    # Bundle the redistributable DLLs so portable builds need no separate setup.
+    set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION .)
+    include(InstallRequiredSystemLibraries)
+endif()
+
+get_filename_component(snipaste_qt_root "${Qt6_DIR}/../../.." ABSOLUTE)
+add_custom_target(run
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "QT_PLUGIN_PATH=${snipaste_qt_root}/plugins"
+        --modify "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
+        -- "$<TARGET_FILE:snipaste>"
+    DEPENDS snipaste
+    WORKING_DIRECTORY "$<TARGET_FILE_DIR:snipaste>"
+    COMMENT "Running Snipaste (exit from the tray menu to finish)"
+    USES_TERMINAL VERBATIM
+)
+# Generate the packaging script into the build tree from this build definition.
+set(snipaste_package_script [=[
+cmake_minimum_required(VERSION 3.28)
+
+if(NOT "$<CONFIG>" STREQUAL "Release")
+    message(FATAL_ERROR "Packages require a Release build")
+endif()
+
+set(stage "@CMAKE_CURRENT_BINARY_DIR@/package-stage")
+set(dist "@CMAKE_CURRENT_SOURCE_DIR@/dist")
+set(version "@SNIPASTE_RELEASE_VERSION@")
+if(WIN32)
+    find_program(makensis NAMES makensis.exe HINTS "$ENV{NSIS_ROOT}" REQUIRED)
+    set(runtime_libraries "@CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS@")
+    if(NOT runtime_libraries)
+        message(FATAL_ERROR "MSVC redistributable libraries were not found during configuration")
+    endif()
+    set(name "snipaste-${version}-windows-x64")
+elseif(APPLE)
+    set(name "snipaste-${version}-macos-universal")
+else()
+    message(FATAL_ERROR "Packages support Windows and macOS")
+endif()
+set(archive "${dist}/${name}.zip")
+
+# Replace only the staging directory owned by this build.
+file(REMOVE_RECURSE "${stage}")
+file(MAKE_DIRECTORY "${stage}" "${dist}")
+execute_process(COMMAND "${CMAKE_COMMAND}" --install "@CMAKE_CURRENT_BINARY_DIR@"
+    --config "$<CONFIG>" --prefix "${stage}"
+    COMMAND_ERROR_IS_FATAL ANY)
+if(WIN32)
+    file(WRITE "${stage}/README.txt" "Snipaste ${version}\nF1: screenshot. F3: paste.\n")
+    execute_process(COMMAND "${CMAKE_COMMAND}" -E tar cf "${archive}" --format=zip -- .
+        WORKING_DIRECTORY "${stage}" COMMAND_ERROR_IS_FATAL ANY)
+
+    file(GLOB_RECURSE entries LIST_DIRECTORIES TRUE RELATIVE "${stage}" "${stage}/*")
+    list(SORT entries ORDER DESCENDING)
+    set(uninstall_files "@CMAKE_CURRENT_BINARY_DIR@/uninstall-files.nsh")
+    file(WRITE "${uninstall_files}" "")
+    set(total_size 0)
+    foreach(entry IN LISTS entries)
+        if(IS_DIRECTORY "${stage}/${entry}")
+            set(command RMDir)
+        else()
+            set(command Delete)
+            file(SIZE "${stage}/${entry}" size)
+            math(EXPR total_size "${total_size} + ${size}")
+        endif()
+        string(REPLACE "/" "\\" entry "${entry}")
+        string(REPLACE "$" "$$" entry "${entry}")
+        string(REPLACE "\"" "$\\\"" entry "${entry}")
+        file(APPEND "${uninstall_files}" "${command} \"$INSTDIR\\${entry}\"\n")
+    endforeach()
+    math(EXPR installed_size "(${total_size} + 1023) / 1024")
+    set(installer "${dist}/${name}-setup.exe")
+    set(script_directory "@CMAKE_CURRENT_SOURCE_DIR@/scripts")
+    foreach(path IN ITEMS archive installer uninstall_files script_directory)
+        cmake_path(NATIVE_PATH ${path} nsis_${path})
+    endforeach()
+    execute_process(COMMAND "${makensis}" /V2 /INPUTCHARSET UTF8
+        "/DVERSION=${version}" "/DPRODUCT_VERSION=@PROJECT_VERSION@.0"
+        "/DARCHIVE=${nsis_archive}" "/DOUTPUT_FILE=${nsis_installer}"
+        "/DSCRIPT_DIRECTORY=${nsis_script_directory}"
+        "/DUNINSTALL_FILES=${nsis_uninstall_files}" "/DINSTALLED_SIZE=${installed_size}"
+        "@CMAKE_CURRENT_SOURCE_DIR@/scripts/installer.nsi"
+        COMMAND_ERROR_IS_FATAL ANY)
+    set(packages "${archive}" "${installer}")
+else()
+    set(app "${stage}/snipaste.app")
+    execute_process(COMMAND codesign --force --deep --sign - "${app}"
+        COMMAND_ERROR_IS_FATAL ANY)
+    execute_process(COMMAND codesign --verify --deep --strict "${app}"
+        COMMAND_ERROR_IS_FATAL ANY)
+    execute_process(COMMAND ditto -c -k --sequesterRsrc --keepParent "${app}" "${archive}"
+        COMMAND_ERROR_IS_FATAL ANY)
+    set(packages "${archive}")
+endif()
+
+foreach(package IN LISTS packages)
+    file(SHA256 "${package}" digest)
+    get_filename_component(filename "${package}" NAME)
+    file(WRITE "${package}.sha256" "${digest} *${filename}\n")
+    message(STATUS "Package: ${package}")
+endforeach()
+]=])
+string(CONFIGURE "${snipaste_package_script}" snipaste_package_script @ONLY)
+file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/Package-$<CONFIG>.cmake"
+    CONTENT "${snipaste_package_script}")
+add_custom_target(package
+    COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_BINARY_DIR}/Package-$<CONFIG>.cmake"
+    DEPENDS snipaste
+    USES_TERMINAL VERBATIM
+)
+
+include(CTest)
+if(BUILD_TESTING)
     find_package(Qt6 REQUIRED COMPONENTS Test)
 
     qt_add_executable(snipaste_paste_editor_tests tests/paste_editor_test.cpp)

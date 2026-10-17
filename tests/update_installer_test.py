@@ -1,5 +1,6 @@
 """Exercise the real Windows installer against isolated temporary packages."""
 
+import ctypes
 import hashlib
 import json
 import os
@@ -9,25 +10,62 @@ import tempfile
 import time
 import unittest
 import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts/updates/install-windows.ps1"
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts/install-windows.ps1"
 POWERSHELL = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
-SETUP = SCRIPT.parents[1] / "windows/setup-install.ps1"
 
 
 class WindowsInstallerTest(unittest.TestCase):
     @unittest.skipUnless(os.environ.get("SNIPASTE_TEST_SETUP"), "No packaged EXE supplied")
+    def test_packaged_installer_requests_admin_access(self):
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.LoadLibraryExW.argtypes = [ctypes.c_wchar_p, ctypes.c_void_p, ctypes.c_uint32]
+        kernel.LoadLibraryExW.restype = ctypes.c_void_p
+        kernel.FindResourceW.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+        kernel.FindResourceW.restype = ctypes.c_void_p
+        kernel.SizeofResource.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        kernel.SizeofResource.restype = ctypes.c_uint32
+        kernel.LoadResource.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        kernel.LoadResource.restype = ctypes.c_void_p
+        kernel.LockResource.argtypes = [ctypes.c_void_p]
+        kernel.LockResource.restype = ctypes.c_void_p
+        kernel.FreeLibrary.argtypes = [ctypes.c_void_p]
+        kernel.FreeLibrary.restype = ctypes.c_int
+        # Read PE resources as data, without executing the installer or showing UAC.
+        module = kernel.LoadLibraryExW(os.environ["SNIPASTE_TEST_SETUP"], None, 0x22)
+        self.assertTrue(module, ctypes.get_last_error())
+        try:
+            resource = kernel.FindResourceW(module, 1, 24)  # RT_MANIFEST
+            self.assertTrue(resource, ctypes.get_last_error())
+            size = kernel.SizeofResource(module, resource)
+            pointer = kernel.LockResource(kernel.LoadResource(module, resource))
+            self.assertTrue(pointer, ctypes.get_last_error())
+            manifest = ET.fromstring(ctypes.string_at(pointer, size))
+            level = manifest.find(".//{urn:schemas-microsoft-com:asm.v3}requestedExecutionLevel")
+            self.assertIsNotNone(level)
+            self.assertEqual(level.get("level"), "requireAdministrator")
+        finally:
+            kernel.FreeLibrary(module)
+
+    @unittest.skipUnless(os.environ.get("SNIPASTE_TEST_SETUP"), "No packaged EXE supplied")
     def test_exe_installs_and_updates_portable_without_registration(self):
         import winreg
 
+        if not ctypes.windll.shell32.IsUserAnAdmin():
+            self.skipTest("Run the packaged EXE integration test from an elevated shell")
+
         def registration():
-            try:
-                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\snipaste-open-source",
-                                    access=winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
-                    return winreg.QueryValueEx(key, "InstallDir")[0]
-            except FileNotFoundError:
-                return None
+            directories = []
+            for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                try:
+                    with winreg.OpenKey(hive, r"Software\snipaste-open-source",
+                                        access=winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+                        directories.append(winreg.QueryValueEx(key, "InstallDir")[0])
+                except FileNotFoundError:
+                    directories.append(None)
+            return directories
 
         before = registration()
         with tempfile.TemporaryDirectory(prefix="snipaste-update-exe-test-") as folder:
@@ -66,10 +104,8 @@ class WindowsInstallerTest(unittest.TestCase):
             root = Path(folder)
             destination = root / "普通 用户" / "Snipaste"
             archive = root / "package.zip"
-            # Match the two scripts embedded side by side in the EXE.
-            setup = root / SETUP.name
-            shutil.copy2(SETUP, setup)
-            shutil.copy2(SCRIPT, root / SCRIPT.name)
+            setup = root / SCRIPT.name
+            shutil.copy2(SCRIPT, setup)
             for version in (b"first", b"second"):
                 with zipfile.ZipFile(archive, "w") as package:
                     package.writestr("snipaste.exe", version)

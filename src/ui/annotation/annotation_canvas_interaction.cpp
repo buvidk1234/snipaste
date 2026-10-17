@@ -163,33 +163,21 @@ void AnnotationCanvas::updateToolCursor()
     // current thickness before the user starts drawing.
     if (m_tool == Tool::Number)
     {
-        const int cursorSize = qBound(24, qCeil(m_numberSize) + 8, 112);
-        QPixmap pixmap(cursorSize, cursorSize);
+        const qreal scale = m_image.isNull() ? 1.0 : imageRect().width() / m_image.width();
+        const int cursorSize = qCeil(m_numberSize * scale) + 8;
+        const qreal dpr = devicePixelRatioF();
+        QPixmap pixmap(qCeil(cursorSize * dpr), qCeil(cursorSize * dpr));
+        pixmap.setDevicePixelRatio(dpr);
         pixmap.fill(Qt::transparent);
         QPainter painter(&pixmap);
         painter.setRenderHint(QPainter::Antialiasing, true);
-        const QPointF center(cursorSize / 2.0, cursorSize / 2.0);
-        const qreal radius = m_numberSize / 2.0;
-        if (m_numberStyle == 0)
-        {
-            painter.setPen(QPen(Qt::white, 2.0));
-            painter.setBrush(m_penColor);
-            painter.drawEllipse(center, radius, radius);
-        }
-        else if (m_numberStyle == 1)
-        {
-            painter.setPen(QPen(m_penColor, 2.0));
-            painter.setBrush(Qt::NoBrush);
-            painter.drawEllipse(center, radius, radius);
-        }
-        QFont numberFont = font();
-        numberFont.setFamily(QStringLiteral("Microsoft YaHei UI"));
-        numberFont.setPixelSize(qMax(8, qRound(m_numberSize * 0.52)));
-        numberFont.setBold(true);
-        painter.setFont(numberFont);
-        painter.setPen(m_numberStyle == 0 ? Qt::white : m_penColor);
-        painter.drawText(QRectF(center.x() - radius, center.y() - radius, radius * 2.0, radius * 2.0),
-                         Qt::AlignCenter, QString::number(m_document.nextNumber()));
+        painter.translate(cursorSize / 2, cursorSize / 2);
+        painter.scale(scale, scale);
+        Shape preview = currentShape();
+        preview.start = preview.end = {};
+        preview.text = QString::number(m_document.nextNumber());
+        // Use the committed badge's renderer, including its font and rings.
+        annotation::AnnotationRenderer(m_image.size()).drawShape(painter, preview);
         painter.end();
         setCursor(QCursor(pixmap, cursorSize / 2, cursorSize / 2));
         return;
@@ -406,7 +394,8 @@ void AnnotationCanvas::mousePressEvent(QMouseEvent *event)
     if (hit >= 0 &&
         (hit == m_selectedShape || m_freeSelect || event->modifiers().testFlag(snipaste::platform::primaryModifier()) ||
          m_document.shapes().at(hit).tool == m_tool) &&
-        m_tool != Tool::Eraser && m_tool != Tool::Text && m_tool != Tool::Number)
+        m_tool != Tool::Eraser && m_tool != Tool::Text &&
+        (m_tool != Tool::Number || m_document.shapes().at(hit).tool != Tool::Number))
     {
         m_selectedShape = hit;
         syncSelectedStyle();
