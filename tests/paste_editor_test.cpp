@@ -264,13 +264,16 @@ void PasteEditorTest::flashChangesOnlyEdges()
     const qreal opacity = pin->windowOpacity();
     pin->flash();
     QVERIFY(edge() != normalEdge);
-    for (int frame = 0; frame < 7; ++frame) {
+    QElapsedTimer timer;
+    timer.start();
+    // Sample between the 80 ms timer ticks so delayed events do not hide colors.
+    while (pin->isFlashing() && timer.elapsed() < 2000) {
         const QImage current = edge();
         if (current != normalEdge && !flashEdges.contains(current))
             flashEdges.append(current);
         QCOMPARE(pin->grab(interior).toImage(), before);
         QCOMPARE(pin->windowOpacity(), opacity);
-        QTest::qWait(80);
+        QTest::qWait(10);
     }
     QVERIFY(!pin->isFlashing());
     QVERIFY(flashEdges.size() >= 3);

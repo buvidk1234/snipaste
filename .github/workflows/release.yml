@@ -29,15 +29,16 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
       repository: ${{ steps.version.outputs.repository }}
     steps:
-      - uses: actions/checkout@v7.0.1
-        with:
-          ref: ${{ inputs.tag || github.ref }}
       - id: version
         env:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
           RELEASE_REPOSITORY: ${{ vars.SNIPASTE_RELEASE_REPOSITORY || github.repository }}
         run: |
-          version="$(python scripts/release/version.py "$RELEASE_TAG")"
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo 'Expected a version tag such as v0.1.3 or v0.1.3-rc.1' >&2
+            exit 1
+          fi
+          version="${RELEASE_TAG#v}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "repository=$RELEASE_REPOSITORY" >> "$GITHUB_OUTPUT"
@@ -51,10 +52,17 @@ jobs:
           - os: windows-2025
             qt-arch: win64_msvc2022_64
             artifact: windows-x64
+            preset: windows-msvc-release
           - os: macos-26
             qt-arch: clang_64
             artifact: macos-universal
+            preset: macos-release
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUILD_PRESET: ${{ matrix.preset }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -67,45 +75,30 @@ jobs:
           aqtsource: https://github.com/miurahr/aqtinstall/archive/076e1659807d0b362a3ed684d54c2e9c775eb9c7.tar.gz
           arch: ${{ matrix.qt-arch }}
           cache: true
-      - name: Build Windows
+      - uses: ilammy/msvc-dev-cmd@v1.13.0
         if: runner.os == 'Windows'
-        shell: pwsh
+        with:
+          arch: x64
+      - name: Configure
         env:
+          QT_ROOT: ${{ env.QT_ROOT_DIR }}
           RELEASE_VERSION: ${{ needs.version.outputs.version }}
           UPDATE_REPOSITORY: ${{ needs.version.outputs.repository }}
         run: |
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
-          $vsInstall = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if (-not $vsInstall) { throw 'Visual Studio with the x64 C++ toolset was not found.' }
-          $devShell = Join-Path $vsInstall 'Common7/Tools/Launch-VsDevShell.ps1'
-          & $devShell -Arch amd64 -HostArch amd64 -SkipAutomaticLocation -NoLogo
-          if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) { throw 'The MSVC developer environment could not be initialized.' }
-          # Keep the runtime location available to the separate packaging step.
-          Add-Content -LiteralPath $env:GITHUB_ENV -Value "VSINSTALLDIR=$vsInstall" -Encoding utf8
-          cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR" -DSNIPASTE_BUILD_TESTS=ON -DSNIPASTE_RELEASE_VERSION="$env:RELEASE_VERSION" -DSNIPASTE_UPDATE_REPOSITORY="$env:UPDATE_REPOSITORY"
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          cmake --build build/release --parallel 4
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          ctest --test-dir build/release --output-on-failure -E '^ocr_overlay$'
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-      - name: Build macOS
-        if: runner.os == 'macOS'
-        env:
-          RELEASE_VERSION: ${{ needs.version.outputs.version }}
-          UPDATE_REPOSITORY: ${{ needs.version.outputs.repository }}
-        run: |
-          cmake -S . -B build/release -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" '-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64' -DCMAKE_OSX_DEPLOYMENT_TARGET=14.4 -DSNIPASTE_BUILD_TESTS=ON -DSNIPASTE_RELEASE_VERSION="$RELEASE_VERSION" -DSNIPASTE_UPDATE_REPOSITORY="$UPDATE_REPOSITORY"
-          cmake --build build/release --parallel 3
-          ctest --test-dir build/release --output-on-failure -E '^ocr_overlay$'
+          cmake --preset "$BUILD_PRESET" -DSNIPASTE_RELEASE_VERSION="$RELEASE_VERSION" -DSNIPASTE_UPDATE_REPOSITORY="$UPDATE_REPOSITORY"
+      - name: Build
+        run: cmake --build --preset "$BUILD_PRESET"
+      - name: Test
+        run: ctest --preset "$BUILD_PRESET" -E '^ocr_overlay$'
       - name: Check OCR (non-blocking)
         id: ocr_tests
         continue-on-error: true
-        run: ctest --test-dir build/release --output-on-failure -R '^ocr_overlay$'
+        run: ctest --preset "$BUILD_PRESET" -R '^ocr_overlay$'
       - name: Print failed test diagnostics
         if: failure() || steps.ocr_tests.outcome == 'failure'
         shell: bash
         run: |
-          for log in build/release/*test-results.txt build/release/Testing/Temporary/LastTest.log; do
+          for log in build/"$BUILD_PRESET"/*results*.txt build/"$BUILD_PRESET"/Testing/Temporary/LastTest.log; do
             if [ -f "$log" ]; then
               echo "::group::$log"
               cat "$log"
@@ -118,9 +111,9 @@ jobs:
         with:
           name: test-diagnostics-${{ matrix.artifact }}
           path: |
-            build/release/*test-results.txt
-            build/release/Testing/Temporary/LastTest.log
-            build/release/Testing/Temporary/LastTestsFailed.log
+            build/${{ matrix.preset }}/*results*.txt
+            build/${{ matrix.preset }}/Testing/Temporary/LastTest.log
+            build/${{ matrix.preset }}/Testing/Temporary/LastTestsFailed.log
           if-no-files-found: ignore
           retention-days: 7
       - name: Package Windows
@@ -138,15 +131,14 @@ jobs:
           if (-not (Test-Path -LiteralPath (Join-Path $env:NSIS_ROOT 'makensis.exe') -PathType Leaf)) {
             throw "NSIS compiler was not found after extraction: $env:NSIS_ROOT"
           }
-          ./scripts/windows/package.ps1 -BuildDirectory build/release -QtRoot $env:QT_ROOT_DIR -Version $env:RELEASE_VERSION -Installer
+          cmake --build --preset $env:BUILD_PRESET --target package
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           $env:SNIPASTE_TEST_SETUP = (Resolve-Path "dist/snipaste-$env:RELEASE_VERSION-windows-x64-setup.exe").Path
-          python tests/update_installer_test.py WindowsInstallerTest.test_exe_installs_and_updates_portable_without_registration
+          python tests/update_installer_test.py
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Package macOS
         if: runner.os == 'macOS'
-        env:
-          RELEASE_VERSION: ${{ needs.version.outputs.version }}
-        run: bash scripts/macos/package.sh build/release "$QT_ROOT_DIR" "$RELEASE_VERSION"
+        run: cmake --build --preset "$BUILD_PRESET" --target package
       - uses: actions/upload-artifact@v7.0.2
         with:
           name: ${{ matrix.artifact }}

@@ -40,6 +40,12 @@ void ApplicationController::registerUtilityCommands()
                                         [this](QWidget *parent) { m_updates.checkNow(parent); });
                                     QObject::connect(m_preferences.get(), &QDialog::accepted, this,
                                                      [this] { applySettings(); });
+                                    // Release the hidden widget tree after the dialog finishes closing.
+                                    QObject::connect(m_preferences.get(), &QDialog::finished, this,
+                                                     [this] {
+                                                         if (m_preferences && !m_preferences->isVisible())
+                                                             m_preferences.reset();
+                                                     }, Qt::QueuedConnection);
                                     m_preferences->show();
                                 }});
     m_commands.registerCommand({

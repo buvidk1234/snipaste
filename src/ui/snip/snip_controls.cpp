@@ -710,7 +710,7 @@ void SnipOverlay::showOutputMenu(const QPoint &position, bool shareOnly)
             close();
         });
         if (m_copyAsFileMode != static_cast<int>(CopyAsFileMode::Disabled))
-            copyFile->setShortcut(QKeySequence(snipaste::platform::primaryModifier() | Qt::ALT | Qt::Key_S));
+            copyFile->setShortcut(QKeySequence(snipaste::platform::primaryModifier() | Qt::AltModifier | Qt::Key_S));
         menu->addAction(QStringLiteral("保存图像…"), this, [this] { saveSelection(); })->setShortcut(QKeySequence::Save);
 #ifdef Q_OS_WIN
         if (QGuiApplication::platformName() != QStringLiteral("offscreen")) {
@@ -820,9 +820,9 @@ void SnipOverlay::showOutputMenu(const QPoint &position, bool shareOnly)
     auto *hints = menu->addAction(QStringLiteral("快捷键提示"));
     a1->setShortcut(QKeySequence::Copy);
     if (m_copyAsFileMode != static_cast<int>(CopyAsFileMode::Disabled))
-        a2->setShortcut(QKeySequence(snipaste::platform::primaryModifier() | Qt::ALT | Qt::Key_S));
+        a2->setShortcut(QKeySequence(snipaste::platform::primaryModifier() | Qt::AltModifier | Qt::Key_S));
     a3->setShortcut(QKeySequence::Save);
-    a4->setShortcut(QKeySequence(snipaste::platform::primaryModifier() | Qt::SHIFT | Qt::Key_S));
+    a4->setShortcut(QKeySequence(snipaste::platform::primaryModifier() | Qt::ShiftModifier | Qt::Key_S));
     a5->setShortcut(QKeySequence::Print);
     a6->setShortcut(QKeySequence(snipaste::platform::primaryModifier() | Qt::Key_T));
     a8->setShortcut(QKeySequence(Qt::Key_F5));

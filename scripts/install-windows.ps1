@@ -1,9 +1,41 @@
-param([Parameter(Mandatory = $true)][string]$Manifest)
+[CmdletBinding(DefaultParameterSetName = 'Update')]
+param(
+    [Parameter(Mandatory = $true, ParameterSetName = 'Update')][string]$Manifest,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Install')][string]$Archive,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Install')]
+    [Parameter(Mandatory = $true, ParameterSetName = 'Close')][string]$Destination,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Close')][switch]$CloseOnly
+)
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$settings = Get-Content -LiteralPath $Manifest -Raw -Encoding UTF8 | ConvertFrom-Json
-$taskRoot = [IO.Path]::GetFullPath((Split-Path -Path $Manifest -Parent))
+if ($Manifest) {
+    $settings = Get-Content -LiteralPath $Manifest -Raw -Encoding UTF8 | ConvertFrom-Json
+    $taskRoot = [IO.Path]::GetFullPath((Split-Path -Path $Manifest -Parent))
+} else {
+    try {
+        $destinationPath = [IO.Path]::GetFullPath($Destination)
+        if ($destinationPath -eq [IO.Path]::GetPathRoot($destinationPath)) { throw 'Choose an application folder.' }
+        $executable = Join-Path $destinationPath 'snipaste.exe'
+        $running = @(Get-Process snipaste -ErrorAction SilentlyContinue | Where-Object { $_.Path -ieq $executable })
+        if ($running.Count -gt 0) {
+            Start-Process -FilePath $executable -ArgumentList 'app.quit' -WindowStyle Hidden -Wait
+            $running | Wait-Process -Timeout 30 -ErrorAction Stop
+        }
+        if ($CloseOnly) { exit 0 }
+        $taskRoot = Join-Path ([IO.Path]::GetTempPath()) ('snipaste-update-' + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $taskRoot | Out-Null
+        $package = Join-Path $taskRoot 'package.zip'
+        Copy-Item -LiteralPath $Archive -Destination $package
+        $settings = [pscustomobject]@{
+            archive = $package; destination = $destinationPath
+            processId = 0; restart = $false; newInstall = $true; arguments = @()
+        }
+    } catch {
+        Write-Output $_.Exception.Message
+        exit 1
+    }
+}
 $destination = [IO.Path]::GetFullPath($settings.destination)
 $archive = [IO.Path]::GetFullPath($settings.archive)
 $staging = Join-Path $taskRoot 'expanded'
@@ -32,8 +64,6 @@ try {
          -not (Test-Path -LiteralPath (Join-Path $destination 'snipaste.exe') -PathType Leaf))) {
         throw 'Invalid update paths.'
     }
-    # Get-FileHash is a module function that may be unavailable when Windows
-    # PowerShell inherits a PowerShell 7 module path. Use the system .NET API.
     $sha256 = [Security.Cryptography.SHA256]::Create()
     try {
         $archiveStream = [IO.File]::OpenRead($archive)
@@ -45,7 +75,7 @@ try {
     } finally {
         $sha256.Dispose()
     }
-    if ($archiveHash -ne $settings.sha256) {
+    if ($Manifest -and $archiveHash -ne $settings.sha256) {
         throw 'The downloaded archive checksum has changed.'
     }
     $isSetup = [IO.Path]::GetExtension($archive) -ieq '.exe'
@@ -81,7 +111,11 @@ try {
     if ($isSetup) {
         $setup = New-Object Diagnostics.ProcessStartInfo
         $setup.FileName = $archive
-        $setup.UseShellExecute = $false
+        # The EXE installs into Program Files and requests administrator access.
+        # Keep this helper unelevated so the application restarts as its user.
+        $setup.UseShellExecute = $true
+        $setup.Verb = 'runas'
+        $setup.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
         # NSIS requires /D to be last and its path must not be quoted.
         $setup.Arguments = '/S ' + $(if ($settings.portable) { '/PORTABLE ' } else { '' }) + '/D=' + $destination
         $process = [Diagnostics.Process]::Start($setup)

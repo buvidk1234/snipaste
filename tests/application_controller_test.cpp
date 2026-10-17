@@ -270,10 +270,22 @@ class ApplicationControllerTest final : public QObject
             preferences->close();
             QVERIFY(!preferences->isVisible());
             QCOMPARE(config.value(QStringLiteral("capture/borderWidth")).toInt(), 7);
+            QTRY_VERIFY(!preferences);
             QVERIFY(controller.dispatchArguments({QStringLiteral("open-preferences")}, false));
             for (auto *widget : QApplication::topLevelWidgets())
                 if (auto *dialog = dynamic_cast<ui::PreferencesDialog *>(widget); dialog && dialog->isVisible())
                     preferences = dialog;
+            QVERIFY(preferences);
+            QVERIFY(preferences->isVisible());
+            QCOMPARE(preferences->findChild<QSpinBox *>(QStringLiteral("captureBorderWidth"))->value(), 7);
+            preferences->close();
+            QVERIFY(controller.dispatchArguments({QStringLiteral("open-preferences")}, false));
+            QVERIFY(!preferences);
+            for (auto *widget : QApplication::topLevelWidgets())
+                if (auto *dialog = dynamic_cast<ui::PreferencesDialog *>(widget); dialog && dialog->isVisible())
+                    preferences = dialog;
+            QVERIFY(preferences);
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
             QVERIFY(preferences);
             QVERIFY(preferences->isVisible());
         }
