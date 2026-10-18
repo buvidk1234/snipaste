@@ -83,7 +83,6 @@ bool SingleInstance::acquire(const QString &key)
                     QStringList arguments;
                     payloadStream >> arguments;
                     if (payloadStream.status() == QDataStream::Ok) {
-                        socket->setProperty("snipasteLastArguments", arguments);
                         emit messageReceived(arguments);
                         emit messageReceivedWithSocket(arguments, socket);
                     }
@@ -92,10 +91,8 @@ bool SingleInstance::acquire(const QString &key)
                 if (consumed > 0 && consumed <= buffer.size())
                     buffer.remove(0, int(consumed));
                 socket->setProperty("snipasteMessageBuffer", buffer);
-                const QStringList arguments = socket->property("snipasteLastArguments").toStringList();
-                const bool awaitCompletion = arguments.contains(QStringLiteral("--snipaste-await"));
-                if (buffer.isEmpty() && !awaitCompletion)
-                    socket->disconnectFromServer();
+                // Let the sender close after flushing. Closing here can race
+                // the final Windows pipe-write completion notification.
             });
             connect(socket, &QLocalSocket::disconnected, socket, &QObject::deleteLater);
         }

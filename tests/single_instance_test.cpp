@@ -1,9 +1,11 @@
 #include "platform/windows/single_instance.h"
 
+#include <QDataStream>
 #include <QElapsedTimer>
 #include <QFuture>
 #include <QFutureWatcher>
 #include <QLocalSocket>
+#include <QPointer>
 #include <QSignalSpy>
 #include <QTest>
 #include <QUuid>
@@ -26,6 +28,7 @@ class SingleInstanceTest : public QObject
 
 private slots:
     void messageReportsSuccessfulDelivery();
+    void senderOwnsOneWayConnectionLifetime();
     void largeMessageArrivesIntact();
     void waitsForExplicitCompletion();
     void immediateCompletionIsAccepted();
@@ -41,14 +44,52 @@ void SingleInstanceTest::messageReportsSuccessfulDelivery()
     QSignalSpy received(&server, &SingleInstance::messageReceived);
     const QStringList arguments{QStringLiteral("paste"), QStringLiteral("中文参数"), QString()};
 
-    const auto sent = QtConcurrent::run([key, arguments] {
+    QFutureWatcher<bool> sent;
+    QSignalSpy finished(&sent, &QFutureWatcher<bool>::finished);
+    QElapsedTimer elapsed;
+    elapsed.start();
+    sent.setFuture(QtConcurrent::run([key, arguments] {
         SingleInstance client;
         return client.sendMessage(key, arguments);
-    });
-    QTRY_VERIFY_WITH_TIMEOUT(sent.isFinished(), 3000);
-    QVERIFY(sent.result());
+    }));
+    QVERIFY(finished.size() > 0 || finished.wait(3000));
+    QVERIFY2(sent.result(), qPrintable(QStringLiteral("IPC send failed after %1 ms; received %2 message(s)")
+                                         .arg(elapsed.elapsed()).arg(received.size())));
     QTRY_COMPARE_WITH_TIMEOUT(received.size(), 1, 3000);
     QCOMPARE(received.first().first().toStringList(), arguments);
+}
+
+void SingleInstanceTest::senderOwnsOneWayConnectionLifetime()
+{
+    SingleInstance server;
+    const QString key = serverKey();
+    QVERIFY(server.acquire(key));
+    QSignalSpy received(&server, &SingleInstance::messageReceived);
+    QPointer<QLocalSocket> accepted;
+    connect(&server, &SingleInstance::messageReceivedWithSocket, &server,
+        [&accepted](const QStringList &, QLocalSocket *socket) { accepted = socket; });
+    const QStringList arguments{QStringLiteral("paste")};
+    QByteArray payload;
+    QDataStream payloadStream(&payload, QIODevice::WriteOnly);
+    payloadStream << arguments;
+
+    QLocalSocket client;
+    client.connectToServer(key, QIODevice::WriteOnly);
+    QVERIFY(client.waitForConnected(1000));
+    QDataStream stream(&client);
+    stream << quint32(payload.size());
+    QCOMPARE(stream.writeRawData(payload.constData(), payload.size()), payload.size());
+    client.flush();
+    QVERIFY(received.size() > 0 || received.wait(3000));
+    QCOMPARE(received.first().first().toStringList(), arguments);
+    // A receiver-side close can race Windows' final pipe-write notification.
+    // The short-lived sender closes the connection after its writes complete.
+    QVERIFY(accepted);
+    QCOMPARE(accepted->state(), QLocalSocket::ConnectedState);
+    QCOMPARE(client.state(), QLocalSocket::ConnectedState);
+
+    client.disconnectFromServer();
+    QTRY_VERIFY_WITH_TIMEOUT(accepted.isNull(), 3000);
 }
 
 void SingleInstanceTest::largeMessageArrivesIntact()
