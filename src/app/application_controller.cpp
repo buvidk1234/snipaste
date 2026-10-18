@@ -88,9 +88,13 @@ bool ApplicationController::eventFilter(QObject *watched, QEvent *event)
             if (event->type() == QEvent::Create)
             {
                 // Native dialogs read these settings before polish/show events.
-                // Only the owning window should be blocked; independent pins
-                // must remain movable even if they overlap the dialog.
+                // Only the owning window should be blocked when one exists.
+#ifdef Q_OS_MACOS
+                // Cocoa requires a parent for window-modal native dialogs.
+                widget->setWindowModality(widget->parentWidget() ? Qt::WindowModal : Qt::ApplicationModal);
+#else
                 widget->setWindowModality(Qt::WindowModal);
+#endif
                 widget->setWindowFlag(Qt::WindowStaysOnTopHint);
             }
             else if (auto *parent = widget->parentWidget())

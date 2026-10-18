@@ -134,13 +134,13 @@ HotkeySpec parseHotkey(const QString &text)
     }
 #elif defined(Q_OS_MACOS)
     if (qtModifiers.testFlag(Qt::ControlModifier))
-        result.modifiers |= controlKey;
+        result.modifiers |= cmdKey;
     if (qtModifiers.testFlag(Qt::AltModifier))
         result.modifiers |= optionKey;
     if (qtModifiers.testFlag(Qt::ShiftModifier))
         result.modifiers |= shiftKey;
     if (qtModifiers.testFlag(Qt::MetaModifier))
-        result.modifiers |= cmdKey;
+        result.modifiers |= controlKey;
 
     static constexpr unsigned short letters[] = {
         kVK_ANSI_A, kVK_ANSI_B, kVK_ANSI_C, kVK_ANSI_D, kVK_ANSI_E, kVK_ANSI_F, kVK_ANSI_G,
@@ -219,7 +219,12 @@ HotkeySpec parseHotkey(const QString &text)
     Q_UNUSED(qtModifiers)
     Q_UNUSED(base)
 #endif
+#if defined(Q_OS_MACOS)
+    // A is a valid macOS virtual key even though its native key code is zero.
+    result.valid = result.key != 0 || base == Qt::Key_A;
+#else
     result.valid = result.key != 0;
+#endif
     return result;
 }
 

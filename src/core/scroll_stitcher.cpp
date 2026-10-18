@@ -1,6 +1,7 @@
 #include "core/scroll_stitcher.h"
 #include "core/scroll_frame_matcher.h"
 
+#include <QColorSpace>
 #include <QPainter>
 #include <QtGlobal>
 #include <algorithm>
@@ -46,6 +47,7 @@ const QImage &VerticalScrollStitcher::image() const
     QImage combined(m_size, QImage::Format_RGB32);
     if (combined.isNull())
         return m_image;
+    combined.setColorSpace(m_strips.first().pixels.colorSpace());
     for (const auto &strip : m_strips) {
         const qsizetype rowBytes = qsizetype(m_size.width()) * sizeof(QRgb);
         for (int y = 0; y < strip.pixels.height(); ++y)

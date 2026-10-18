@@ -144,11 +144,48 @@ class ApplicationControllerTest final : public QObject
         QColorDialog color;
         for (const auto *window : QList<QDialog *>{&dialog, &message, &input, &file, &color})
         {
+#ifdef Q_OS_MACOS
+            QCOMPARE(window->windowModality(), Qt::ApplicationModal);
+#else
             QCOMPARE(window->windowModality(), Qt::WindowModal);
+#endif
             QVERIFY(window->windowFlags().testFlag(Qt::WindowStaysOnTopHint));
         }
+        QWidget owner;
+        QDialog ownedDialog(&owner);
+        QMessageBox ownedMessage(&owner);
+        QInputDialog ownedInput(&owner);
+        QFileDialog ownedFile(&owner);
+        QColorDialog ownedColor(&owner);
+        for (const auto *window : QList<QDialog *>{&ownedDialog, &ownedMessage, &ownedInput, &ownedFile, &ownedColor})
+            QCOMPARE(window->windowModality(), Qt::WindowModal);
         ui::PreferencesDialog preferences(config);
         QCOMPARE(preferences.windowModality(), Qt::NonModal);
+    }
+    void standaloneNativeWarningCanRunModally()
+    {
+#ifndef Q_OS_MACOS
+        QSKIP("Native warning regression requires Cocoa.");
+#else
+        if (QGuiApplication::platformName() != QStringLiteral("cocoa"))
+            QSKIP("Native warning regression requires Cocoa.");
+        QTemporaryDir directory;
+        core::ConfigStore config(directory.filePath(QStringLiteral("config.ini")));
+        configureTest(config, directory.path());
+        platform::SingleInstance instance;
+        app::ApplicationController controller(*static_cast<QApplication *>(qApp), config, instance);
+        QMessageBox message(QMessageBox::Warning, QStringLiteral("Native modal regression"),
+                            QStringLiteral("This test closes its own warning automatically."), QMessageBox::Ok);
+        QCOMPARE(message.windowModality(), Qt::ApplicationModal);
+        QVERIFY(!message.testOption(QMessageBox::Option::DontUseNativeDialog));
+        bool closed = false;
+        QTimer::singleShot(50, &message, [&] {
+            closed = true;
+            message.done(QMessageBox::Ok);
+        });
+        QCOMPARE(message.exec(), int(QMessageBox::Ok));
+        QVERIFY(closed);
+#endif
     }
     void dialogsKeepUnrelatedPinsInteractive_data()
     {
@@ -200,8 +237,13 @@ class ApplicationControllerTest final : public QObject
         QCOMPARE(dialog.exec(), int(QDialog::Accepted));
         QVERIFY(exercised);
         QVERIFY(abovePin);
+#ifdef Q_OS_MACOS
+        QCOMPARE(pin.pos(), parented ? pinPosition + delta : pinPosition);
+        QCOMPARE(owner.pos(), ownerPosition);
+#else
         QCOMPARE(pin.pos(), pinPosition + delta);
         QCOMPARE(owner.pos(), parented ? ownerPosition : ownerPosition + delta);
+#endif
         const QPoint restoredPosition = owner.pos();
         drag(owner);
         QCOMPARE(owner.pos(), restoredPosition + delta);

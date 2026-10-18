@@ -58,6 +58,9 @@ ScrollCapturePreview::ScrollCapturePreview(QWidget *parent)
     setAttribute(Qt::WA_DeleteOnClose, false);
     setAttribute(Qt::WA_ShowWithoutActivating, true);
     setAttribute(Qt::WA_TranslucentBackground, true);
+#if defined(Q_OS_MACOS)
+    setAttribute(Qt::WA_MacAlwaysShowToolWindow, true);
+#endif
     setFocusPolicy(Qt::NoFocus);
     setFixedWidth(260);
     setMinimumHeight(240);

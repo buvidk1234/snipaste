@@ -50,7 +50,8 @@ GlobalHotkey::~GlobalHotkey()
 bool GlobalHotkey::registerKey(int id, unsigned int modifiers, unsigned int key)
 {
     unregisterKey();
-    if (id <= 0 || key == 0)
+    // kVK_ANSI_A is zero; the caller validates whether a key is supported.
+    if (id <= 0)
         return false;
 
     EventTypeSpec eventType{ kEventClassKeyboard, kEventHotKeyPressed };
@@ -112,7 +113,7 @@ void GlobalHotkey::setEnabled(bool enabled)
         unregisterKey();
         return;
     }
-    if (m_id != 0 && m_key != 0)
+    if (m_id != 0)
         registerKey(m_id, m_modifiers, m_key);
 }
 

@@ -369,6 +369,10 @@ void PasteEditorTest::toolbarPreservesCaptureButtons()
     expected.removeOne(QStringLiteral("贴图"));
     expected.append(QStringLiteral("完成编辑"));
     QCOMPARE(names(actions), expected);
+#if defined(Q_OS_WIN) || defined(Q_OS_MACOS)
+    auto *scroll = actions->findChild<QToolButton *>(QStringLiteral("滚动截图"));
+    QVERIFY(scroll && scroll->isEnabled());
+#endif
     QCOMPARE(actions->height(), captureActions->height());
     QString captureStyle = captureToolbar->styleSheet();
     captureStyle.replace(QStringLiteral("captureToolbar"), QStringLiteral("pasteToolbar"));

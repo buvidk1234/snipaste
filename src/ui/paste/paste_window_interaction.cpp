@@ -38,7 +38,7 @@ bool PasteWindow::mouseModifierMatches(const QString &value, Qt::KeyboardModifie
     if (expected.isEmpty() || expected == QStringLiteral("无"))
         return actual == Qt::NoModifier;
     if (expected == QStringLiteral("Ctrl"))
-        return actual == Qt::ControlModifier;
+        return actual == snipaste::platform::physicalControlModifier();
     if (expected == QStringLiteral("Command") || expected == QStringLiteral("Cmd"))
         return actual == snipaste::platform::primaryModifier();
     if (expected == QStringLiteral("Shift"))
@@ -588,7 +588,7 @@ void PasteWindow::wheelEvent(QWheelEvent *event)
         return;
     }
     const bool opacityAction =
-        mouseModifierMatches(mouseAction(4, QStringLiteral("Ctrl")), event->modifiers()) &&
+        mouseModifierMatches(mouseAction(4, snipaste::platform::primaryModifierText()), event->modifiers()) &&
         mouseAction(6, QStringLiteral("鼠标滚轮")) == QStringLiteral("鼠标滚轮");
     if (opacityAction)
     {

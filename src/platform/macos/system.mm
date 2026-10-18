@@ -1,6 +1,10 @@
 #include "platform/macos/system.h"
 
 #include <QGuiApplication>
+#include <QHash>
+#include <QMetaObject>
+#include <QObject>
+#include <QPointer>
 
 #import <AppKit/AppKit.h>
 #import <ApplicationServices/ApplicationServices.h>
@@ -8,6 +12,18 @@
 namespace snipaste::platform {
 
 namespace {
+
+struct ScrollInputMonitor {
+    id monitor = nil;
+    QPointer<QObject> receiver;
+    QMetaObject::Connection destroyedConnection;
+    QRect selection;
+    QPoint dragStart;
+    bool mouseDown = false;
+    bool dragged = false;
+};
+
+QHash<QObject *, ScrollInputMonitor *> scrollInputMonitors;
 
 QString qStringFromNSString(NSString *value)
 {
@@ -117,6 +133,60 @@ bool setMacWindowCollectionBehavior(quintptr nativeId, bool enabled)
         window.collectionBehavior = behavior;
         return true;
     }
+}
+
+void startMacScrollInputMonitor(QObject *receiver, const QRect &globalSelection)
+{
+    stopMacScrollInputMonitor(receiver);
+    if (!receiver || globalSelection.isEmpty()
+        || QGuiApplication::platformName() != QStringLiteral("cocoa"))
+        return;
+    auto *state = new ScrollInputMonitor;
+    state->receiver = receiver;
+    state->selection = globalSelection;
+    const NSEventMask mask = NSEventMaskScrollWheel | NSEventMaskLeftMouseDown
+        | NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp;
+    state->monitor = [NSEvent addGlobalMonitorForEventsMatchingMask:mask handler:^(NSEvent *event) {
+        if (!state->receiver || !event.CGEvent)
+            return;
+        const CGPoint nativePoint = CGEventGetLocation(event.CGEvent);
+        const QPoint point(qRound(nativePoint.x), qRound(nativePoint.y));
+        const bool insideSelection = state->selection.contains(point);
+        if (event.type == NSEventTypeLeftMouseDown) {
+            state->mouseDown = insideSelection;
+            state->dragged = false;
+            state->dragStart = point;
+        } else if (event.type == NSEventTypeLeftMouseDragged && state->mouseDown) {
+            const QPoint delta = point - state->dragStart;
+            if (qAbs(delta.x()) >= 4 || qAbs(delta.y()) >= 4)
+                state->dragged = true;
+        }
+        const bool wheel = event.type == NSEventTypeScrollWheel && insideSelection;
+        const bool dragRelease = event.type == NSEventTypeLeftMouseUp && state->dragged;
+        if (wheel || dragRelease)
+            QMetaObject::invokeMethod(state->receiver, "scheduleManualScrollCapture", Qt::QueuedConnection);
+        if (event.type == NSEventTypeLeftMouseUp) {
+            state->mouseDown = false;
+            state->dragged = false;
+        }
+    }];
+    if (!state->monitor) {
+        delete state;
+        return;
+    }
+    state->destroyedConnection = QObject::connect(receiver, &QObject::destroyed,
+        [receiver] { stopMacScrollInputMonitor(receiver); });
+    scrollInputMonitors.insert(receiver, state);
+}
+
+void stopMacScrollInputMonitor(QObject *receiver)
+{
+    auto *state = scrollInputMonitors.take(receiver);
+    if (!state)
+        return;
+    QObject::disconnect(state->destroyedConnection);
+    [NSEvent removeMonitor:state->monitor];
+    delete state;
 }
 
 } // namespace snipaste::platform

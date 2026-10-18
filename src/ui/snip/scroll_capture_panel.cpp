@@ -4,6 +4,7 @@
 #include <QGraphicsDropShadowEffect>
 #include <QHBoxLayout>
 #include <QKeyEvent>
+#include <QKeySequence>
 #include <QLabel>
 #include <QPainter>
 #include <QPainterPath>
@@ -94,6 +95,9 @@ ScrollCapturePanel::ScrollCapturePanel(QWidget *parent)
     setAttribute(Qt::WA_DeleteOnClose, false);
     setAttribute(Qt::WA_ShowWithoutActivating, true);
     setAttribute(Qt::WA_TranslucentBackground, true);
+#if defined(Q_OS_MACOS)
+    setAttribute(Qt::WA_MacAlwaysShowToolWindow, true);
+#endif
     setFocusPolicy(Qt::StrongFocus);
     setFixedHeight(72);
     setMinimumWidth(320);
@@ -132,7 +136,8 @@ ScrollCapturePanel::ScrollCapturePanel(QWidget *parent)
                               QStringLiteral("编辑标注"),
                               makeEditIcon());
     m_save = makeActionButton(QStringLiteral("scrollCaptureSave"),
-                              QStringLiteral("保存长截图 (Ctrl+S)"),
+                              QStringLiteral("保存长截图 (%1)")
+                                  .arg(QKeySequence(QKeySequence::Save).toString(QKeySequence::NativeText)),
                               makeSaveIcon());
     m_cancel = makeActionButton(QStringLiteral("scrollCaptureCancel"),
                                 QStringLiteral("取消 (Esc)"),

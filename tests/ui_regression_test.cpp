@@ -17,7 +17,12 @@
 #include "ui/history/screenshot_history_dialog.h"
 #include "core/command/command_registry.h"
 #include "platform/keyboard.h"
+#include "platform/desktop_integration.h"
 #include "platform/screen_capture.h"
+
+#ifdef Q_OS_MACOS
+#include <Carbon/Carbon.h>
+#endif
 
 #include <QApplication>
 #include <QBackingStore>
@@ -76,6 +81,8 @@ class UiRegressionTest : public QObject
 {
     Q_OBJECT
 private slots:
+    void primaryShortcutsMatchPlatformBindings();
+    void macGlobalHotkeyMapping();
     void preferencesUpdateCheckUsesCurrentSettings();
     void updaterOffersInAppInstallationForLocalBuild();
     void preferencesCloseSavesWithoutQuitting();
@@ -198,6 +205,34 @@ void UiRegressionTest::updaterOffersInAppInstallationForLocalBuild()
     QVERIFY(!explanation.contains(QStringLiteral("解压")));
 #else
     QSKIP("Windows local-build update regression");
+#endif
+}
+
+void UiRegressionTest::primaryShortcutsMatchPlatformBindings()
+{
+    QCOMPARE(platform::primaryKeySequence(Qt::Key_C), QKeySequence(QKeySequence::Copy));
+    QCOMPARE(platform::primaryKeySequence(Qt::Key_V), QKeySequence(QKeySequence::Paste));
+    QCOMPARE(platform::primaryKeySequence(Qt::Key_A), QKeySequence(QKeySequence::SelectAll));
+    QCOMPARE(QKeySequence(platform::primaryPortableShortcutText(QStringLiteral("C")),
+                          QKeySequence::PortableText), QKeySequence(QKeySequence::Copy));
+}
+
+void UiRegressionTest::macGlobalHotkeyMapping()
+{
+#ifdef Q_OS_MACOS
+    const auto command = platform::parseHotkey(QStringLiteral("Ctrl+A"));
+    QVERIFY(command.valid);
+    QCOMPARE(command.key, unsigned(kVK_ANSI_A));
+    QCOMPARE(command.modifiers, unsigned(cmdKey));
+    const auto control = platform::parseHotkey(QStringLiteral("Meta+Shift+A"));
+    QVERIFY(control.valid);
+    QCOMPARE(control.key, unsigned(kVK_ANSI_A));
+    QCOMPARE(control.modifiers, unsigned(controlKey | shiftKey));
+    QVERIFY(!platform::parseHotkey(QStringLiteral("Ctrl+F24")).valid);
+    QVERIFY(!platform::parseHotkey(QStringLiteral("Ctrl+Insert")).valid);
+    QVERIFY(!platform::parseHotkey(QString()).valid);
+#else
+    QSKIP("macOS native key mapping regression.");
 #endif
 }
 
@@ -1486,6 +1521,10 @@ void UiRegressionTest::toolbarOnlyAfterSelection()
         QVERIFY(button->x() > lastX);
         lastX = button->x();
     }
+#if defined(Q_OS_WIN) || defined(Q_OS_MACOS)
+    auto *scroll = toolbar->findChild<QToolButton *>(QStringLiteral("滚动截图"));
+    QVERIFY(scroll && scroll->isEnabled());
+#endif
     const QString artifactDir = qEnvironmentVariable("SNIPASTE_TEST_ARTIFACTS");
     if (!artifactDir.isEmpty()) {
         QDir().mkpath(artifactDir);

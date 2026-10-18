@@ -8,6 +8,12 @@ namespace snipaste::platform {
 
 inline constexpr Qt::KeyboardModifier primaryModifier()
 {
+    // Qt maps the Command key to ControlModifier on macOS by default.
+    return Qt::ControlModifier;
+}
+
+inline constexpr Qt::KeyboardModifier physicalControlModifier()
+{
 #if defined(Q_OS_MACOS)
     return Qt::MetaModifier;
 #else
@@ -31,11 +37,7 @@ inline QString primaryModifierText()
 
 inline QString primaryPortableModifierText()
 {
-#if defined(Q_OS_MACOS)
-    return QStringLiteral("Meta");
-#else
     return QStringLiteral("Ctrl");
-#endif
 }
 
 inline QString primaryShortcutText(const QString &key, bool shift = false)

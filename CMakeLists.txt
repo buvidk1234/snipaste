@@ -73,6 +73,11 @@ endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+if(APPLE)
+    set(CMAKE_OBJCXX_STANDARD 20)
+    set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+    set(CMAKE_OBJCXX_EXTENSIONS OFF)
+endif()
 # The project uses headers, not C++20 modules. Avoid a separate compiler
 # dependency-scan invocation for each translation unit.
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
@@ -290,6 +295,7 @@ if(APPLE)
         "-framework AppKit"
         "-framework ApplicationServices"
         "-framework CoreGraphics"
+        "-framework ScreenCaptureKit"
         "-framework Vision"
         "-framework ImageIO"
         "-framework Foundation"
@@ -520,6 +526,11 @@ if(WIN32)
     set(packages "${archive}" "${installer}")
 else()
     set(app "${stage}/snipaste.app")
+    if(NOT EXISTS "${app}/Contents/Info.plist")
+        message(FATAL_ERROR "macOS bundle Info.plist is missing; reconfigure the build before packaging")
+    endif()
+    execute_process(COMMAND lipo "${app}/Contents/MacOS/snipaste" -verify_arch x86_64 arm64
+        COMMAND_ERROR_IS_FATAL ANY)
     execute_process(COMMAND codesign --force --deep --sign - "${app}"
         COMMAND_ERROR_IS_FATAL ANY)
     execute_process(COMMAND codesign --verify --deep --strict "${app}"
@@ -548,6 +559,40 @@ add_custom_target(package
 include(CTest)
 if(BUILD_TESTING)
     find_package(Qt6 REQUIRED COMPONENTS Test)
+
+    qt_add_executable(snipaste_single_instance_tests tests/single_instance_test.cpp)
+    target_link_libraries(snipaste_single_instance_tests PRIVATE snipaste_platform Qt6::Test Qt6::Concurrent)
+    snipaste_apply_compile_options(snipaste_single_instance_tests)
+    add_test(NAME single_instance COMMAND snipaste_single_instance_tests)
+    set_tests_properties(single_instance PROPERTIES
+        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
+        TIMEOUT 15)
+
+    if(APPLE)
+        qt_add_executable(macos_platform_test tests/macos_platform_test.mm)
+        target_link_libraries(macos_platform_test PRIVATE snipaste_platform Qt6::Test)
+        snipaste_apply_compile_options(macos_platform_test)
+        add_test(NAME macos_platform_test COMMAND macos_platform_test)
+        set_tests_properties(macos_platform_test PROPERTIES TIMEOUT 30)
+
+        qt_add_executable(snipaste_macos_scroll_tests tests/macos_scroll_capture_test.mm)
+        target_link_libraries(snipaste_macos_scroll_tests PRIVATE snipaste_ui Qt6::Test)
+        snipaste_apply_compile_options(snipaste_macos_scroll_tests)
+        add_test(NAME macos_scroll_capture COMMAND snipaste_macos_scroll_tests)
+        set_tests_properties(macos_scroll_capture PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=cocoa"
+            RUN_SERIAL TRUE
+            TIMEOUT 60)
+
+        qt_add_executable(snipaste_macos_capture_activation_tests tests/macos_capture_activation_test.mm)
+        target_link_libraries(snipaste_macos_capture_activation_tests PRIVATE snipaste_ui Qt6::Test)
+        snipaste_apply_compile_options(snipaste_macos_capture_activation_tests)
+        add_test(NAME macos_capture_activation COMMAND snipaste_macos_capture_activation_tests)
+        set_tests_properties(macos_capture_activation PROPERTIES
+            ENVIRONMENT "QT_QPA_PLATFORM=cocoa"
+            RUN_SERIAL TRUE
+            TIMEOUT 45)
+    endif()
 
     qt_add_executable(snipaste_paste_editor_tests tests/paste_editor_test.cpp)
     target_link_libraries(snipaste_paste_editor_tests PRIVATE snipaste_ui Qt6::Test)
@@ -591,11 +636,16 @@ if(BUILD_TESTING)
     set_tests_properties(updates PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
         TIMEOUT 30)
-    if(WIN32)
+    if(WIN32 OR APPLE)
         find_package(Python3 QUIET COMPONENTS Interpreter)
         if(Python3_FOUND)
+            if(APPLE)
+                set(snipaste_installer_test macos_update_installer_test.py)
+            else()
+                set(snipaste_installer_test update_installer_test.py)
+            endif()
             add_test(NAME update_installer COMMAND "${Python3_EXECUTABLE}"
-                "${CMAKE_CURRENT_SOURCE_DIR}/tests/update_installer_test.py")
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/${snipaste_installer_test}")
             set_tests_properties(update_installer PROPERTIES TIMEOUT 90)
         endif()
     endif()

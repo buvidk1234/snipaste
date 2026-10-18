@@ -58,6 +58,13 @@ jobs:
         run: ctest --preset "$BUILD_PRESET" -R '^ocr_overlay$'
       - name: Verify installation
         run: cmake --install "build/$BUILD_PRESET" --prefix "build/$BUILD_PRESET/install"
+      - name: Verify macOS bundle
+        if: runner.os == 'macOS'
+        run: |
+          app="build/$BUILD_PRESET/install/snipaste.app"
+          codesign --verify --deep --strict "$app"
+          lipo "$app/Contents/MacOS/snipaste" -verify_arch x86_64 arm64
+          env -u QT_PLUGIN_PATH -u QT_QPA_PLATFORM_PLUGIN_PATH QT_QPA_PLATFORM=cocoa "$app/Contents/MacOS/snipaste" --version
       - name: Upload failed test diagnostics
         if: failure() || steps.ocr_tests.outcome == 'failure'
         uses: actions/upload-artifact@v7.0.2

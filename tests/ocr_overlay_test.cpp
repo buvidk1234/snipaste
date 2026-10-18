@@ -4,6 +4,9 @@
 #include "ui/annotation/annotation_canvas.h"
 #include "ui/recognition/ocr_overlay.h"
 #include "ui/snip/snip_overlay.h"
+#ifdef Q_OS_MACOS
+#include "platform/macos/vision_ocr.h"
+#endif
 #include <QApplication>
 #include <QClipboard>
 #include <QDir>
@@ -81,6 +84,8 @@ private slots:
     void windowsPrintedText_data();
     void windowsPrintedText();
     void windowsUnavailableLanguage();
+    void macVisionOcr_data();
+    void macVisionOcr();
     void contrastKeepsSourceAndHighContrastImage();
     void recoveryPreservesOriginalCode();
 };
@@ -489,6 +494,54 @@ void OcrOverlayTest::windowsUnavailableLanguage()
     }
 #else
     QSKIP("Windows system OCR is only available on Windows.");
+#endif
+}
+
+void OcrOverlayTest::macVisionOcr_data()
+{
+    QTest::addColumn<QString>("language");
+    QTest::addColumn<QString>("secondLine");
+    QTest::newRow("english") << QStringLiteral("en") << QStringLiteral("Native screenshot");
+    QTest::newRow("mixed-chinese") << QString() << QStringLiteral("中文测试");
+}
+
+void OcrOverlayTest::macVisionOcr()
+{
+#ifdef Q_OS_MACOS
+    QFETCH(QString, language);
+    QFETCH(QString, secondLine);
+    QImage image(900, 320, QImage::Format_RGB32);
+    image.fill(Qt::white);
+    QPainter painter(&image);
+    QFont font(QStringLiteral("PingFang SC"));
+    font.setPixelSize(48);
+    painter.setFont(font);
+    painter.setPen(Qt::black);
+    painter.drawText(QPoint(40, 90), QStringLiteral("Hello world"));
+    painter.drawText(QPoint(40, 230), secondLine);
+    painter.end();
+    // Vision must return source pixel coordinates even for Retina metadata.
+    image.setDevicePixelRatio(2);
+    auto future = QtConcurrent::run([image, language] {
+        return platform::recognizeWithMacVision(image, language);
+    });
+    future.waitForFinished();
+    const auto result = future.result();
+    QVERIFY2(result.success, qPrintable(result.error));
+    QVERIFY2(result.text.contains(QStringLiteral("Hello")), qPrintable(result.text));
+    QVERIFY2(result.text.contains(secondLine), qPrintable(result.text));
+    QVERIFY(result.boxes.size() >= 2);
+    for (const auto &box : result.boxes) {
+        QVERIFY(!box.bounds.isEmpty());
+        QVERIFY(QRectF(image.rect()).contains(box.bounds));
+        QVERIFY(box.start >= 0 && box.length > 0 && box.start + box.length <= result.text.size());
+        if (result.text.mid(box.start, box.length).contains(QStringLiteral("Hello")))
+            QVERIFY(qAbs(box.bounds.center().y() - 70) < 35);
+        if (result.text.mid(box.start, box.length).contains(secondLine))
+            QVERIFY(qAbs(box.bounds.center().y() - 210) < 35);
+    }
+#else
+    QSKIP("macOS Vision OCR requires macOS.");
 #endif
 }
 
