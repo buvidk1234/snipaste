@@ -563,7 +563,8 @@ if(BUILD_TESTING)
     qt_add_executable(snipaste_single_instance_tests tests/single_instance_test.cpp)
     target_link_libraries(snipaste_single_instance_tests PRIVATE snipaste_platform Qt6::Test Qt6::Concurrent)
     snipaste_apply_compile_options(snipaste_single_instance_tests)
-    add_test(NAME single_instance COMMAND snipaste_single_instance_tests)
+    add_test(NAME single_instance COMMAND snipaste_single_instance_tests
+        -o "${CMAKE_CURRENT_BINARY_DIR}/single-instance-test-results.txt,txt")
     set_tests_properties(single_instance PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
         TIMEOUT 15)

@@ -1,6 +1,8 @@
 #include "platform/windows/single_instance.h"
 
+#include <QElapsedTimer>
 #include <QFuture>
+#include <QFutureWatcher>
 #include <QLocalSocket>
 #include <QSignalSpy>
 #include <QTest>
@@ -57,12 +59,19 @@ void SingleInstanceTest::largeMessageArrivesIntact()
     QSignalSpy received(&server, &SingleInstance::messageReceived);
     const QStringList arguments{QStringLiteral("large"), QString(256 * 1024, QChar(0x4e2d))};
 
-    const auto sent = QtConcurrent::run([key, arguments] {
+    QFutureWatcher<bool> sent;
+    QSignalSpy finished(&sent, &QFutureWatcher<bool>::finished);
+    QElapsedTimer elapsed;
+    elapsed.start();
+    sent.setFuture(QtConcurrent::run([key, arguments] {
         SingleInstance client;
         return client.sendMessage(key, arguments);
-    });
-    QTRY_VERIFY_WITH_TIMEOUT(sent.isFinished(), 3000);
-    QVERIFY(sent.result());
+    }));
+    // Keep the receiver's event loop running while the sender drains its
+    // buffer; QTRY polling sleeps between event-processing passes.
+    QVERIFY(finished.size() > 0 || finished.wait(3000));
+    QVERIFY2(sent.result(), qPrintable(QStringLiteral("Large IPC send failed after %1 ms")
+                                         .arg(elapsed.elapsed())));
     QTRY_COMPARE_WITH_TIMEOUT(received.size(), 1, 3000);
     QCOMPARE(received.first().first().toStringList(), arguments);
 }

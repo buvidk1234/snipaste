@@ -81,6 +81,7 @@ private slots:
     void nativeWindowFramesExcludeToolsAndStitchAfterScrolling();
 
 private:
+    static bool showTargetWindow(QWidget &target);
     static std::unique_ptr<SnipOverlay> prepareOverlay(QWidget &target);
     static bool startWithoutCapturing(SnipOverlay &overlay);
 };
@@ -93,14 +94,34 @@ void MacScrollCaptureTest::initTestCase()
     QVERIFY(QGuiApplication::primaryScreen());
 }
 
+bool MacScrollCaptureTest::showTargetWindow(QWidget &target)
+{
+    target.show();
+    // QTest has no application.exec(): finish AppKit's initial launch before
+    // asking the first owned window to become the foreground capture target.
+    QCoreApplication::processEvents();
+    target.raise();
+    target.activateWindow();
+    [NSApp activate];
+    NSView *view = (__bridge NSView *)(void *)target.winId();
+    if (!QTest::qWaitFor([&target, view] {
+            return NSApp.active && view.window.visible && view.window.keyWindow
+                && target.windowHandle()->isActive();
+        })) {
+        qWarning() << "Owned scroll target failed to activate:" << NSApp.active
+                   << view.window.visible << view.window.keyWindow
+                   << target.windowHandle()->isActive();
+        return false;
+    }
+    return QTest::qWaitForWindowExposed(&target);
+}
+
 std::unique_ptr<SnipOverlay> MacScrollCaptureTest::prepareOverlay(QWidget &target)
 {
     QScreen *screen = QGuiApplication::primaryScreen();
     target.setGeometry(QRect(screen->availableGeometry().topLeft() + QPoint(100, 80), QSize(420, 380)));
     target.setWindowTitle(QStringLiteral("Scroll capture lifecycle target"));
-    target.show();
-    target.raise();
-    if (!QTest::qWaitForWindowExposed(&target))
+    if (!showTargetWindow(target))
         return {};
 
     auto overlay = std::unique_ptr<SnipOverlay>(SnipOverlay::createPrepared(screen));
@@ -265,9 +286,7 @@ void MacScrollCaptureTest::nativeWindowFramesExcludeToolsAndStitchAfterScrolling
     QVERIFY(targetView.window);
     // Define the source RGB space before Qt creates its raster backing store.
     targetView.window.colorSpace = NSColorSpace.sRGBColorSpace;
-    target.show();
-    target.raise();
-    QVERIFY(QTest::qWaitForWindowExposed(&target));
+    QVERIFY(showTargetWindow(target));
     target.repaint();
     QTest::qWait(80);
     const quintptr targetWindow = static_cast<quintptr>(targetView.window.windowNumber);
