@@ -139,7 +139,9 @@ void OcrOverlay::applyResult(core::OcrResult result)
     m_copyAll->setEnabled(m_result.success && !m_result.text.isEmpty());
     m_status->setWordWrap(!m_result.success);
     m_status->setText(!m_result.success ? m_result.error : m_words.isEmpty()
-        ? QStringLiteral("无法定位文字，可复制全部") : QStringLiteral("拖动选取文字 · Ctrl+C 复制"));
+        ? QStringLiteral("无法定位文字，可复制全部")
+        : QStringLiteral("拖动选取文字 · %1 复制")
+              .arg(QKeySequence(QKeySequence::Copy).toString(QKeySequence::NativeText)));
     layoutToolbar();
     update();
     if (m_result.success)

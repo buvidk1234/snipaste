@@ -2,6 +2,10 @@
 #include "core/command/argument_parser.h"
 #include "platform/screen_capture.h"
 #include "platform/windows/capture_target.h"
+#if defined(Q_OS_MACOS)
+#include "platform/macos/capture.h"
+#include "platform/macos/system.h"
+#endif
 #include "ui/snip/scroll_capture_panel.h"
 #include "ui/snip/scroll_capture_preview.h"
 
@@ -15,6 +19,7 @@
 #include <QGuiApplication>
 #include <QMessageBox>
 #include <QMetaObject>
+#include <QPainter>
 #include <QScreen>
 #include <QTimer>
 
@@ -23,6 +28,35 @@
 #endif
 
 namespace snipaste::ui {
+
+#ifdef Q_OS_MACOS
+class ScrollCaptureOverlay final : public QWidget
+{
+public:
+    explicit ScrollCaptureOverlay(SnipOverlay *overlay) : m_overlay(overlay)
+    {
+        setObjectName(QStringLiteral("scrollCaptureOverlay"));
+        setWindowFlags(Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint
+            | Qt::WindowTransparentForInput | Qt::WindowDoesNotAcceptFocus | Qt::NoDropShadowWindowHint);
+        setAttribute(Qt::WA_TranslucentBackground);
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        setAttribute(Qt::WA_ShowWithoutActivating);
+        setAttribute(Qt::WA_MacAlwaysShowToolWindow);
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        if (m_overlay) {
+            QPainter painter(this);
+            m_overlay->paintScrollCaptureOverlay(painter);
+        }
+    }
+
+private:
+    QPointer<SnipOverlay> m_overlay;
+};
+#endif
 
 namespace {
 
@@ -123,9 +157,9 @@ QString captureStatus(const snipaste::core::VerticalScrollStitcher &stitcher)
 
 void SnipOverlay::startScrollCapture()
 {
-#ifndef Q_OS_WIN
+#if !defined(Q_OS_WIN) && !defined(Q_OS_MACOS)
     QMessageBox::information(this, QStringLiteral("滚动截图"),
-                             QStringLiteral("滚动截图目前仅支持 Windows。"));
+                             QStringLiteral("当前平台不支持滚动截图。"));
     return;
 #else
     if (m_scrollCaptureActive || !m_selectionConfirmed || m_selection.isEmpty())
@@ -205,7 +239,11 @@ void SnipOverlay::startScrollCapture()
     m_scrollPanel->show();
     m_scrollPanel->raise();
 
+#ifdef Q_OS_WIN
     installScrollInputHook(this, reinterpret_cast<HWND>(m_scrollWindow), m_scrollGlobalSelection);
+#else
+    platform::startMacScrollInputMonitor(this, m_scrollGlobalSelection);
+#endif
 
     // Capture initial frame
     QTimer::singleShot(60, this, &SnipOverlay::captureScrollFrame);
@@ -267,6 +305,15 @@ void SnipOverlay::applyScrollCaptureWindowRegion()
     CombineRgn(fullRgn, fullRgn, holeRgn, RGN_DIFF);
     SetWindowRgn(reinterpret_cast<HWND>(winId()), fullRgn, TRUE);
     DeleteObject(holeRgn);
+#elif defined(Q_OS_MACOS)
+    // Cocoa masks only clip drawing; hide the capture overlay so native
+    // scrolling and scrollbar drags reach the target application.
+    hide();
+    if (!m_scrollOverlay)
+        m_scrollOverlay = new ScrollCaptureOverlay(this);
+    m_scrollOverlay->setGeometry(geometry());
+    m_scrollOverlay->show();
+    m_scrollOverlay->raise();
 #endif
 }
 
@@ -279,7 +326,7 @@ void SnipOverlay::restoreWindowRegion()
 
 void SnipOverlay::scheduleManualScrollCapture()
 {
-#ifndef Q_OS_WIN
+#if !defined(Q_OS_WIN) && !defined(Q_OS_MACOS)
     return;
 #else
     if (!m_scrollCaptureActive || m_scrollAutoRunning
@@ -301,6 +348,8 @@ void SnipOverlay::stopScrollInputMonitoring()
     m_scrollStability.reset();
 #ifdef Q_OS_WIN
     uninstallScrollInputHook(this);
+#elif defined(Q_OS_MACOS)
+    platform::stopMacScrollInputMonitor(this);
 #endif
     if (m_scrollManualTimer) {
         m_scrollManualTimer->stop();
@@ -311,7 +360,14 @@ void SnipOverlay::stopScrollInputMonitoring()
 
 QImage SnipOverlay::captureScrollViewport() const
 {
-#ifndef Q_OS_WIN
+#if defined(Q_OS_MACOS)
+    // A desktop-independent window capture excludes our always-visible
+    // toolbar and preview, even when the selection fills the screen.
+    const QImage window = platform::captureMacWindow(m_scrollWindow);
+    const QRect pixels = platform::screenCapturePixelRect(
+        platform::macWindowBounds(m_scrollWindow), window.size(), m_scrollGlobalSelection);
+    return pixels.isEmpty() ? QImage() : window.copy(pixels);
+#elif !defined(Q_OS_WIN)
     return {};
 #else
     QScreen *screen = m_scrollScreen;
@@ -326,12 +382,17 @@ QImage SnipOverlay::captureScrollViewport() const
 
 void SnipOverlay::captureScrollFrame()
 {
-#ifndef Q_OS_WIN
+#if !defined(Q_OS_WIN) && !defined(Q_OS_MACOS)
     return;
 #else
     if (!m_scrollCaptureActive || m_scrollCaptureBusy || !m_scrollPanel)
         return;
-    if (!IsWindow(reinterpret_cast<HWND>(m_scrollWindow))) {
+#ifdef Q_OS_WIN
+    const bool targetExists = IsWindow(reinterpret_cast<HWND>(m_scrollWindow));
+#else
+    const bool targetExists = platform::macWindowExists(m_scrollWindow);
+#endif
+    if (!targetExists) {
         requestAutoScroll(false);
         m_scrollPanel->setStatus(QStringLiteral("目标窗口已关闭。"));
         return;
@@ -340,12 +401,18 @@ void SnipOverlay::captureScrollFrame()
     m_scrollCaptureBusy = true;
     m_scrollPanel->setBusy(true);
     m_scrollStability.reset();
-    m_scrollSettleElapsed.start();
+    // ScreenCaptureKit can take longer to produce its first sample. Start
+    // the motion budget once that sample exists, so setup cannot consume it.
+    m_scrollSettleElapsed.invalidate();
     const quint64 generation = ++m_scrollCaptureGeneration;
 
+#ifdef Q_OS_WIN
     const HWND target = reinterpret_cast<HWND>(m_scrollWindow);
     SetForegroundWindow(target);
     BringWindowToTop(target);
+#else
+    platform::activateMacWindow(m_scrollWindow);
+#endif
     QTimer::singleShot(40, this, [this, generation] { pollScrollCaptureFrame(generation); });
 #endif
 }
@@ -355,6 +422,8 @@ void SnipOverlay::pollScrollCaptureFrame(quint64 generation)
     if (generation != m_scrollCaptureGeneration || !m_scrollCaptureActive || !m_scrollPanel)
         return;
     const QImage frame = captureScrollViewport();
+    if (!m_scrollSettleElapsed.isValid())
+        m_scrollSettleElapsed.start();
     const qint64 elapsed = m_scrollSettleElapsed.elapsed();
     if (frame.isNull() || m_scrollStability.observe(frame, elapsed)) {
         completeScrollCaptureFrame(frame, true);
@@ -424,7 +493,7 @@ void SnipOverlay::completeScrollCaptureFrame(const QImage &frame, bool settled)
 
 void SnipOverlay::requestAutoScroll(bool enabled)
 {
-#ifndef Q_OS_WIN
+#if !defined(Q_OS_WIN) && !defined(Q_OS_MACOS)
     Q_UNUSED(enabled)
 #else
     if (!m_scrollCaptureActive || !m_scrollPanel)
@@ -451,7 +520,7 @@ void SnipOverlay::requestAutoScroll(bool enabled)
 
 void SnipOverlay::autoScrollStep()
 {
-#ifndef Q_OS_WIN
+#if !defined(Q_OS_WIN) && !defined(Q_OS_MACOS)
     return;
 #else
     if (!m_scrollCaptureActive || !m_scrollAutoRunning || m_scrollCaptureBusy)
@@ -472,9 +541,7 @@ void SnipOverlay::autoScrollStep()
 
 bool SnipOverlay::sendScrollStep() const
 {
-#ifndef Q_OS_WIN
-    return false;
-#else
+#ifdef Q_OS_WIN
     const HWND target = reinterpret_cast<HWND>(m_scrollWindow);
     if (!IsWindow(target))
         return false;
@@ -487,6 +554,10 @@ bool SnipOverlay::sendScrollStep() const
     input.mi.dwFlags = MOUSEEVENTF_WHEEL;
     input.mi.mouseData = static_cast<DWORD>(-WHEEL_DELTA);
     return SendInput(1, &input, sizeof(INPUT)) == 1;
+#elif defined(Q_OS_MACOS)
+    return platform::postMacScrollStep(m_scrollWindow, m_scrollGlobalSelection.center());
+#else
+    return false;
 #endif
 }
 
@@ -509,6 +580,13 @@ void SnipOverlay::cleanupScrollCapture()
         m_scrollPreview->deleteLater();
         m_scrollPreview = nullptr;
     }
+#ifdef Q_OS_MACOS
+    if (m_scrollOverlay) {
+        m_scrollOverlay->hide();
+        m_scrollOverlay->deleteLater();
+        m_scrollOverlay = nullptr;
+    }
+#endif
     restoreScrollCaptureCursor();
     m_scrollWindow = 0;
     m_scrollStitcher.clear();
@@ -619,6 +697,8 @@ void SnipOverlay::restoreScrollCaptureCursor()
 #ifdef Q_OS_WIN
     if (m_scrollOriginalCursor != QPoint())
         SetCursorPos(m_scrollOriginalCursor.x(), m_scrollOriginalCursor.y());
+#elif defined(Q_OS_MACOS)
+    QCursor::setPos(m_scrollOriginalCursor);
 #endif
 }
 

@@ -107,9 +107,13 @@ void InputController::configureSuperCapture()
     if (modifier.contains(QStringLiteral("Cmd"), Qt::CaseInsensitive) ||
         modifier.contains(QStringLiteral("Meta"), Qt::CaseInsensitive) ||
         modifier.contains(QStringLiteral("Command"), Qt::CaseInsensitive))
+#if defined(Q_OS_MACOS)
+        selectedModifier = platform::primaryModifier();
+#else
         selectedModifier = Qt::MetaModifier;
+#endif
     else if (modifier.contains(QStringLiteral("Ctrl"), Qt::CaseInsensitive))
-        selectedModifier = Qt::ControlModifier;
+        selectedModifier = platform::physicalControlModifier();
     else if (modifier.contains(QStringLiteral("Shift"), Qt::CaseInsensitive))
         selectedModifier = Qt::ShiftModifier;
     else if (modifier.contains(QStringLiteral("Alt"), Qt::CaseInsensitive))

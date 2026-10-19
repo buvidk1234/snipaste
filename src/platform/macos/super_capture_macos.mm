@@ -1,66 +1,62 @@
 #include "platform/windows/super_capture.h"
 
-#import <AppKit/AppKit.h>
+#import <ApplicationServices/ApplicationServices.h>
 
+#include <QDebug>
 #include <QMetaObject>
 
 namespace snipaste::platform {
 
 namespace {
 
-NSEventMask monitorMask()
+CGEventMask monitorMask()
 {
-    return NSEventMaskLeftMouseDown | NSEventMaskLeftMouseUp
-        | NSEventMaskLeftMouseDragged | NSEventMaskRightMouseDown
-        | NSEventMaskRightMouseUp | NSEventMaskRightMouseDragged
-        | NSEventMaskOtherMouseDown | NSEventMaskOtherMouseUp
-        | NSEventMaskOtherMouseDragged | NSEventMaskMouseMoved
-        | NSEventMaskFlagsChanged;
+    return CGEventMaskBit(kCGEventLeftMouseDown) | CGEventMaskBit(kCGEventLeftMouseUp)
+        | CGEventMaskBit(kCGEventLeftMouseDragged) | CGEventMaskBit(kCGEventRightMouseDown)
+        | CGEventMaskBit(kCGEventRightMouseUp) | CGEventMaskBit(kCGEventRightMouseDragged)
+        | CGEventMaskBit(kCGEventMouseMoved) | CGEventMaskBit(kCGEventFlagsChanged);
 }
 
-Qt::KeyboardModifiers qtModifiers(NSEvent *event)
+Qt::KeyboardModifiers qtModifiers(CGEventRef event)
 {
-    const NSEventModifierFlags flags = event ? event.modifierFlags : 0;
+    const CGEventFlags flags = CGEventGetFlags(event);
     Qt::KeyboardModifiers result = Qt::NoModifier;
-    if (flags & NSEventModifierFlagControl)
-        result |= Qt::ControlModifier;
-    if (flags & NSEventModifierFlagShift)
-        result |= Qt::ShiftModifier;
-    if (flags & NSEventModifierFlagOption)
-        result |= Qt::AltModifier;
-    if (flags & NSEventModifierFlagCommand)
+    if (flags & kCGEventFlagMaskControl)
         result |= Qt::MetaModifier;
+    if (flags & kCGEventFlagMaskShift)
+        result |= Qt::ShiftModifier;
+    if (flags & kCGEventFlagMaskAlternate)
+        result |= Qt::AltModifier;
+    if (flags & kCGEventFlagMaskCommand)
+        result |= Qt::ControlModifier;
     return result;
 }
 
-QPoint globalPosition(NSEvent *event)
+QPoint globalPosition(CGEventRef event)
 {
-    if (!event || !event.CGEvent)
-        return {};
-    const CGPoint point = CGEventGetLocation(event.CGEvent);
+    const CGPoint point = CGEventGetLocation(event);
     return QPoint(qRound(point.x), qRound(point.y));
 }
 
-bool isButtonDown(NSEventType type, Qt::MouseButton button)
+bool isButtonDown(CGEventType type, Qt::MouseButton button)
 {
     if (button == Qt::RightButton)
-        return type == NSEventTypeRightMouseDown;
-    return type == NSEventTypeLeftMouseDown;
+        return type == kCGEventRightMouseDown;
+    return type == kCGEventLeftMouseDown;
 }
 
-bool isButtonUp(NSEventType type, Qt::MouseButton button)
+bool isButtonUp(CGEventType type, Qt::MouseButton button)
 {
     if (button == Qt::RightButton)
-        return type == NSEventTypeRightMouseUp;
-    return type == NSEventTypeLeftMouseUp;
+        return type == kCGEventRightMouseUp;
+    return type == kCGEventLeftMouseUp;
 }
 
-bool isMouseMove(NSEventType type)
+bool isMouseMove(CGEventType type)
 {
-    return type == NSEventTypeMouseMoved
-        || type == NSEventTypeLeftMouseDragged
-        || type == NSEventTypeRightMouseDragged
-        || type == NSEventTypeOtherMouseDragged;
+    return type == kCGEventMouseMoved
+        || type == kCGEventLeftMouseDragged
+        || type == kCGEventRightMouseDragged;
 }
 
 } // namespace
@@ -107,36 +103,61 @@ void SuperCapture::setBlockWindowsKeys(bool left, bool right)
 
 void SuperCapture::installMonitor()
 {
-    if (m_globalMonitor || m_localMonitor)
+    if (m_eventTap)
         return;
-
-    const NSEventMask mask = monitorMask();
-    m_globalMonitor = (__bridge void *)[NSEvent addGlobalMonitorForEventsMatchingMask:mask
-                                                                            handler:^(NSEvent *event) {
-        handleNativeMouseEvent((__bridge void *)event);
-    }];
-    m_localMonitor = (__bridge void *)[NSEvent addLocalMonitorForEventsMatchingMask:mask
-                                                                          handler:^NSEvent *(NSEvent *event) {
-        const bool handled = handleNativeMouseEvent((__bridge void *)event);
-        return handled ? nil : event;
-    }];
+    if (!AXIsProcessTrusted()) {
+        qWarning() << "macOS super capture requires Accessibility permission";
+        m_enabled = false;
+        return;
+    }
+    // A global NSEvent monitor only observes events. A session event tap can
+    // consume the capture gesture before the target application handles it.
+    CFMachPortRef tap = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap,
+        kCGEventTapOptionDefault, monitorMask(),
+        [](CGEventTapProxy, CGEventType type, CGEventRef event, void *context) -> CGEventRef {
+            auto *capture = static_cast<SuperCapture *>(context);
+            if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
+                capture->cancelCapture();
+                CGEventTapEnable(static_cast<CFMachPortRef>(capture->m_eventTap), true);
+                return event;
+            }
+            return capture->handleNativeMouseEvent(event) ? nullptr : event;
+        }, this);
+    if (!tap) {
+        qWarning() << "failed to install macOS super capture event tap";
+        m_enabled = false;
+        return;
+    }
+    CFRunLoopSourceRef source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0);
+    if (!source) {
+        CFRelease(tap);
+        m_enabled = false;
+        return;
+    }
+    m_eventTap = tap;
+    m_eventTapSource = source;
+    CFRunLoopAddSource(CFRunLoopGetMain(), source, kCFRunLoopCommonModes);
 }
 
 void SuperCapture::uninstallMonitor()
 {
-    if (m_globalMonitor) {
-        [NSEvent removeMonitor:(__bridge id)m_globalMonitor];
-        m_globalMonitor = nullptr;
+    if (m_eventTapSource) {
+        auto source = static_cast<CFRunLoopSourceRef>(m_eventTapSource);
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), source, kCFRunLoopCommonModes);
+        CFRelease(source);
+        m_eventTapSource = nullptr;
     }
-    if (m_localMonitor) {
-        [NSEvent removeMonitor:(__bridge id)m_localMonitor];
-        m_localMonitor = nullptr;
+    if (m_eventTap) {
+        auto tap = static_cast<CFMachPortRef>(m_eventTap);
+        CFMachPortInvalidate(tap);
+        CFRelease(tap);
+        m_eventTap = nullptr;
     }
 }
 
 bool SuperCapture::handleNativeMouseEvent(void *eventPointer)
 {
-    NSEvent *event = (__bridge NSEvent *)eventPointer;
+    CGEventRef event = static_cast<CGEventRef>(eventPointer);
     if (!event || !m_enabled)
         return false;
 
@@ -149,7 +170,7 @@ bool SuperCapture::handleNativeMouseEvent(void *eventPointer)
         return false;
     }
 
-    const NSEventType type = event.type;
+    const CGEventType type = CGEventGetType(event);
     if (isButtonDown(type, m_button)) {
         m_dragging = true;
         m_start = globalPosition(event);
@@ -166,8 +187,14 @@ void SuperCapture::finishCapture(const QPoint &globalPosition)
 {
     const QRect rect = QRect(m_start, globalPosition).normalized();
     m_dragging = false;
-    if (rect.width() >= 2 && rect.height() >= 2)
-        emit rectangleCaptured(rect);
+    if (rect.width() >= 2 && rect.height() >= 2) {
+        // Leave the event tap immediately; taking a screenshot here can make
+        // macOS disable it for exceeding the event processing deadline.
+        QMetaObject::invokeMethod(this, [this, rect] {
+            if (m_enabled)
+                emit rectangleCaptured(rect);
+        }, Qt::QueuedConnection);
+    }
 }
 
 void SuperCapture::cancelCapture()

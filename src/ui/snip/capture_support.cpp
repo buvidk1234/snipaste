@@ -1,7 +1,9 @@
 #include "ui/snip/capture_support.h"
 
 #include "platform/screen_capture.h"
+#include <QCoreApplication>
 #include <QCursor>
+#include <QDebug>
 #include <QGuiApplication>
 #include <QMessageBox>
 #include <QPainter>
@@ -18,11 +20,19 @@ bool ensureMacScreenCaptureAccess(const QString &operation)
     if (snipaste::platform::macScreenCaptureAccessGranted()
         || snipaste::platform::requestMacScreenCaptureAccess())
         return true;
+    QString applicationPath = QCoreApplication::applicationFilePath();
+    const qsizetype bundleSuffix = applicationPath.lastIndexOf(
+        QStringLiteral(".app/Contents/MacOS/"), -1, Qt::CaseInsensitive);
+    if (bundleSuffix >= 0)
+        applicationPath.truncate(bundleSuffix + 4);
+    qWarning().noquote() << "macOS Screen Recording permission check/request failed for" << applicationPath;
     QMessageBox::warning(nullptr,
                           QStringLiteral("需要屏幕录制权限"),
-                          QStringLiteral("请在“系统设置 → 隐私与安全性 → 屏幕录制”中允许 snipaste，\n"
-                                         "然后重新开始%1。")
-                              .arg(operation));
+                          QStringLiteral("请在“系统设置 → 隐私与安全性 → 屏幕录制”中允许 snipaste。\n\n"
+                                         "如果权限已开启但仍被拒绝，请用“−”移除旧的 snipaste 记录，"
+                                         "再用“+”添加下面的当前应用：\n%2\n\n"
+                                         "设置完成后，请完全退出并重新打开此应用，然后再开始%1。")
+                              .arg(operation, applicationPath));
     return false;
 #else
     Q_UNUSED(operation)

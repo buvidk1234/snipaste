@@ -4,15 +4,20 @@
 #import <AppKit/AppKit.h>
 #import <ApplicationServices/ApplicationServices.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <CoreVideo/CVPixelBuffer.h>
 #import <Foundation/Foundation.h>
+#import <ScreenCaptureKit/ScreenCaptureKit.h>
 
+#include <QColorSpace>
 #include <QGuiApplication>
 #include <QtMath>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
-#include <dlfcn.h>
+#include <future>
 #include <libproc.h>
+#include <memory>
 
 namespace snipaste::platform {
 
@@ -195,6 +200,15 @@ NativeTarget targetAtPoint(CGPoint point, CGWindowID ignoredWindow,
         const auto dictionary = static_cast<CFDictionaryRef>(CFArrayGetValueAtIndex(windows, index));
         if (!dictionary)
             continue;
+        const CFTypeRef layerValue = CFDictionaryGetValue(dictionary, kCGWindowLayer);
+        int layer = 0;
+        if (layerValue)
+            CFNumberGetValue(static_cast<CFNumberRef>(layerValue), kCFNumberIntType, &layer);
+        // System overlays such as Notification Center can cover the display
+        // with fully transparent pixels while reporting an opaque window.
+        // Keep ordinary, floating and modal application windows below the Dock.
+        if (layer >= CGWindowLevelForKey(kCGDockWindowLevelKey))
+            continue;
         CGRect bounds{};
         if (!windowBounds(dictionary, bounds) || !CGRectContainsPoint(bounds, point))
             continue;
@@ -225,7 +239,54 @@ NativeTarget targetAtPoint(CGPoint point, CGWindowID ignoredWindow,
     return result;
 }
 
+NativeTarget targetForWindow(quintptr nativeWindow)
+{
+    NativeTarget result;
+    if (!nativeWindow)
+        return result;
+    CFArrayRef windows = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow,
+                                                     static_cast<CGWindowID>(nativeWindow));
+    if (!windows)
+        return result;
+    if (CFArrayGetCount(windows) > 0) {
+        const auto dictionary = static_cast<CFDictionaryRef>(CFArrayGetValueAtIndex(windows, 0));
+        if (windowBounds(dictionary, result.bounds)) {
+            result.windowId = static_cast<CGWindowID>(nativeWindow);
+            result.processId = processId(dictionary);
+        }
+    }
+    CFRelease(windows);
+    return result;
+}
+
 } // namespace
+
+QImage imageFromMacCGImage(CGImageRef image)
+{
+    if (!image)
+        return {};
+    const size_t width = CGImageGetWidth(image);
+    const size_t height = CGImageGetHeight(image);
+    QImage result(static_cast<int>(width), static_cast<int>(height), QImage::Format_RGBA8888_Premultiplied);
+    if (result.isNull())
+        return {};
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGContextRef context = CGBitmapContextCreate(result.bits(), width, height, 8,
+        static_cast<size_t>(result.bytesPerLine()), colorSpace,
+        static_cast<uint32_t>(kCGImageAlphaPremultipliedLast)
+            | static_cast<uint32_t>(kCGBitmapByteOrder32Big));
+    CGColorSpaceRelease(colorSpace);
+    if (!context)
+        return {};
+    // Both CGImage data and QImage scanlines start with the top row. A Y-axis
+    // transform here would invert the screenshot.
+    CGContextSetBlendMode(context, kCGBlendModeCopy);
+    CGContextDrawImage(context, CGRectMake(0.0, 0.0, width, height), image);
+    CGContextRelease(context);
+    result.setColorSpace(QColorSpace::SRgb);
+    result.setDevicePixelRatio(1.0);
+    return result;
+}
 
 CaptureTargetQuery prepareCaptureTargetQuery(QPoint localPosition, QSize logicalScreenSize,
                                              WId overlayWindow, bool elementMode,
@@ -334,72 +395,136 @@ QRect captureTargetAt(QPoint localPosition, QSize logicalScreenSize, WId overlay
 
 QImage captureMacWindow(quintptr nativeWindow)
 {
-    if (!nativeWindow)
+    if (!nativeWindow || QGuiApplication::platformName() != QStringLiteral("cocoa")
+        || !CGPreflightScreenCaptureAccess())
         return {};
 
-    using CreateWindowImage = CGImageRef (*)(CGRect, CGWindowListOption, CGWindowID,
-                                             CGWindowImageOption);
-    const auto createWindowImage = reinterpret_cast<CreateWindowImage>(
-        dlsym(RTLD_DEFAULT, "CGWindowListCreateImage"));
-    if (!createWindowImage)
-        return {};
-    CGImageRef windowImage = createWindowImage(CGRectNull,
-                                                kCGWindowListOptionIncludingWindow,
-                                                static_cast<CGWindowID>(nativeWindow),
-                                                kCGWindowImageBoundsIgnoreFraming);
-    if (!windowImage)
-        return {};
-
-    const size_t width = CGImageGetWidth(windowImage);
-    const size_t height = CGImageGetHeight(windowImage);
-    QImage result(static_cast<int>(width), static_cast<int>(height), QImage::Format_RGBA8888_Premultiplied);
-    if (result.isNull()) {
-        CGImageRelease(windowImage);
-        return {};
+    @autoreleasepool {
+        // The completion blocks retain their result state, including when a
+        // slow system capture finishes after the synchronous caller times out.
+        const auto result = std::make_shared<std::promise<QImage>>();
+        auto future = result->get_future();
+        [SCShareableContent getShareableContentExcludingDesktopWindows:YES
+            onScreenWindowsOnly:YES completionHandler:^(SCShareableContent *content, NSError *) {
+                @autoreleasepool {
+                    SCWindow *target = nil;
+                    for (SCWindow *window in content.windows) {
+                        if (window.windowID == static_cast<CGWindowID>(nativeWindow)) {
+                            target = window;
+                            break;
+                        }
+                    }
+                    if (!target) {
+                        result->set_value({});
+                        return;
+                    }
+                    SCContentFilter *filter = [[SCContentFilter alloc] initWithDesktopIndependentWindow:target];
+                    SCStreamConfiguration *configuration = [[SCStreamConfiguration alloc] init];
+                    configuration.width = qMax(1, qRound(filter.contentRect.size.width * filter.pointPixelScale));
+                    configuration.height = qMax(1, qRound(filter.contentRect.size.height * filter.pointPixelScale));
+                    // Avoid the default subsampled video format and display
+                    // color space when producing a lossless sRGB screenshot.
+                    configuration.pixelFormat = kCVPixelFormatType_32BGRA;
+                    configuration.colorSpaceName = kCGColorSpaceSRGB;
+                    configuration.showsCursor = NO;
+                    configuration.ignoreShadowsSingleWindow = YES;
+                    [SCScreenshotManager captureImageWithFilter:filter configuration:configuration
+                        completionHandler:^(CGImageRef image, NSError *) {
+                            result->set_value(imageFromMacCGImage(image));
+                        }];
+#if !__has_feature(objc_arc)
+                    [configuration release];
+                    [filter release];
+#endif
+                }
+            }];
+        if (future.wait_for(std::chrono::seconds(3)) != std::future_status::ready)
+            return {};
+        return future.get();
     }
-
-    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
-    CGContextRef context = CGBitmapContextCreate(result.bits(), width, height, 8,
-                                                  static_cast<size_t>(result.bytesPerLine()),
-                                                  colorSpace,
-                                                  static_cast<uint32_t>(kCGImageAlphaPremultipliedLast)
-                                                      | static_cast<uint32_t>(kCGBitmapByteOrder32Big));
-    if (!context) {
-        CGColorSpaceRelease(colorSpace);
-        CGImageRelease(windowImage);
-        return {};
-    }
-    CGContextTranslateCTM(context, 0.0, static_cast<CGFloat>(height));
-    CGContextScaleCTM(context, 1.0, -1.0);
-    CGContextDrawImage(context, CGRectMake(0.0, 0.0, width, height), windowImage);
-    CGContextRelease(context);
-    CGColorSpaceRelease(colorSpace);
-    CGImageRelease(windowImage);
-    result.setDevicePixelRatio(1.0);
-    return result;
 }
 
 QRect macWindowBounds(quintptr nativeWindow)
 {
-    if (!nativeWindow)
-        return {};
-    CFArrayRef windows = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow,
-                                                     static_cast<CGWindowID>(nativeWindow));
-    if (!windows)
-        return {};
-    QRect result;
-    const CFIndex count = CFArrayGetCount(windows);
-    for (CFIndex index = 0; index < count; ++index) {
-        const auto dictionary = static_cast<CFDictionaryRef>(CFArrayGetValueAtIndex(windows, index));
-        CGRect bounds{};
-        if (windowBounds(dictionary, bounds)) {
-            result = QRect(qRound(bounds.origin.x), qRound(bounds.origin.y),
-                           qRound(bounds.size.width), qRound(bounds.size.height));
-            break;
+    const CGRect bounds = targetForWindow(nativeWindow).bounds;
+    return QRect(qRound(bounds.origin.x), qRound(bounds.origin.y),
+                   qRound(bounds.size.width), qRound(bounds.size.height));
+}
+
+bool macWindowExists(quintptr nativeWindow)
+{
+    return targetForWindow(nativeWindow).windowId != 0;
+}
+
+bool activateMacWindow(quintptr nativeWindow)
+{
+    const NativeTarget target = targetForWindow(nativeWindow);
+    if (!target.windowId || target.processId <= 0)
+        return false;
+    @autoreleasepool {
+        NSRunningApplication *application = [NSRunningApplication runningApplicationWithProcessIdentifier:target.processId];
+        if (!application)
+            return false;
+        const bool activated = [application activateWithOptions:0];
+        if (!AXIsProcessTrusted())
+            return activated;
+        AXUIElementRef appElement = AXUIElementCreateApplication(target.processId);
+        AXUIElementSetMessagingTimeout(appElement, 0.08f);
+        CFTypeRef windows = nullptr;
+        if (AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute, &windows) == kAXErrorSuccess
+            && windows && CFGetTypeID(windows) == CFArrayGetTypeID()) {
+            const auto array = static_cast<CFArrayRef>(windows);
+            for (CFIndex index = 0; index < CFArrayGetCount(array); ++index) {
+                const auto window = static_cast<AXUIElementRef>(CFArrayGetValueAtIndex(array, index));
+                CFTypeRef positionValue = nullptr;
+                CFTypeRef sizeValue = nullptr;
+                AXUIElementSetMessagingTimeout(window, 0.08f);
+                AXUIElementCopyAttributeValue(window, kAXPositionAttribute, &positionValue);
+                AXUIElementCopyAttributeValue(window, kAXSizeAttribute, &sizeValue);
+                CGPoint position{};
+                CGSize size{};
+                const bool matches = positionValue && sizeValue
+                    && CFGetTypeID(positionValue) == AXValueGetTypeID()
+                    && CFGetTypeID(sizeValue) == AXValueGetTypeID()
+                    && AXValueGetValue(static_cast<AXValueRef>(positionValue), static_cast<AXValueType>(kAXValueCGPointType), &position)
+                    && AXValueGetValue(static_cast<AXValueRef>(sizeValue), static_cast<AXValueType>(kAXValueCGSizeType), &size)
+                    && qAbs(position.x - target.bounds.origin.x) < 1.0
+                    && qAbs(position.y - target.bounds.origin.y) < 1.0
+                    && qAbs(size.width - target.bounds.size.width) < 1.0
+                    && qAbs(size.height - target.bounds.size.height) < 1.0;
+                if (positionValue)
+                    CFRelease(positionValue);
+                if (sizeValue)
+                    CFRelease(sizeValue);
+                if (matches) {
+                    AXUIElementSetAttributeValue(window, kAXMainAttribute, kCFBooleanTrue);
+                    AXUIElementPerformAction(window, kAXRaiseAction);
+                    break;
+                }
+            }
         }
+        if (windows)
+            CFRelease(windows);
+        CFRelease(appElement);
+        return activated;
     }
-    CFRelease(windows);
-    return result;
+}
+
+bool postMacScrollStep(quintptr nativeWindow, const QPoint &globalPoint)
+{
+    if (!AXIsProcessTrusted() || !activateMacWindow(nativeWindow))
+        return false;
+    CGEventRef event = CGEventCreateScrollWheelEvent(nullptr, kCGScrollEventUnitPixel, 1, -120);
+    if (!event)
+        return false;
+    const CGPoint point = CGPointMake(globalPoint.x(), globalPoint.y());
+    CGEventSetLocation(event, point);
+    // New wheel events have a zero timestamp, which AppKit can discard.
+    // Quartz timestamps use nanoseconds since system startup.
+    CGEventSetTimestamp(event, static_cast<CGEventTimestamp>(NSProcessInfo.processInfo.systemUptime * 1.0e9));
+    CGEventPost(kCGHIDEventTap, event);
+    CFRelease(event);
+    return true;
 }
 
 } // namespace snipaste::platform

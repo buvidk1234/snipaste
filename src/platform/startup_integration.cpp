@@ -3,13 +3,9 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
-#include <QProcess>
 #include <QSaveFile>
 #include <QSettings>
 #include <QTextStream>
-#if defined(Q_OS_MACOS)
-#include <unistd.h>
-#endif
 namespace snipaste::platform
 {
 #if defined(Q_OS_MACOS)
@@ -17,12 +13,6 @@ bool setMacLoginStartup(bool enabled)
 {
     const QString launchAgentsPath = QDir::home().filePath(QStringLiteral("Library/LaunchAgents"));
     const QString plistPath = QDir(launchAgentsPath).filePath(QStringLiteral("com.snipaste.plist"));
-    const QString domain = QStringLiteral("gui/%1").arg(static_cast<qulonglong>(getuid()));
-
-    // Remove an older loaded service before changing its definition.  A
-    // missing service is expected when this is the first enable/disable.
-    QProcess::execute(QStringLiteral("/bin/launchctl"), {QStringLiteral("bootout"), domain, plistPath});
-
     if (!enabled)
         return !QFile::exists(plistPath) || QFile::remove(plistPath);
 
@@ -41,14 +31,12 @@ bool setMacLoginStartup(bool enabled)
            << QFileInfo(QCoreApplication::applicationFilePath()).absoluteFilePath().toHtmlEscaped()
            << QStringLiteral("</string></array>\n") << QStringLiteral("<key>RunAtLoad</key><true/>\n")
            << QStringLiteral("</dict></plist>\n");
-    if (!file.commit())
+    stream.flush();
+    if (stream.status() != QTextStream::Ok)
         return false;
-
-    // Loading immediately makes the preference effective without requiring a
-    // logout.  The app's single-instance guard prevents a second resident
-    // tray process if the current process is already running.
-    return QProcess::execute(QStringLiteral("/bin/launchctl"),
-                             {QStringLiteral("bootstrap"), domain, plistPath}) == 0;
+    // launchd reads this file at the next login. Unloading a currently loaded
+    // agent here would terminate this app if it was started by launchd.
+    return file.commit();
 }
 #endif
 bool setLoginStartup(bool enabled)

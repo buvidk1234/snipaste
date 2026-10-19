@@ -32,6 +32,7 @@ namespace snipaste::ui
 class AnnotationCanvas;
 class AnnotationOptions;
 class SnipBorderOverlay;
+class ScrollCaptureOverlay;
 class ScrollCapturePanel;
 class ScrollCapturePreview;
 class OcrOverlay;
@@ -41,6 +42,8 @@ class SnipOverlay final : public QWidget
 {
     Q_OBJECT
     friend class SnipBorderOverlay;
+    friend class ScrollCaptureOverlay;
+    friend class MacScrollCaptureTest;
 
   public:
     explicit SnipOverlay(QScreen *screen, bool autoCopy = false, QWidget *parent = nullptr);
@@ -254,6 +257,7 @@ class SnipOverlay final : public QWidget
     void forwardCanvasMouseEvent(QMouseEvent *event);
     void changeSelection(QRect selection, bool moveAnnotations);
     void paintSelectionFrame(QPainter &painter);
+    void paintScrollCaptureOverlay(QPainter &painter);
     QImage captureVirtualDesktop() const;
 
     QImage m_background;
@@ -339,6 +343,9 @@ class SnipOverlay final : public QWidget
     QString m_ocrLanguage;
     bool m_reusable = false;
     bool m_captureActive = false;
+#ifdef Q_OS_MACOS
+    bool m_captureActivated = false;
+#endif
     quint64 m_sessionGeneration = 0;
     QWidget *m_selectionBorder = nullptr;
     QPoint m_cursorPosition;
@@ -410,6 +417,9 @@ class SnipOverlay final : public QWidget
     bool m_enterExit = true;
     QPointer<ScrollCapturePanel> m_scrollPanel;
     QPointer<ScrollCapturePreview> m_scrollPreview;
+#ifdef Q_OS_MACOS
+    QPointer<QWidget> m_scrollOverlay;
+#endif
     snipaste::core::VerticalScrollStitcher m_scrollStitcher;
     QPointer<QScreen> m_scrollScreen;
     QRect m_scrollGlobalSelection;

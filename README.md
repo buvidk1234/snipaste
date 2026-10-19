@@ -7,10 +7,14 @@
 从 [GitHub Releases](https://github.com/buvidk1234/snipaste/releases) 下载对应平台的安装包，包内已包含 Qt 运行库。
 
 - Windows：运行 `windows-x64-setup.exe`，以管理员权限安装到 `C:\Program Files\Snipaste`（可自选目录），完成后从开始菜单启动；也可解压 `windows-x64.zip`，直接运行 `snipaste.exe`。
-- macOS：解压 `macos-universal.zip`，将 `snipaste.app` 拖入“应用程序”。首次运行需在系统设置中授予“屏幕录制”和“辅助功能”权限。
+- macOS：解压 `macos-universal.zip`，将 `snipaste.app` 拖入“应用程序”。当前安装包使用 ad-hoc 签名，尚未公证。首次运行需在系统设置中授予“屏幕录制”和“辅助功能”权限。
 
 - **F1**：截图。
 - **F3**：将剪贴板内容贴到屏幕。
+
+macOS 的功能键默认控制亮度等系统功能时，使用 `Fn+F1` / `Fn+F3`，或在系统设置中启用“将 F1、F2 等键用作标准功能键”。截图需要“隐私与安全性 → 屏幕与系统音频录制”权限；模拟粘贴、窗口元素识别和滚动截图还需要“辅助功能”权限。更改权限后重新启动应用。
+
+升级或重新构建后，如果权限已开启但仍被拒绝，请在系统设置中移除旧的 snipaste 授权记录，再添加当前运行的 `snipaste.app`，然后完全退出并重新打开应用。存在同名应用时，请核对路径，确保授权的是当前运行的这一份。
 
 更多操作可自行探索。
 
@@ -62,5 +66,7 @@ cmake --build --preset windows-msvc-release --target package
 ## 自动检查与发布
 
 [CI](.github/workflows/ci.yml) 在提交和 PR 时构建、测试并检查安装；OCR 测试依赖系统环境，单独运行并允许失败。
+
+macOS 测试还会用临时签名应用验证自动更新的校验、替换、失败回滚、配置保留和重启；安装检查会验证通用架构、签名和部署后的独立启动。
 
 更新 `CMakeLists.txt` 中的版本后，推送匹配的 `vX.Y.Z` 或 `vX.Y.Z-rc.1` 标签，由 [Release](.github/workflows/release.yml) 构建、测试、打包并上传 GitHub Releases。发布到其他仓库时设置 `SNIPASTE_RELEASE_REPOSITORY` 变量和 `RELEASE_TOKEN` Secret。

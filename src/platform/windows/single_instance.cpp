@@ -1,6 +1,7 @@
 #include "platform/windows/single_instance.h"
 
 #include <QDataStream>
+#include <QDeadlineTimer>
 #include <QLocalSocket>
 #include <QVariant>
 
@@ -15,6 +16,19 @@ QByteArray encodeArguments(const QStringList &arguments)
     QDataStream stream(&payload, QIODevice::WriteOnly);
     stream << arguments;
     return payload;
+}
+
+bool flushMessage(QLocalSocket &socket, int timeoutMs)
+{
+    const QDeadlineTimer deadline(timeoutMs);
+    socket.flush();
+    // On Unix flush() may already drain the socket. waitForBytesWritten()
+    // then returns false because there is no pending write left to wait for.
+    while (socket.bytesToWrite() > 0) {
+        if (deadline.hasExpired() || !socket.waitForBytesWritten(int(deadline.remainingTime())))
+            return false;
+    }
+    return true;
 }
 
 }
@@ -69,7 +83,6 @@ bool SingleInstance::acquire(const QString &key)
                     QStringList arguments;
                     payloadStream >> arguments;
                     if (payloadStream.status() == QDataStream::Ok) {
-                        socket->setProperty("snipasteLastArguments", arguments);
                         emit messageReceived(arguments);
                         emit messageReceivedWithSocket(arguments, socket);
                     }
@@ -78,10 +91,8 @@ bool SingleInstance::acquire(const QString &key)
                 if (consumed > 0 && consumed <= buffer.size())
                     buffer.remove(0, int(consumed));
                 socket->setProperty("snipasteMessageBuffer", buffer);
-                const QStringList arguments = socket->property("snipasteLastArguments").toStringList();
-                const bool awaitCompletion = arguments.contains(QStringLiteral("--snipaste-await"));
-                if (buffer.isEmpty() && !awaitCompletion)
-                    socket->disconnectFromServer();
+                // Let the sender close after flushing. Closing here can race
+                // the final Windows pipe-write completion notification.
             });
             connect(socket, &QLocalSocket::disconnected, socket, &QObject::deleteLater);
         }
@@ -105,8 +116,7 @@ bool SingleInstance::sendMessage(const QString &key, const QStringList &argument
     stream.writeRawData(payload.constData(), payload.size());
     if (stream.status() != QDataStream::Ok)
         return false;
-    socket.flush();
-    return socket.waitForBytesWritten(250);
+    return flushMessage(socket, 250);
 }
 
 bool SingleInstance::sendMessageAndWait(const QString &key, const QStringList &arguments,
@@ -125,10 +135,10 @@ bool SingleInstance::sendMessageAndWait(const QString &key, const QStringList &a
     QDataStream stream(&socket);
     stream << quint32(payload.size());
     stream.writeRawData(payload.constData(), payload.size());
-    if (stream.status() != QDataStream::Ok || !socket.waitForBytesWritten(500))
+    if (stream.status() != QDataStream::Ok || !flushMessage(socket, 500))
         return false;
     const int boundedTimeout = qBound(1, timeoutMs, 24 * 60 * 60 * 1000);
-    if (!socket.waitForReadyRead(boundedTimeout))
+    if (socket.bytesAvailable() == 0 && !socket.waitForReadyRead(boundedTimeout))
         return false;
     return socket.readAll().contains(kCompletionByte);
 }

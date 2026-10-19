@@ -40,6 +40,7 @@
 #include <QToolButton>
 #include <QToolTip>
 #include <QVariantAnimation>
+#include <QWindow>
 #include <algorithm>
 #include <cmath>
 
@@ -93,6 +94,9 @@ SnipOverlay::SnipOverlay(QScreen *screen, QWidget *parent, bool reusable)
     Q_ASSERT(screen);
     setAttribute(Qt::WA_DeleteOnClose, !reusable);
     setWindowFlags(Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
+#ifdef Q_OS_MACOS
+    setAttribute(Qt::WA_MacAlwaysShowToolWindow);
+#endif
     setAttribute(Qt::WA_TranslucentBackground, false);
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);
@@ -135,6 +139,8 @@ SnipOverlay::SnipOverlay(QScreen *screen, QWidget *parent, bool reusable)
 
 SnipOverlay::~SnipOverlay()
 {
+    if (m_scrollCaptureActive)
+        cleanupScrollCapture();
     if (m_targetWorker)
         m_targetWorker->stop();
 }
@@ -161,6 +167,9 @@ void SnipOverlay::beginCapture(QScreen *screen, bool autoCopy, bool captureCurso
     Q_ASSERT(screen && !m_captureActive);
     ++m_sessionGeneration;
     m_captureActive = true;
+#ifdef Q_OS_MACOS
+    m_captureActivated = false;
+#endif
     m_autoCopy = autoCopy;
     m_captureCursor = captureCursor;
     m_initialSelection = std::move(initialSelection);
@@ -710,32 +719,7 @@ void SnipOverlay::paintEvent(QPaintEvent *event)
     if (m_scrollCaptureActive && !m_selection.isEmpty())
     {
         painter.drawImage(rect(), m_background);
-        painter.fillRect(rect(), m_maskColor);
-
-        painter.save();
-        painter.setClipRect(m_selection);
-        painter.drawImage(rect(), m_background);
-        painter.restore();
-
-        painter.setPen(QPen(QColor(255, 255, 255, 160), 1));
-        painter.drawRect(m_selection.adjusted(0, 0, -1, -1));
-
-        const QString prompt = QStringLiteral("滚动页面截取更多内容");
-        QFont font = painter.font();
-        font.setPointSize(14);
-        font.setBold(true);
-        painter.setFont(font);
-        const QFontMetrics fm(font);
-        const int textH = fm.height();
-        int textX = m_selection.left();
-        int textY = m_selection.top() - 10;
-        if (textY - textH < 10)
-            textY = m_selection.top() + textH + 8;
-
-        painter.setPen(QColor(0, 0, 0, 180));
-        painter.drawText(textX + 1, textY + 1, prompt);
-        painter.setPen(QColor(255, 255, 255, 245));
-        painter.drawText(textX, textY, prompt);
+        paintScrollCaptureOverlay(painter);
         return;
     }
     painter.setRenderHint(QPainter::Antialiasing, false);
@@ -779,6 +763,33 @@ void SnipOverlay::paintEvent(QPaintEvent *event)
     // Qt repaints translucent children along with their parent. Requesting
     // another child update here schedules the parent background again and
     // creates a continuous repaint loop even after the pointer has stopped.
+}
+
+void SnipOverlay::paintScrollCaptureOverlay(QPainter &painter)
+{
+    QPainterPath mask;
+    mask.addRect(rect());
+    mask.addRect(m_selection);
+    painter.fillPath(mask, m_maskColor);
+    painter.setPen(QPen(QColor(255, 255, 255, 160), 1));
+    painter.drawRect(m_selection.adjusted(0, 0, -1, -1));
+
+    const QString prompt = QStringLiteral("滚动页面截取更多内容");
+    QFont font = painter.font();
+    font.setPointSize(14);
+    font.setBold(true);
+    painter.setFont(font);
+    const QFontMetrics fm(font);
+    const int textH = fm.height();
+    const int textX = m_selection.left();
+    int textY = m_selection.top() - 10;
+    if (textY - textH < 10)
+        textY = m_selection.top() + textH + 8;
+
+    painter.setPen(QColor(0, 0, 0, 180));
+    painter.drawText(textX + 1, textY + 1, prompt);
+    painter.setPen(QColor(255, 255, 255, 245));
+    painter.drawText(textX, textY, prompt);
 }
 
 void SnipOverlay::paintSelectionFrame(QPainter &painter)
@@ -1255,11 +1266,27 @@ void SnipOverlay::keyReleaseEvent(QKeyEvent *event)
 void SnipOverlay::changeEvent(QEvent *event)
 {
     QWidget::changeEvent(event);
-    if (event->type() != QEvent::WindowDeactivate || !m_exitOnFocusLoss)
+#ifdef Q_OS_MACOS
+    if (event->type() != QEvent::ActivationChange)
+        return;
+    if (windowHandle() && windowHandle()->isActive()) {
+        m_captureActivated = true;
+        return;
+    }
+    if (!m_captureActivated || !m_exitOnFocusLoss || m_scrollCaptureActive)
+#else
+    if (event->type() != QEvent::WindowDeactivate || !m_exitOnFocusLoss || m_scrollCaptureActive)
+#endif
         return;
     const auto generation = m_sessionGeneration;
     QTimer::singleShot(0, this, [this, generation] {
-        if (generation != m_sessionGeneration || !m_captureActive || !isVisible() || isActiveWindow() ||
+        if (generation != m_sessionGeneration || !m_captureActive || m_scrollCaptureActive ||
+            !isVisible() ||
+#ifdef Q_OS_MACOS
+            (windowHandle() && windowHandle()->isActive()) ||
+#else
+            isActiveWindow() ||
+#endif
             QApplication::activePopupWidget() || QApplication::activeModalWidget())
             return;
         close();
@@ -1272,6 +1299,18 @@ void SnipOverlay::showEvent(QShowEvent *event)
     activateWindow();
     raise();
     setFocus();
+#ifdef Q_OS_MACOS
+    // showEvent precedes the native show. Cocoa can activate the application
+    // only after the tool window is visible.
+    const auto generation = m_sessionGeneration;
+    QTimer::singleShot(0, this, [this, generation] {
+        if (generation != m_sessionGeneration || !m_captureActive ||
+            m_scrollCaptureActive || !isVisible())
+            return;
+        raise();
+        activateWindow();
+    });
+#endif
     // Display a window fallback immediately; accessibility queries run on
     // the coalescing worker after the first frame.
     if (!m_selection.isEmpty() && !m_selectionConfirmed)
@@ -1507,7 +1546,8 @@ void SnipOverlay::drawShortcutHints(QPainter &painter) const
     row(2, {QStringLiteral("1"), QStringLiteral("2"), QStringLiteral("/"), QStringLiteral("mouse")},
         m_selectionConfirmed ? QStringLiteral("从中心调整区域大小")
                              : QStringLiteral("选择上一层/下一层界面元素"));
-    row(3, {QStringLiteral("Ctrl"), QStringLiteral("A")}, QStringLiteral("设置截屏区域为当前屏幕/全屏"));
+    row(3, {snipaste::platform::primaryModifierText(), QStringLiteral("A")},
+        QStringLiteral("设置截屏区域为当前屏幕/全屏"));
     if (!m_selectionConfirmed)
         row(4, {QStringLiteral("R"), QStringLiteral("Shift"), QStringLiteral("R")},
             QStringLiteral("使用上一次截屏的区域"));
@@ -1522,20 +1562,7 @@ void SnipOverlay::closeEvent(QCloseEvent *event)
 {
     if (m_scrollCaptureActive)
     {
-        m_scrollCaptureActive = false;
-        m_scrollAutoRunning = false;
-        m_scrollCaptureBusy = false;
-        // The low-level hook is process-wide; always remove it before the
-        // overlay is destroyed, including Esc/window-manager close paths.
-        stopScrollInputMonitoring();
-        if (m_scrollPanel)
-        {
-            m_scrollPanel->hide();
-            m_scrollPanel->deleteLater();
-            m_scrollPanel = nullptr;
-        }
-        restoreScrollCaptureCursor();
-        m_scrollWindow = 0;
+        cleanupScrollCapture();
     }
     if (m_includeUnsavedHistory && !m_outputEmitted && m_selectionConfirmed)
     {

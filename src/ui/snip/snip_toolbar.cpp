@@ -241,9 +241,9 @@ void SnipOverlay::createToolbar()
     auto *scrollCapture = button(CaptureIcon::Scroll, QStringLiteral("滚动截图"),
                                  QStringLiteral("滚动截图：手动滚动后采集当前视口"));
     connect(scrollCapture, &QToolButton::clicked, this, &SnipOverlay::startScrollCapture);
-#ifndef Q_OS_WIN
+#if !defined(Q_OS_WIN) && !defined(Q_OS_MACOS)
     scrollCapture->setEnabled(false);
-    scrollCapture->setToolTip(QStringLiteral("滚动截图目前仅支持 Windows"));
+    scrollCapture->setToolTip(QStringLiteral("当前平台不支持滚动截图"));
 #endif
     auto *undo =
         button(CaptureIcon::Undo, QStringLiteral("撤销"),

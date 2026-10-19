@@ -45,8 +45,8 @@ private:
     bool handleNativeMouseEvent(void *event);
     void finishCapture(const QPoint &globalPosition);
     void cancelCapture();
-    void *m_globalMonitor = nullptr;
-    void *m_localMonitor = nullptr;
+    void *m_eventTap = nullptr;
+    void *m_eventTapSource = nullptr;
 #endif
     bool m_enabled = false;
     Qt::KeyboardModifier m_modifier = Qt::NoModifier;
