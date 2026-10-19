@@ -1,5 +1,6 @@
 #include "ui/preferences/preferences_dialog.h"
 
+#include <QCoreApplication>
 #include <QFont>
 #include <QLabel>
 #include <QVBoxLayout>
@@ -20,7 +21,8 @@ QWidget *PreferencesDialog::createAboutPage(QWidget *parent)
     aboutFont.setPointSize(18);
     aboutName->setFont(aboutFont);
     aboutLayout->addWidget(aboutName);
-    auto *aboutVersion = new QLabel(QStringLiteral("版本 0.1.0（开源开发版）"), aboutPage);
+    auto *aboutVersion = new QLabel(QStringLiteral("版本 %1（开源开发版）")
+                                       .arg(QCoreApplication::applicationVersion()), aboutPage);
     aboutVersion->setObjectName(QStringLiteral("aboutVersion"));
     aboutLayout->addWidget(aboutVersion);
     aboutLayout->addStretch();

@@ -4,11 +4,13 @@ import ctypes
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import time
 import unittest
+import uuid
 import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -18,8 +20,24 @@ POWERSHELL = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/p
 
 
 class WindowsInstallerTest(unittest.TestCase):
+    def binary_version(self, path):
+        version = ctypes.WinDLL("version", use_last_error=True)
+        version.GetFileVersionInfoSizeW.argtypes = [ctypes.c_wchar_p, ctypes.c_void_p]
+        version.GetFileVersionInfoW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32,
+                                              ctypes.c_uint32, ctypes.c_void_p]
+        version.VerQueryValueW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p,
+                                          ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_uint32)]
+        size = version.GetFileVersionInfoSizeW(str(path), None)
+        self.assertGreater(size, 0, f"Missing version information: {path}")
+        buffer = ctypes.create_string_buffer(size)
+        self.assertTrue(version.GetFileVersionInfoW(str(path), 0, size, buffer))
+        pointer, length = ctypes.c_void_p(), ctypes.c_uint32()
+        self.assertTrue(version.VerQueryValueW(buffer, "\\", ctypes.byref(pointer), ctypes.byref(length)))
+        fixed = ctypes.cast(pointer, ctypes.POINTER(ctypes.c_uint32 * 6)).contents
+        return fixed[2] >> 16, fixed[2] & 0xffff, fixed[3] >> 16, fixed[3] & 0xffff
+
     @unittest.skipUnless(os.environ.get("SNIPASTE_TEST_SETUP"), "No packaged EXE supplied")
-    def test_packaged_installer_requests_admin_access(self):
+    def test_packaged_installer_can_be_launched_by_legacy_updater(self):
         kernel = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel.LoadLibraryExW.argtypes = [ctypes.c_wchar_p, ctypes.c_void_p, ctypes.c_uint32]
         kernel.LoadLibraryExW.restype = ctypes.c_void_p
@@ -45,16 +63,13 @@ class WindowsInstallerTest(unittest.TestCase):
             manifest = ET.fromstring(ctypes.string_at(pointer, size))
             level = manifest.find(".//{urn:schemas-microsoft-com:asm.v3}requestedExecutionLevel")
             self.assertIsNotNone(level)
-            self.assertEqual(level.get("level"), "requireAdministrator")
+            self.assertEqual(level.get("level"), "asInvoker")
         finally:
             kernel.FreeLibrary(module)
 
     @unittest.skipUnless(os.environ.get("SNIPASTE_TEST_SETUP"), "No packaged EXE supplied")
     def test_exe_installs_and_updates_portable_without_registration(self):
         import winreg
-
-        if not ctypes.windll.shell32.IsUserAnAdmin():
-            self.skipTest("Run the packaged EXE integration test from an elevated shell")
 
         def registration():
             directories = []
@@ -79,6 +94,7 @@ class WindowsInstallerTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout.decode(errors="replace"))
             self.assertTrue((destination / "Qt6Core.dll").is_file())
             installed = (destination / "snipaste.exe").read_bytes()
+            self.assertEqual(self.binary_version(destination / "snipaste.exe"), self.binary_version(setup))
             (destination / "snipaste.exe").write_bytes(b"old executable")
             (destination / "config.ini").write_bytes(b"keep my settings")
             manifest = root / "install.json"
@@ -98,6 +114,95 @@ class WindowsInstallerTest(unittest.TestCase):
             self.assertEqual((destination / "config.ini").read_bytes(), b"keep my settings")
             self.assertFalse((destination / "Uninstall.exe").exists())
             self.assertEqual(registration(), before)
+
+    @unittest.skipUnless(os.environ.get("NSIS_ROOT"), "No NSIS compiler supplied")
+    def test_legacy_user_install_upgrades_in_place_and_keeps_its_scope(self):
+        import winreg
+
+        # Compile the production installer with isolated registry and shortcut
+        # names so this test never changes a real Snipaste installation.
+        name = "snipaste-installer-test-" + uuid.uuid4().hex
+        app_key = "Software\\" + name
+        uninstall_key = "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\" + name
+        access = winreg.KEY_ALL_ACCESS | winreg.KEY_WOW64_64KEY
+        version = re.search(r"VERSION\s+(\d+\.\d+\.\d+)",
+                            (SCRIPT.parents[1] / "CMakeLists.txt").read_text(encoding="utf-8"))[1]
+        shortcuts = Path(os.environ["APPDATA"]) / "Microsoft/Windows/Start Menu/Programs" / name
+        try:
+            with tempfile.TemporaryDirectory(prefix="snipaste-update-legacy-test-") as folder:
+                root = Path(folder).resolve()
+                self.assertTrue(root.is_relative_to(Path(tempfile.gettempdir()).resolve()))
+                destination = root / "普通 用户" / "Snipaste"
+                destination.mkdir(parents=True)
+                (destination / "snipaste.exe").write_bytes(b"old executable")
+                (destination / "config.ini").write_bytes(b"keep my settings")
+                with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, app_key, access=access) as key:
+                    winreg.SetValueEx(key, "InstallDir", 0, winreg.REG_SZ, str(destination))
+                with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, uninstall_key, access=access) as key:
+                    winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, "0.1.3")
+                archive = root / "payload.zip"
+                with zipfile.ZipFile(archive, "w") as package:
+                    package.writestr("snipaste.exe", b"new executable")
+                    package.writestr("Qt6Core.dll", b"runtime")
+                uninstall_files = root / "uninstall-files.nsh"
+                uninstall_files.write_text('Delete "$INSTDIR\\snipaste.exe"\n'
+                                           'Delete "$INSTDIR\\Qt6Core.dll"\n', encoding="utf-8")
+                setup = root / "setup.exe"
+                command = [str(Path(os.environ["NSIS_ROOT"]) / "makensis.exe"), "/V2", "/INPUTCHARSET", "UTF8",
+                           f"/DAPP_KEY={app_key}", f"/DUNINSTALL_KEY={uninstall_key}",
+                           f"/DSTART_MENU_FOLDER={name}", f"/DVERSION={version}",
+                           f"/DPRODUCT_VERSION={version}.0", f"/DARCHIVE={archive}",
+                           f"/DOUTPUT_FILE={setup}", f"/DSCRIPT_DIRECTORY={SCRIPT.parent}",
+                           f"/DUNINSTALL_FILES={uninstall_files}", "/DINSTALLED_SIZE=1",
+                           str(SCRIPT.parent / "installer.nsi")]
+                built = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
+                self.assertEqual(built.returncode, 0, built.stdout.decode(errors="replace"))
+                # CreateProcess (not ShellExecute/runas), as used by v0.1.3.
+                # No /D: discover its HKCU install even on a fresh installer.
+                result = subprocess.run([str(setup), "/S"], capture_output=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stdout.decode(errors="replace"))
+                self.assertEqual((destination / "snipaste.exe").read_bytes(), b"new executable")
+                self.assertEqual((destination / "config.ini").read_bytes(), b"keep my settings")
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, uninstall_key, access=access) as key:
+                    self.assertEqual(winreg.QueryValueEx(key, "DisplayVersion")[0], version)
+                self.assertTrue((shortcuts / "snipaste.lnk").is_file())
+                with self.assertRaises(FileNotFoundError):
+                    winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, app_key,
+                                   access=winreg.KEY_READ | winreg.KEY_WOW64_64KEY)
+                # Also exercise the real updater's EXE path, including /D and
+                # the wait/exit-status handoff, without any machine registry.
+                (destination / "snipaste.exe").write_bytes(b"old executable")
+                manifest = root / "install.json"
+                manifest.write_text(json.dumps({
+                    "archive": str(setup), "destination": str(destination),
+                    "sha256": hashlib.sha256(setup.read_bytes()).hexdigest(),
+                    "processId": 0, "restart": False, "portable": False,
+                }), encoding="utf-8")
+                result = subprocess.run([str(POWERSHELL), "-NoProfile", "-NonInteractive",
+                                         "-ExecutionPolicy", "Bypass", "-File", str(SCRIPT),
+                                         "-Manifest", str(manifest)], capture_output=True, timeout=30)
+                status = json.loads((root / "status.json").read_text(encoding="utf-8-sig"))
+                self.assertEqual(result.returncode, 0, status)
+                self.assertEqual(status["state"], "installed")
+                self.assertEqual((destination / "snipaste.exe").read_bytes(), b"new executable")
+                # The generated uninstaller must use the same user scope.
+                result = subprocess.run(f'"{destination / "Uninstall.exe"}" /S _?={destination}',
+                                        capture_output=True, timeout=30)
+                self.assertEqual(result.returncode, 0)
+                self.assertFalse((destination / "snipaste.exe").exists())
+                self.assertEqual((destination / "config.ini").read_bytes(), b"keep my settings")
+                with self.assertRaises(FileNotFoundError):
+                    winreg.OpenKey(winreg.HKEY_CURRENT_USER, app_key, access=access)
+        finally:
+            for key in (app_key, uninstall_key):
+                try:
+                    winreg.DeleteKeyEx(winreg.HKEY_CURRENT_USER, key, winreg.KEY_WOW64_64KEY)
+                except FileNotFoundError:
+                    pass
+            if shortcuts.exists():
+                self.assertEqual(shortcuts.resolve().parent,
+                                 (Path(os.environ["APPDATA"]) / "Microsoft/Windows/Start Menu/Programs").resolve())
+                shutil.rmtree(shortcuts)
 
     def test_setup_installs_and_upgrades_in_a_unicode_path(self):
         with tempfile.TemporaryDirectory(prefix="snipaste-setup-test-") as folder:

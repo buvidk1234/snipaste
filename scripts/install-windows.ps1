@@ -111,10 +111,19 @@ try {
     if ($isSetup) {
         $setup = New-Object Diagnostics.ProcessStartInfo
         $setup.FileName = $archive
-        # The EXE installs into Program Files and requests administrator access.
-        # Keep this helper unelevated so the application restarts as its user.
+        # The installer preserves per-user installs and elevates itself for
+        # machine installs. Keep this helper and the restarted app unelevated.
         $setup.UseShellExecute = $true
-        $setup.Verb = 'runas'
+        if ($settings.portable) {
+            $probe = Join-Path $destination ('.snipaste-update-' + [Guid]::NewGuid().ToString('N'))
+            try {
+                $stream = [IO.FileStream]::new($probe, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write,
+                    [IO.FileShare]::None, 1, [IO.FileOptions]::DeleteOnClose)
+                $stream.Dispose()
+            } catch [UnauthorizedAccessException] {
+                $setup.Verb = 'runas'
+            }
+        }
         $setup.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
         # NSIS requires /D to be last and its path must not be quoted.
         $setup.Arguments = '/S ' + $(if ($settings.portable) { '/PORTABLE ' } else { '' }) + '/D=' + $destination

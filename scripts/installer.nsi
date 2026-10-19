@@ -1,6 +1,8 @@
 Unicode true
 ManifestDPIAware true
-RequestExecutionLevel admin
+; v0.1.3 launches updates with CreateProcess. A requireAdministrator manifest
+; fails there with ERROR_ELEVATION_REQUIRED before any installer code can run.
+RequestExecutionLevel user
 SetCompress off
 
 !include MUI2.nsh
@@ -8,8 +10,15 @@ SetCompress off
 !include x64.nsh
 !include FileFunc.nsh
 
-!define APP_KEY "Software\snipaste-open-source"
-!define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\snipaste-open-source"
+!ifndef APP_KEY
+    !define APP_KEY "Software\snipaste-open-source"
+!endif
+!ifndef UNINSTALL_KEY
+    !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\snipaste-open-source"
+!endif
+!ifndef START_MENU_FOLDER
+    !define START_MENU_FOLDER "snipaste"
+!endif
 Name "snipaste"
 OutFile "${OUTPUT_FILE}"
 InstallDir ""
@@ -17,8 +26,24 @@ VIProductVersion "${PRODUCT_VERSION}"
 VIAddVersionKey "ProductName" "snipaste"
 VIAddVersionKey "FileDescription" "snipaste Setup"
 VIAddVersionKey "FileVersion" "${VERSION}"
+VIAddVersionKey "ProductVersion" "${VERSION}"
 VIAddVersionKey "LegalCopyright" "snipaste contributors"
 Var PortableMode
+
+!macro RequireAdministrator suffix
+    UserInfo::GetAccountType
+    Pop $1
+    ${If} $1 != "Admin"
+        ClearErrors
+        ExecShellWait "runas" "$EXEPATH" '$0 ${suffix}' SW_SHOWNORMAL $1
+        ${If} ${Errors}
+            SetErrorLevel 1223
+        ${Else}
+            SetErrorLevel $1
+        ${EndIf}
+        Quit
+    ${EndIf}
+!macroend
 
 !define MUI_ABORTWARNING
 !insertmacro MUI_PAGE_WELCOME
@@ -32,11 +57,14 @@ Var PortableMode
 
 Function .onInit
     SetRegView 64
-    SetShellVarContext all
     ; An explicit /D (including in-app updates) takes precedence, followed by
-    ; the registered installation. New installs use the native Program Files.
+    ; the legacy per-user installation and then the machine installation.
+    ReadRegStr $2 HKCU "${APP_KEY}" "InstallDir"
     ${If} $INSTDIR == ""
-        ReadRegStr $INSTDIR HKLM "${APP_KEY}" "InstallDir"
+        StrCpy $INSTDIR $2
+        ${If} $INSTDIR == ""
+            ReadRegStr $INSTDIR HKLM "${APP_KEY}" "InstallDir"
+        ${EndIf}
         ${If} $INSTDIR == ""
             StrCpy $INSTDIR "$PROGRAMFILES64\Snipaste"
         ${EndIf}
@@ -53,6 +81,14 @@ Function .onInit
         MessageBox MB_ICONSTOP "This package requires 64-bit Windows." /SD IDOK
         SetErrorLevel 1
         Abort
+    ${EndIf}
+    ${If} $PortableMode == 1
+    ${OrIf} $INSTDIR == $2
+        ; Upgrade v0.1.3 in place, keeping its user registration and shortcuts.
+        SetShellVarContext current
+    ${Else}
+        !insertmacro RequireAdministrator ""
+        SetShellVarContext all
     ${EndIf}
 FunctionEnd
 
@@ -72,25 +108,32 @@ Section "snipaste"
     SetOutPath "$INSTDIR"
     ${If} $PortableMode == 0
         WriteUninstaller "$INSTDIR\Uninstall.exe"
-        CreateDirectory "$SMPROGRAMS\snipaste"
-        CreateShortcut "$SMPROGRAMS\snipaste\snipaste.lnk" "$INSTDIR\snipaste.exe"
-        CreateShortcut "$SMPROGRAMS\snipaste\卸载 snipaste.lnk" "$INSTDIR\Uninstall.exe"
-        WriteRegStr HKLM "${APP_KEY}" "InstallDir" "$INSTDIR"
-        WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayName" "snipaste (Open Source)"
-        WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayVersion" "${VERSION}"
-        WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\snipaste.exe"
-        WriteRegStr HKLM "${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"
-        WriteRegStr HKLM "${UNINSTALL_KEY}" "UninstallString" '$\"$INSTDIR\Uninstall.exe$\"'
-        WriteRegStr HKLM "${UNINSTALL_KEY}" "QuietUninstallString" '$\"$INSTDIR\Uninstall.exe$\" /S'
-        WriteRegDWORD HKLM "${UNINSTALL_KEY}" "NoModify" 1
-        WriteRegDWORD HKLM "${UNINSTALL_KEY}" "NoRepair" 1
-        WriteRegDWORD HKLM "${UNINSTALL_KEY}" "EstimatedSize" ${INSTALLED_SIZE}
+        CreateDirectory "$SMPROGRAMS\${START_MENU_FOLDER}"
+        CreateShortcut "$SMPROGRAMS\${START_MENU_FOLDER}\snipaste.lnk" "$INSTDIR\snipaste.exe"
+        CreateShortcut "$SMPROGRAMS\${START_MENU_FOLDER}\卸载 snipaste.lnk" "$INSTDIR\Uninstall.exe"
+        WriteRegStr SHCTX "${APP_KEY}" "InstallDir" "$INSTDIR"
+        WriteRegStr SHCTX "${UNINSTALL_KEY}" "DisplayName" "snipaste (Open Source)"
+        WriteRegStr SHCTX "${UNINSTALL_KEY}" "DisplayVersion" "${VERSION}"
+        WriteRegStr SHCTX "${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\snipaste.exe"
+        WriteRegStr SHCTX "${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"
+        WriteRegStr SHCTX "${UNINSTALL_KEY}" "UninstallString" '$\"$INSTDIR\Uninstall.exe$\"'
+        WriteRegStr SHCTX "${UNINSTALL_KEY}" "QuietUninstallString" '$\"$INSTDIR\Uninstall.exe$\" /S'
+        WriteRegDWORD SHCTX "${UNINSTALL_KEY}" "NoModify" 1
+        WriteRegDWORD SHCTX "${UNINSTALL_KEY}" "NoRepair" 1
+        WriteRegDWORD SHCTX "${UNINSTALL_KEY}" "EstimatedSize" ${INSTALLED_SIZE}
     ${EndIf}
 SectionEnd
 
 Function un.onInit
     SetRegView 64
-    SetShellVarContext all
+    ReadRegStr $2 HKCU "${APP_KEY}" "InstallDir"
+    ${If} $INSTDIR == $2
+        SetShellVarContext current
+    ${Else}
+        ${un.GetParameters} $0
+        !insertmacro RequireAdministrator "_?=$INSTDIR"
+        SetShellVarContext all
+    ${EndIf}
 FunctionEnd
 
 Section "Uninstall"
@@ -107,12 +150,12 @@ Section "Uninstall"
     !include "${UNINSTALL_FILES}"
     Delete "$INSTDIR\Uninstall.exe"
     RMDir "$INSTDIR"
-    ReadRegStr $0 HKLM "${APP_KEY}" "InstallDir"
+    ReadRegStr $0 SHCTX "${APP_KEY}" "InstallDir"
     ${If} $0 == $INSTDIR
-        Delete "$SMPROGRAMS\snipaste\snipaste.lnk"
-        Delete "$SMPROGRAMS\snipaste\卸载 snipaste.lnk"
-        RMDir "$SMPROGRAMS\snipaste"
-        DeleteRegKey HKLM "${APP_KEY}"
-        DeleteRegKey HKLM "${UNINSTALL_KEY}"
+        Delete "$SMPROGRAMS\${START_MENU_FOLDER}\snipaste.lnk"
+        Delete "$SMPROGRAMS\${START_MENU_FOLDER}\卸载 snipaste.lnk"
+        RMDir "$SMPROGRAMS\${START_MENU_FOLDER}"
+        DeleteRegKey SHCTX "${APP_KEY}"
+        DeleteRegKey SHCTX "${UNINSTALL_KEY}"
     ${EndIf}
 SectionEnd

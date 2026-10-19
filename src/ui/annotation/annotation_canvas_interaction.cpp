@@ -100,11 +100,12 @@ void AnnotationCanvas::applyEraserSegment(const QPointF &from, const QPointF &to
     m_document.editShapes([&](Shape &shape) {
         if (!annotation::shapeBounds(shape).intersects(eraseBounds) || shape.erasedPath.contains(eraserPath))
             return false;
+        // Resolve overlaps as each small segment arrives. Appending every
+        // capsule makes each repaint resolve the entire stroke again.
         // Keep the original vector shape and accumulate covered regions.
         // Rendering subtracts this path from this shape only, so a later
         // annotation is still painted on top of an earlier erased area.
-        shape.erasedPath.setFillRule(Qt::WindingFill);
-        shape.erasedPath.addPath(eraserPath);
+        shape.erasedPath = shape.erasedPath.united(eraserPath);
         changed = true;
         return true;
     });

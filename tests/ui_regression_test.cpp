@@ -57,6 +57,7 @@
 #include <QPushButton>
 #include <QAction>
 #include <QScreen>
+#include <QScopeGuard>
 #include <QSemaphore>
 #include <QSignalSpy>
 #include <QScrollArea>
@@ -88,6 +89,7 @@ private slots:
     void preferencesCloseSavesWithoutQuitting();
     void preferencesPendingCallbacksAreCancelled();
     void preferencesProfessionalReferencePages();
+    void preferencesAboutUsesRunningVersion();
     void copyAsFileModesProduceExpectedClipboardFormats();
     void clipboardBitmapCompatibility();
     void overlayCopyButtonHonorsCopyAsFileMode();
@@ -123,6 +125,7 @@ private slots:
     void eraserRemovesOnlyCoveredStrokeRegion();
     void eraserRemovesOnlyCoveredShapeRegion();
     void eraserRemovesMagnifierInteriorLocally();
+    void eraserOverlappingGesturePreservesLayersAndRedo();
     void annotationHistoryMixedOperations();
     void annotationHistoryShapeEdits();
     void annotationHistoryClearAndBranch();
@@ -290,6 +293,19 @@ void UiRegressionTest::clipboardBitmapCompatibility()
     QVERIFY(withoutBitmap.data(QStringLiteral("image/bmp")).isEmpty());
     ui::ClipboardImageData empty({}, true);
     QVERIFY(!empty.hasFormat(QStringLiteral("image/bmp")));
+}
+
+void UiRegressionTest::preferencesAboutUsesRunningVersion()
+{
+    const QString previousVersion = QCoreApplication::applicationVersion();
+    const auto restoreVersion = qScopeGuard([&] { QCoreApplication::setApplicationVersion(previousVersion); });
+    QCoreApplication::setApplicationVersion(QStringLiteral("0.1.4-test"));
+    QTemporaryDir temporary;
+    core::ConfigStore config(temporary.filePath(QStringLiteral("config.ini")));
+    ui::PreferencesDialog dialog(config);
+    const auto *label = dialog.findChild<QLabel *>(QStringLiteral("aboutVersion"));
+    QVERIFY(label);
+    QCOMPARE(label->text(), QStringLiteral("版本 0.1.4-test（开源开发版）"));
 }
 
 void UiRegressionTest::copyAsFileModesProduceExpectedClipboardFormats()
@@ -2659,6 +2675,74 @@ void UiRegressionTest::eraserRemovesMagnifierInteriorLocally()
     QCOMPARE(canvas.renderedImage(false), before);
     canvas.redo();
     QCOMPARE(canvas.renderedImage(false), after);
+}
+
+void UiRegressionTest::eraserOverlappingGesturePreservesLayersAndRedo()
+{
+    QImage source(640, 420, QImage::Format_ARGB32_Premultiplied);
+    source.fill(Qt::white);
+    ui::AnnotationCanvas canvas(source);
+    canvas.resize(source.size());
+    canvas.setAutoSelectOnCreation(false);
+    canvas.show();
+    canvas.setTool(ui::AnnotationCanvas::Tool::Rectangle);
+    canvas.setShapeFilled(true);
+    canvas.setPenColor(Qt::red);
+    QTest::mousePress(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(60, 60));
+    QTest::mouseRelease(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(580, 360));
+    canvas.setTool(ui::AnnotationCanvas::Tool::Pen);
+    canvas.setPenWidth(14);
+    canvas.setPenColor(Qt::blue);
+    QTest::mousePress(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(80, 210));
+    QMouseEvent strokeMove(QEvent::MouseMove, QPoint(560, 210), canvas.mapToGlobal(QPoint(560, 210)),
+                           Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(&canvas, &strokeMove);
+    QTest::mouseRelease(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(560, 210));
+    const QImage before = canvas.renderedImage(false);
+
+    const auto eraseLoop = [&] {
+        canvas.setTool(ui::AnnotationCanvas::Tool::Eraser);
+        canvas.setPenWidth(24);
+        const QList<QPoint> corners{{200, 140}, {440, 140}, {440, 280}, {200, 280}, {200, 140}};
+        QTest::mousePress(&canvas, Qt::LeftButton, Qt::NoModifier, corners.first());
+        for (int edge = 1; edge < corners.size(); ++edge) {
+            for (int step = 1; step <= 30; ++step) {
+                const QPoint point = corners.at(edge - 1) +
+                                     (corners.at(edge) - corners.at(edge - 1)) * step / 30;
+                QMouseEvent move(QEvent::MouseMove, point, canvas.mapToGlobal(point),
+                                 Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(&canvas, &move);
+            }
+        }
+        QTest::mouseRelease(&canvas, Qt::LeftButton, Qt::NoModifier, corners.last());
+    };
+    eraseLoop();
+    const QImage after = canvas.renderedImage(false);
+    QCOMPARE(after.pixelColor(200, 210), QColor(Qt::white)); // Both older marks are erased.
+    QCOMPARE(after.pixelColor(320, 140), QColor(Qt::white));
+    QCOMPARE(after.pixelColor(200, 140), QColor(Qt::white)); // Overlapping corner capsules.
+    QCOMPARE(after.pixelColor(320, 180), QColor(Qt::red)); // The loop's hole stays intact.
+    QCOMPARE(after.pixelColor(320, 210), QColor(Qt::blue));
+    QCOMPARE(after.pixelColor(320, 100), QColor(Qt::red));
+    canvas.undo();
+    QCOMPARE(canvas.renderedImage(false), before);
+    canvas.redo();
+    QCOMPARE(canvas.renderedImage(false), after);
+
+    canvas.setTool(ui::AnnotationCanvas::Tool::Pen);
+    canvas.setPenColor(Qt::green);
+    canvas.setPenWidth(8);
+    QTest::mouseClick(&canvas, Qt::LeftButton, Qt::NoModifier, QPoint(200, 210));
+    const QImage later = canvas.renderedImage(false);
+    QCOMPARE(later.pixelColor(200, 210), QColor(Qt::green)); // Later marks cover erased areas.
+    canvas.undo();
+    QCOMPARE(canvas.renderedImage(false), after);
+    QVERIFY(canvas.canRedo());
+    eraseLoop(); // Repeating a covered gesture must preserve the redo branch.
+    QCOMPARE(canvas.renderedImage(false), after);
+    QVERIFY(canvas.canRedo());
+    canvas.redo();
+    QCOMPARE(canvas.renderedImage(false), later);
 }
 
 void UiRegressionTest::annotationHistoryMixedOperations()

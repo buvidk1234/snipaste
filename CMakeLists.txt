@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.28)
 
 project(snipaste
-    VERSION 0.1.4
+    VERSION 0.1.5
     DESCRIPTION "Open source screenshot, pin and annotation tool"
     LANGUAGES CXX
 )
@@ -363,6 +363,9 @@ if(WIN32)
     # This is a tray application. Do not create a console window when launched
     # by double-clicking the executable in Explorer.
     set_target_properties(snipaste PROPERTIES WIN32_EXECUTABLE TRUE)
+    enable_language(RC)
+    configure_file(resources/windows/version.rc.in snipaste-version.rc @ONLY)
+    target_sources(snipaste PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/snipaste-version.rc")
 endif()
 
 target_include_directories(snipaste PRIVATE src)
