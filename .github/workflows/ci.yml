@@ -63,7 +63,22 @@ jobs:
         run: |
           app="build/$BUILD_PRESET/install/snipaste.app"
           codesign --verify --deep --strict "$app"
-          lipo "$app/Contents/MacOS/snipaste" -verify_arch x86_64 arm64
+          test "$(lipo -archs "$app/Contents/MacOS/snipaste")" = arm64
+          env -u QT_PLUGIN_PATH -u QT_QPA_PLATFORM_PLUGIN_PATH QT_QPA_PLATFORM=cocoa "$app/Contents/MacOS/snipaste" --version
+      - name: Verify macOS disk image
+        if: runner.os == 'macOS'
+        run: |
+          cmake --build --preset "$BUILD_PRESET" --target package
+          image=(dist/*-macos-arm64.dmg)
+          hdiutil verify "${image[0]}"
+          mount_point="$RUNNER_TEMP/snipaste-dmg-check"
+          mkdir -p "$mount_point"
+          trap 'hdiutil detach "$mount_point"' EXIT
+          hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$mount_point" "${image[0]}"
+          test "$(readlink "$mount_point/Applications")" = /Applications
+          app="$mount_point/snipaste.app"
+          codesign --verify --deep --strict "$app"
+          test "$(lipo -archs "$app/Contents/MacOS/snipaste")" = arm64
           env -u QT_PLUGIN_PATH -u QT_QPA_PLATFORM_PLUGIN_PATH QT_QPA_PLATFORM=cocoa "$app/Contents/MacOS/snipaste" --version
       - name: Upload failed test diagnostics
         if: failure() || steps.ocr_tests.outcome == 'failure'

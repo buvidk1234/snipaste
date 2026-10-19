@@ -70,14 +70,20 @@ int main(int argc, char **argv) {
                        check=True, capture_output=True)
 
     def prepare_update(self, expected_hash=None, restart=False, process_id=2147483647,
-                       tamper=False, identifier="com.snipaste.local"):
+                       tamper=False, identifier="com.snipaste.local", package_format="dmg"):
         source = self.root / "package/snipaste.app"
         self.make_bundle(source, b"updated", identifier)
         if tamper:
             (source / "Contents/Resources/version.txt").write_bytes(b"tampered")
-        archive = self.root / "update.zip"
-        subprocess.run(["/usr/bin/ditto", "-c", "-k", "--sequesterRsrc", "--keepParent",
-                        str(source), str(archive)], check=True, capture_output=True)
+        archive = self.root / f"update.{package_format}"
+        if package_format == "dmg":
+            (source.parent / "Applications").symlink_to("/Applications")
+            subprocess.run(["/usr/bin/hdiutil", "create", "-volname", "Snipaste Updater Test",
+                            "-srcfolder", str(source.parent), "-fs", "HFS+", "-format", "UDZO",
+                            str(archive)], check=True, capture_output=True)
+        else:
+            subprocess.run(["/usr/bin/ditto", "-c", "-k", "--sequesterRsrc", "--keepParent",
+                            str(source), str(archive)], check=True, capture_output=True)
         self.arguments = ["--snipaste-restart", "--config", str(self.config)]
         self.manifest = self.root / "install.json"
         self.manifest.write_text(json.dumps({
@@ -91,6 +97,7 @@ int main(int argc, char **argv) {
         result = subprocess.run(["/bin/bash", str(SCRIPT), str(self.manifest)],
                                 capture_output=True, timeout=20, env=environment)
         status = json.loads((self.root / "status.json").read_text(encoding="utf-8"))
+        self.assertFalse(os.path.ismount(self.root / "mounted"), "Updater left the DMG mounted")
         return result, status
 
     def version(self):
@@ -110,6 +117,25 @@ int main(int argc, char **argv) {
 
     def test_rejects_changed_archive(self):
         self.prepare_update(expected_hash="0" * 64)
+        result, status = self.run_update()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(status["state"], "failed")
+        self.assertEqual(self.version(), b"original")
+
+    def test_installs_legacy_zip(self):
+        self.prepare_update(package_format="zip")
+        result, status = self.run_update()
+        self.assertEqual(result.returncode, 0, (status, result.stderr))
+        self.assertEqual(status["state"], "installed")
+        self.assertEqual(self.version(), b"updated")
+
+    def test_rejects_invalid_disk_image(self):
+        self.prepare_update()
+        archive = self.root / "update.dmg"
+        archive.write_bytes(b"not a disk image")
+        manifest = json.loads(self.manifest.read_text(encoding="utf-8"))
+        manifest["sha256"] = hashlib.sha256(archive.read_bytes()).hexdigest()
+        self.manifest.write_text(json.dumps(manifest), encoding="utf-8")
         result, status = self.run_update()
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(status["state"], "failed")
@@ -147,6 +173,7 @@ int main(int argc, char **argv) {
         _, errors = updater.communicate(timeout=10)
         self.assertNotEqual(updater.returncode, 0, errors)
         self.assertEqual(json.loads(status_path.read_text())["state"], "failed")
+        self.assertFalse(os.path.ismount(self.root / "mounted"))
         self.assertEqual(self.version(), b"original")
 
     def test_restarts_with_config_arguments_and_without_sdk_plugins(self):

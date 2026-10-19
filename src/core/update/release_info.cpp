@@ -141,6 +141,8 @@ ReleaseResult selectGitHubRelease(const QByteArray &json, const QString &current
         QStringList packages;
         if (target.startsWith(QStringLiteral("windows-")))
             packages.append(baseName + QStringLiteral("-setup.exe"));
+        if (target.startsWith(QStringLiteral("macos-")))
+            packages.append(baseName + QStringLiteral(".dmg"));
         packages.append(baseName + QStringLiteral(".zip"));
         for (const QString &expected : packages) {
             for (const auto &item : assets) {

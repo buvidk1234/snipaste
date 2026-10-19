@@ -20,9 +20,10 @@ namespace {
 
 const QString repository = QStringLiteral("test-owner/snipaste");
 
-QJsonObject asset(const QString &version, const QString &platform)
+QJsonObject asset(const QString &version, const QString &platform,
+                  const QString &suffix = QStringLiteral(".zip"))
 {
-    const QString name = QStringLiteral("snipaste-%1-%2.zip").arg(version, platform);
+    const QString name = QStringLiteral("snipaste-%1-%2%3").arg(version, platform, suffix);
     return {{QStringLiteral("name"), name}, {QStringLiteral("size"), 123},
             {QStringLiteral("browser_download_url"),
              QStringLiteral("https://github.com/%1/releases/download/v%2/%3").arg(repository, version, name)}};
@@ -93,6 +94,7 @@ private slots:
     void selectsStableAndBeta();
     void selectsMatchingAssetsAndRejectsForeignUrls();
     void prefersWindowsInstallerAndKeepsZipFallback();
+    void prefersAppleSiliconDmgAndKeepsZipFallback();
     void handlesEmptyAndInvalidCatalogs();
     void networkCheckAndDuplicateRequests();
     void networkErrorsAndCancellation();
@@ -125,6 +127,37 @@ void UpdateTest::prefersWindowsInstallerAndKeepsZipFallback()
     const auto legacy = selectGitHubRelease(QJsonDocument(QJsonArray{release(QStringLiteral("0.2.0"))}).toJson(),
                                             QStringLiteral("0.1.0"), false, QStringLiteral("windows-x64"), repository);
     QCOMPARE(legacy.release.assetName, QStringLiteral("snipaste-0.2.0-windows-x64.zip"));
+}
+
+void UpdateTest::prefersAppleSiliconDmgAndKeepsZipFallback()
+{
+    auto published = release(QStringLiteral("0.2.0"));
+    auto assets = published.value(QStringLiteral("assets")).toArray();
+    assets.append(asset(QStringLiteral("0.2.0"), QStringLiteral("macos-arm64")));
+    const auto image = asset(QStringLiteral("0.2.0"), QStringLiteral("macos-arm64"), QStringLiteral(".dmg"));
+    const QString name = image.value(QStringLiteral("name")).toString();
+    const QString url = image.value(QStringLiteral("browser_download_url")).toString();
+    const QJsonObject checksum{{QStringLiteral("name"), name + QStringLiteral(".sha256")},
+                               {QStringLiteral("browser_download_url"), url + QStringLiteral(".sha256")}};
+    assets.append(image); // Both ZIP formats precede the DMG in GitHub's asset list.
+    assets.append(checksum);
+    published.insert(QStringLiteral("assets"), assets);
+    const auto selected = selectGitHubRelease(QJsonDocument(QJsonArray{published}).toJson(),
+        QStringLiteral("0.1.0"), false, QStringLiteral("macos-arm64"), repository);
+    QCOMPARE(selected.release.assetName, QStringLiteral("snipaste-0.2.0-macos-arm64.dmg"));
+    QCOMPARE(selected.release.checksumUrl, QUrl(url + QStringLiteral(".sha256")));
+
+    published.insert(QStringLiteral("assets"), QJsonArray{image, checksum});
+    const auto unavailable = selectGitHubRelease(QJsonDocument(QJsonArray{published}).toJson(),
+        QStringLiteral("0.1.0"), false, QStringLiteral("macos-x64"), repository);
+    QVERIFY(unavailable.newer && unavailable.release.assetUrl.isEmpty());
+
+    assets.removeLast();
+    assets.removeLast();
+    published.insert(QStringLiteral("assets"), assets);
+    const auto legacy = selectGitHubRelease(QJsonDocument(QJsonArray{published}).toJson(),
+        QStringLiteral("0.1.0"), false, QStringLiteral("macos-arm64"), repository);
+    QCOMPARE(legacy.release.assetName, QStringLiteral("snipaste-0.2.0-macos-arm64.zip"));
 }
 
 void UpdateTest::versions_data()

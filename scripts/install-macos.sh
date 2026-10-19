@@ -20,9 +20,13 @@ next="${destination}.next-${parent_pid}"
 status="$task_root/status.json"
 installed=0
 moved=0
+mount_point=""
 
 finish() {
     result=$?
+    if [[ -n "$mount_point" ]]; then
+        /usr/bin/hdiutil detach "$mount_point" >/dev/null 2>&1 || true
+    fi
     if [[ $installed -eq 0 ]]; then
         if [[ $moved -eq 1 && -d "$backup" ]]; then
             [[ ! -e "$destination" ]] || /bin/mv "$destination" "$next.failed"
@@ -45,13 +49,29 @@ case "$archive" in "$task_root"/*) ;; *) exit 1 ;; esac
 # Reject failed validations explicitly before touching the installed bundle.
 [[ -x "$destination/Contents/MacOS/snipaste" && ! -e "$backup" && ! -e "$next" ]] || exit 1
 [[ "$(/usr/bin/shasum -a 256 "$archive" | /usr/bin/awk '{print $1}')" == "$expected_hash" ]] || exit 1
-/bin/mkdir -p "$task_root/expanded"
-/usr/bin/ditto -x -k "$archive" "$task_root/expanded"
-source="$task_root/expanded/snipaste.app"
+case "$archive" in
+    *.dmg)
+        mount_point="$task_root/mounted"
+        /bin/mkdir -p "$mount_point"
+        /usr/bin/hdiutil attach -readonly -nobrowse -noautoopen \
+            -mountpoint "$mount_point" "$archive" >/dev/null
+        source="$mount_point/snipaste.app"
+        ;;
+    *.zip)
+        /bin/mkdir -p "$task_root/expanded"
+        /usr/bin/ditto -x -k "$archive" "$task_root/expanded"
+        source="$task_root/expanded/snipaste.app"
+        ;;
+    *) exit 1 ;;
+esac
 [[ -x "$source/Contents/MacOS/snipaste" ]] || exit 1
 [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$source/Contents/Info.plist")" == "com.snipaste.local" ]] || exit 1
 /usr/bin/codesign --verify --deep --strict "$source"
 /usr/bin/ditto "$source" "$next"
+if [[ -n "$mount_point" ]]; then
+    /usr/bin/hdiutil detach "$mount_point" >/dev/null
+    mount_point=""
+fi
 printf '{"state":"ready"}\n' > "$status"
 deadline=$((SECONDS + 120))
 while /bin/kill -0 "$parent_pid" 2>/dev/null; do

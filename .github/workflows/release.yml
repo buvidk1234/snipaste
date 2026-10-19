@@ -55,7 +55,7 @@ jobs:
             preset: windows-msvc-release
           - os: macos-26
             qt-arch: clang_64
-            artifact: macos-universal
+            artifact: macos-arm64
             preset: macos-release
     runs-on: ${{ matrix.os }}
     defaults:
@@ -143,8 +143,8 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: |
-            dist/*.zip
-            dist/*.zip.sha256
+            dist/*.dmg
+            dist/*.dmg.sha256
             dist/*-setup.exe
             dist/*-setup.exe.sha256
           if-no-files-found: error
@@ -167,12 +167,12 @@ jobs:
           prerelease: ${{ contains(needs.version.outputs.version, '-') }}
           generate_release_notes: ${{ needs.version.outputs.repository == github.repository }}
           body: |
-            Windows: run the windows-x64-setup.exe installer. A portable ZIP is also available.
-            macOS: unzip the macos-universal package and move snipaste.app to Applications.
-            All packages include the Qt runtime and SHA-256 checksums. In-app updates download, install and restart automatically.
+            Windows: run the windows-x64-setup.exe installer.
+            macOS (Apple Silicon): open the macos-arm64.dmg and drag snipaste.app to Applications.
+            Both packages include the Qt runtime and have SHA-256 checksum files. In-app updates download, verify, install and restart automatically.
           files: |
-            dist/*.zip
-            dist/*.zip.sha256
+            dist/*.dmg
+            dist/*.dmg.sha256
             dist/*-setup.exe
             dist/*-setup.exe.sha256
           fail_on_unmatched_files: true

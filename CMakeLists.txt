@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.28)
 
 project(snipaste
-    VERSION 0.1.3
+    VERSION 0.1.4
     DESCRIPTION "Open source screenshot, pin and annotation tool"
     LANGUAGES CXX
 )
@@ -474,12 +474,13 @@ if(WIN32)
         message(FATAL_ERROR "MSVC redistributable libraries were not found during configuration")
     endif()
     set(name "snipaste-${version}-windows-x64")
+    set(archive "@CMAKE_CURRENT_BINARY_DIR@/package-payload.zip")
 elseif(APPLE)
-    set(name "snipaste-${version}-macos-universal")
+    set(name "snipaste-${version}-macos-arm64")
+    set(archive "${dist}/${name}.dmg")
 else()
     message(FATAL_ERROR "Packages support Windows and macOS")
 endif()
-set(archive "${dist}/${name}.zip")
 
 # Replace only the staging directory owned by this build.
 file(REMOVE_RECURSE "${stage}")
@@ -523,19 +524,24 @@ if(WIN32)
         "/DUNINSTALL_FILES=${nsis_uninstall_files}" "/DINSTALLED_SIZE=${installed_size}"
         "@CMAKE_CURRENT_SOURCE_DIR@/scripts/installer.nsi"
         COMMAND_ERROR_IS_FATAL ANY)
-    set(packages "${archive}" "${installer}")
+    set(packages "${installer}")
 else()
     set(app "${stage}/snipaste.app")
     if(NOT EXISTS "${app}/Contents/Info.plist")
         message(FATAL_ERROR "macOS bundle Info.plist is missing; reconfigure the build before packaging")
     endif()
-    execute_process(COMMAND lipo "${app}/Contents/MacOS/snipaste" -verify_arch x86_64 arm64
-        COMMAND_ERROR_IS_FATAL ANY)
+    execute_process(COMMAND lipo -archs "${app}/Contents/MacOS/snipaste"
+        OUTPUT_VARIABLE architectures OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+    if(NOT architectures STREQUAL "arm64")
+        message(FATAL_ERROR "macOS packages require an arm64-only build; reconfigure with the macos-release preset")
+    endif()
     execute_process(COMMAND codesign --force --deep --sign - "${app}"
         COMMAND_ERROR_IS_FATAL ANY)
     execute_process(COMMAND codesign --verify --deep --strict "${app}"
         COMMAND_ERROR_IS_FATAL ANY)
-    execute_process(COMMAND ditto -c -k --sequesterRsrc --keepParent "${app}" "${archive}"
+    file(CREATE_LINK "/Applications" "${stage}/Applications" SYMBOLIC)
+    execute_process(COMMAND hdiutil create -volname Snipaste -srcfolder "${stage}"
+        -fs HFS+ -format UDZO -ov "${archive}"
         COMMAND_ERROR_IS_FATAL ANY)
     set(packages "${archive}")
 endif()
