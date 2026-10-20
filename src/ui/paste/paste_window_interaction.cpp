@@ -208,16 +208,20 @@ void PasteWindow::mouseReleaseEvent(QMouseEvent *event)
     }
     if (event->button() == Qt::LeftButton && m_pressed)
     {
-        const bool wasDragging = m_dragging;
+        const QPoint globalPosition = event->globalPosition().toPoint();
+        const bool wasDragging = !m_resizing && (m_dragging ||
+            (globalPosition - m_pressPosition).manhattanLength() >= QApplication::startDragDistance());
+        // The last mouse move can be coalesced while many pins are visible.
+        // Always finish a drag at the release position, including a quick drag.
+        if (wasDragging)
+            move(globalPosition - m_dragOffset);
         m_pressed = false;
         m_dragging = false;
         m_resizing = false;
         m_resizeEdges = {};
-        setCursor(Qt::ArrowCursor);
         QScreen *screen = QGuiApplication::screenAt(frameGeometry().center());
-        // A click near the screen edge must not move the window between the
-        // first and second clicks of a double-click. Snap only after a drag.
-        if (wasDragging && screen)
+        // Hold Shift to align a pin; an ordinary drag keeps the exact drop position.
+        if (wasDragging && event->modifiers().testFlag(Qt::ShiftModifier) && screen)
         {
             const QRect area = screen->availableGeometry();
             QPoint snapped = pos();
@@ -233,7 +237,8 @@ void PasteWindow::mouseReleaseEvent(QMouseEvent *event)
             move(snapped);
         }
         if (wasDragging)
-            emit positionChanged(this);
+            emit positionChanged(this, event->modifiers());
+        updateResizeCursor(mapFromGlobal(globalPosition));
     }
     QWidget::mouseReleaseEvent(event);
 }

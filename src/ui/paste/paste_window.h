@@ -118,7 +118,7 @@ class PasteWindow final : public QWidget
     void copyRequested(snipaste::ui::PasteWindow *window);
     void copyAsFileRequested(snipaste::ui::PasteWindow *window);
     void moveRequested(snipaste::ui::PasteWindow *window, QPoint delta);
-    void positionChanged(snipaste::ui::PasteWindow *window);
+    void positionChanged(snipaste::ui::PasteWindow *window, Qt::KeyboardModifiers modifiers);
     void wheelTransformRequested(snipaste::ui::PasteWindow *window, qreal scaleFactor, qreal opacityDelta);
 
   protected:

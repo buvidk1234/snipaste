@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.28)
 
 project(snipaste
-    VERSION 0.1.5
+    VERSION 0.1.6
     DESCRIPTION "Open source screenshot, pin and annotation tool"
     LANGUAGES CXX
 )

@@ -415,13 +415,13 @@ void PasteManager::connectWindow(PasteWindow *window)
                          if (m_selected.contains(source) && m_selected.size() > 1)
                              moveSelectedBy(delta);
                          else
-                         {
                              source->move(source->pos() + delta);
-                             snapWindowToNearby(source);
-                         }
                      });
     QObject::connect(window, &PasteWindow::positionChanged, this,
-                     [this](PasteWindow *source) { snapWindowToNearby(source); });
+                     [this](PasteWindow *source, Qt::KeyboardModifiers modifiers) {
+                         if (modifiers.testFlag(Qt::ShiftModifier))
+                             snapWindowToNearby(source);
+                     });
     QObject::connect(window, &PasteWindow::wheelTransformRequested, this,
                      [this](PasteWindow *source, qreal scaleFactor, qreal opacityDelta) {
                          if (!source || !m_selected.contains(source) || m_selected.size() < 2)
@@ -444,9 +444,16 @@ void PasteManager::snapWindowToNearby(PasteWindow *window)
     if (!window || m_magneticAttachThreshold <= 0)
         return;
     prune();
-    QRect candidate = window->frameGeometry();
+    const QRect original = window->frameGeometry();
     const int threshold = m_magneticAttachThreshold;
-    const auto snap = [threshold](int first, int second) { return qAbs(first - second) <= threshold; };
+    const QRect nearby = original.adjusted(-threshold, -threshold, threshold, threshold);
+    int offsetX = threshold + 1;
+    int offsetY = threshold + 1;
+    const auto nearest = [threshold](int delta, int &offset) {
+        if (qAbs(delta) <= threshold &&
+            (qAbs(delta) < qAbs(offset) || (qAbs(delta) == qAbs(offset) && delta < offset)))
+            offset = delta;
+    };
     for (const Group &group : m_groups)
     {
         for (const QPointer<PasteWindow> &other : group.windows)
@@ -454,18 +461,20 @@ void PasteManager::snapWindowToNearby(PasteWindow *window)
             if (!other || other == window || !other->isVisible())
                 continue;
             const QRect target = other->frameGeometry();
-            if (snap(candidate.left(), target.right() + 1))
-                candidate.moveLeft(target.right() + 1);
-            else if (snap(candidate.right() + 1, target.left()))
-                candidate.moveLeft(target.left() - candidate.width());
-            if (snap(candidate.top(), target.bottom() + 1))
-                candidate.moveTop(target.bottom() + 1);
-            else if (snap(candidate.bottom() + 1, target.top()))
-                candidate.moveTop(target.top() - candidate.height());
+            if (!nearby.intersects(target))
+                continue;
+            // Compare every edge with the original drop position so pins cannot
+            // pull one another into a chain of corrections beyond the threshold.
+            nearest(target.right() + 1 - original.left(), offsetX);
+            nearest(target.left() - original.right() - 1, offsetX);
+            nearest(target.bottom() + 1 - original.top(), offsetY);
+            nearest(target.top() - original.bottom() - 1, offsetY);
         }
     }
-    if (candidate.topLeft() != window->frameGeometry().topLeft())
-        window->move(candidate.topLeft());
+    const QPoint offset(qAbs(offsetX) <= threshold ? offsetX : 0,
+                        qAbs(offsetY) <= threshold ? offsetY : 0);
+    if (!offset.isNull())
+        window->move(original.topLeft() + offset);
 }
 
 PasteWindow *PasteManager::pasteClipboard(const QImage &image)

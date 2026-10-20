@@ -62,6 +62,7 @@ PasteWindow::PasteWindow(QImage image, QWidget *parent) : QWidget(parent)
     setWindowFlags(Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
     setFocusPolicy(Qt::StrongFocus);
     setCursor(Qt::ArrowCursor);
+    setMouseTracking(true);
     setAcceptDrops(true);
     // Keep the native window fully opaque for a newly created pin.  The
     // manager may apply a user-selected opacity immediately afterwards, while

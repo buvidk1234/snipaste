@@ -20,6 +20,7 @@
 #include <QGraphicsView>
 #include <QBackingStore>
 #include <QMenu>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPlainTextEdit>
 #include <QPointer>
@@ -143,6 +144,12 @@ class PasteEditorTest : public QObject
     void proxyKeepsSourceCoordinatesAfterTransforms();
     void shadowHasVisiblePixelsAndFollowsWindow();
     void movingPinsReusesPaintedSurfaces();
+    void edgeHoverShowsResizeCursor_data();
+    void edgeHoverShowsResizeCursor();
+    void dragReleaseUsesFinalPointerPosition_data();
+    void dragReleaseUsesFinalPointerPosition();
+    void dragAmongManyPins_data();
+    void dragAmongManyPins();
     void closedPinsReleaseDisplayBuffers();
     void annotationsAndDecorationPersist();
     void legacyDefaultDecorationsMigrate();
@@ -793,6 +800,119 @@ void PasteEditorTest::movingPinsReusesPaintedSurfaces()
     QCOMPARE(view->transform(), transform);
     QCOMPARE(pin->sourceImage().cacheKey(), sourceKey);
     QCOMPARE(pin->displayedImage().cacheKey(), displayKey);
+}
+
+void PasteEditorTest::edgeHoverShowsResizeCursor_data()
+{
+    QTest::addColumn<QPoint>("edge");
+    QTest::addColumn<int>("shape");
+    QTest::newRow("left") << QPoint(-1, 0) << int(Qt::SizeHorCursor);
+    QTest::newRow("right") << QPoint(1, 0) << int(Qt::SizeHorCursor);
+    QTest::newRow("top") << QPoint(0, -1) << int(Qt::SizeVerCursor);
+    QTest::newRow("bottom") << QPoint(0, 1) << int(Qt::SizeVerCursor);
+    QTest::newRow("top-left") << QPoint(-1, -1) << int(Qt::SizeFDiagCursor);
+    QTest::newRow("bottom-right") << QPoint(1, 1) << int(Qt::SizeFDiagCursor);
+    QTest::newRow("top-right") << QPoint(1, -1) << int(Qt::SizeBDiagCursor);
+    QTest::newRow("bottom-left") << QPoint(-1, 1) << int(Qt::SizeBDiagCursor);
+}
+
+void PasteEditorTest::edgeHoverShowsResizeCursor()
+{
+    QFETCH(QPoint, edge);
+    QFETCH(int, shape);
+    ui::PasteManager manager;
+    manager.setFlashNew(false);
+    auto *pin = manager.createPasteAtPosition(baseImage(), QPoint(80, 80));
+    const auto coordinate = [](int side, int length) {
+        return side < 0 ? 2 : side > 0 ? length - 3 : length / 2;
+    };
+    const QPoint hit(coordinate(edge.x(), pin->width()), coordinate(edge.y(), pin->height()));
+    QTest::mouseMove(pin, hit);
+    QCOMPARE(pin->cursor().shape(), Qt::CursorShape(shape));
+    QTest::mouseMove(pin, pin->rect().center());
+    QCOMPARE(pin->cursor().shape(), Qt::ArrowCursor);
+    pin->setResizeEnabled(false);
+    QTest::mouseMove(pin, hit);
+    QCOMPARE(pin->cursor().shape(), Qt::ArrowCursor);
+}
+
+void PasteEditorTest::dragReleaseUsesFinalPointerPosition_data()
+{
+    QTest::addColumn<bool>("intermediateMove");
+    QTest::newRow("last-move-coalesced") << true;
+    QTest::newRow("quick-drag") << false;
+}
+
+void PasteEditorTest::dragReleaseUsesFinalPointerPosition()
+{
+    QFETCH(bool, intermediateMove);
+    ui::PasteManager manager;
+    manager.setFlashNew(false);
+    auto *pin = manager.createPasteAtPosition(baseImage(), QPoint(80, 80));
+    const QPoint start = pin->pos();
+    const QPoint press = pin->mapToGlobal(pin->rect().center());
+    const auto send = [&](QEvent::Type type, const QPoint &global) {
+        QMouseEvent event(type, pin->mapFromGlobal(global), global,
+                          type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton,
+                          type == QEvent::MouseButtonRelease ? Qt::NoButton : Qt::LeftButton,
+                          Qt::NoModifier);
+        QApplication::sendEvent(pin, &event);
+    };
+    send(QEvent::MouseButtonPress, press);
+    if (intermediateMove)
+        send(QEvent::MouseMove, press + QPoint(25, 20));
+    send(QEvent::MouseButtonRelease, press + QPoint(110, 90));
+    QCOMPARE(pin->pos(), start + QPoint(110, 90));
+}
+
+void PasteEditorTest::dragAmongManyPins_data()
+{
+    QTest::addColumn<bool>("shift");
+    QTest::addColumn<bool>("nearby");
+    QTest::addColumn<bool>("nearestFirst");
+    QTest::newRow("ordinary-drag") << false << true << true;
+    QTest::newRow("distant-pins-cannot-attract") << true << false << true;
+    QTest::newRow("nearest-first") << true << true << true;
+    QTest::newRow("nearest-last") << true << true << false;
+}
+
+void PasteEditorTest::dragAmongManyPins()
+{
+    QFETCH(bool, shift);
+    QFETCH(bool, nearby);
+    QFETCH(bool, nearestFirst);
+    ui::PasteManager manager;
+    manager.setFlashNew(false);
+    manager.setActivateNew(false);
+    manager.setShadowEnabled(false);
+    manager.setDisableDpiScaling(true);
+    manager.setMagneticAttachThreshold(20);
+    QImage image(120, 80, QImage::Format_RGB32);
+    image.fill(Qt::yellow);
+    auto *pin = manager.createPasteAtPosition(image, QPoint(80, 80));
+    const QPoint destination(400, 300);
+    if (nearby)
+        for (int gap : nearestFirst ? QList<int>{3, 18} : QList<int>{18, 3})
+            manager.createPasteAtPosition(image, destination + QPoint(-image.width() + gap, 0));
+    // These edges form a chain in X, but their windows are far away in Y.
+    for (int index = 1; index <= 24; ++index)
+        manager.createPasteAtPosition(image, destination + QPoint(-image.width() + index * 4, 500 + index * 90));
+    const QPoint hit = pin->rect().center();
+    const QPoint press = pin->mapToGlobal(hit);
+    const QPoint release = destination + hit;
+    const auto modifiers = shift ? Qt::ShiftModifier : Qt::NoModifier;
+    QMouseEvent down(QEvent::MouseButtonPress, hit, press, Qt::LeftButton, Qt::LeftButton, modifiers);
+    QApplication::sendEvent(pin, &down);
+    QMouseEvent move(QEvent::MouseMove, pin->mapFromGlobal(release), release,
+                     Qt::NoButton, Qt::LeftButton, modifiers);
+    QApplication::sendEvent(pin, &move);
+    QMouseEvent up(QEvent::MouseButtonRelease, pin->mapFromGlobal(release), release,
+                   Qt::LeftButton, Qt::NoButton, modifiers);
+    QApplication::sendEvent(pin, &up);
+    QCOMPARE(pin->pos(), destination + QPoint(shift && nearby ? 3 : 0, 0));
+    // Plain arrow keys must still move by one pixel beside many magnetic edges.
+    QTest::keyClick(pin, Qt::Key_Right);
+    QCOMPARE(pin->pos(), destination + QPoint((shift && nearby ? 3 : 0) + 1, 0));
 }
 
 void PasteEditorTest::closedPinsReleaseDisplayBuffers()
