@@ -143,6 +143,7 @@ class PasteEditorTest : public QObject
     void textInputKeepsSpacesAndFinishCommits();
     void proxyKeepsSourceCoordinatesAfterTransforms();
     void shadowHasVisiblePixelsAndFollowsWindow();
+    void movingPinsReusesPaintedSurfaces_data();
     void movingPinsReusesPaintedSurfaces();
     void edgeHoverShowsResizeCursor_data();
     void edgeHoverShowsResizeCursor();
@@ -770,8 +771,16 @@ void PasteEditorTest::shadowHasVisiblePixelsAndFollowsWindow()
         QVERIFY(!edge->isVisible());
 }
 
+void PasteEditorTest::movingPinsReusesPaintedSurfaces_data()
+{
+    QTest::addColumn<int>("initializationDelayMs");
+    QTest::newRow("ready") << 0;
+    QTest::newRow("delayed-initialization") << 150;
+}
+
 void PasteEditorTest::movingPinsReusesPaintedSurfaces()
 {
+    QFETCH(int, initializationDelayMs);
     ui::PasteManager manager;
     manager.setFlashNew(false);
     auto *pin = manager.createPaste(baseImage());
@@ -781,7 +790,11 @@ void PasteEditorTest::movingPinsReusesPaintedSurfaces()
     const auto shadows = pin->findChildren<QWidget *>(QStringLiteral("pasteShadow"));
     QCOMPARE(shadows.size(), 4);
     const QPoint start = pin->pos();
+    if (initializationDelayMs)
+        QTimer::singleShot(0, &manager, [initializationDelayMs] { QTest::qSleep(initializationDelayMs); });
     QTest::qWait(100);
+    // Slow initialization can outlast qWait and leave its paints queued.
+    QApplication::processEvents();
     PaintCounter counter;
     for (auto *widget : {static_cast<QWidget *>(pin), static_cast<QWidget *>(canvas(pin)),
                          static_cast<QWidget *>(toolbar), view->viewport()})
