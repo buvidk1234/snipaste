@@ -11,6 +11,7 @@
 #include "ui/snip/snip_overlay.h"
 
 #include <QApplication>
+#include <QAction>
 #include <QColorDialog>
 #include <QDialog>
 #include <QFile>
@@ -18,6 +19,8 @@
 #include <QElapsedTimer>
 #include <QInputDialog>
 #include <QMessageBox>
+#include <QMenu>
+#include <QProcess>
 #include <QScreen>
 #include <QStandardPaths>
 #include <QSpinBox>
@@ -25,6 +28,10 @@
 #include <QTest>
 #include <QTimer>
 #include <QWindow>
+
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 
 using namespace snipaste;
 
@@ -247,6 +254,60 @@ class ApplicationControllerTest final : public QObject
         const QPoint restoredPosition = owner.pos();
         drag(owner);
         QCOMPARE(owner.pos(), restoredPosition + delta);
+    }
+    void preferencesOpenWhenLaunchedHidden()
+    {
+#ifndef Q_OS_WIN
+        QSKIP("Windows startup window visibility regression.");
+#else
+        if (QGuiApplication::platformName() != QStringLiteral("windows"))
+            QSKIP("Requires the Windows desktop platform.");
+        QProcess child;
+        child.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments *arguments) {
+            arguments->startupInfo->dwFlags |= STARTF_USESHOWWINDOW;
+            arguments->startupInfo->wShowWindow = SW_HIDE;
+        });
+        child.start(QCoreApplication::applicationFilePath(),
+                    {QStringLiteral("preferencesOpenFromFirstTrayMenu"), QStringLiteral("-o"),
+                     QStringLiteral("-,txt")});
+        QVERIFY(child.waitForStarted());
+        QVERIFY(child.waitForFinished(15000));
+        const QByteArray output = child.readAllStandardOutput() + child.readAllStandardError();
+        QCOMPARE(child.exitStatus(), QProcess::NormalExit);
+        QVERIFY2(child.exitCode() == 0, output.constData());
+#endif
+    }
+    void preferencesOpenFromFirstTrayMenu()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        core::ConfigStore config(directory.filePath(QStringLiteral("config.ini")));
+        configureTest(config, directory.path());
+        platform::SingleInstance instance;
+        app::ApplicationController controller(*static_cast<QApplication *>(qApp), config, instance);
+        QVERIFY(controller.dispatchArguments({QStringLiteral("show-tray-menu")}, false));
+        auto *menu = qobject_cast<QMenu *>(QApplication::activePopupWidget());
+        QVERIFY(menu);
+        QAction *openPreferences = nullptr;
+        for (auto *action : menu->actions())
+            if (action->text() == QStringLiteral("首选项…"))
+                openPreferences = action;
+        QVERIFY(openPreferences);
+        QVERIFY(QTest::qWaitForWindowExposed(menu));
+        QTest::mouseClick(menu->windowHandle(), Qt::LeftButton, Qt::NoModifier,
+                          menu->actionGeometry(openPreferences).center());
+        QVERIFY(!menu->isVisible());
+        QPointer<ui::PreferencesDialog> preferences;
+        for (auto *widget : QApplication::topLevelWidgets())
+            if (auto *dialog = dynamic_cast<ui::PreferencesDialog *>(widget))
+                preferences = dialog;
+        QVERIFY(preferences);
+        QVERIFY(QTest::qWaitForWindowExposed(preferences));
+        if (QGuiApplication::platformName() == QStringLiteral("windows"))
+            QVERIFY(QTest::qWaitForWindowActive(preferences));
+        QTest::qWait(100);
+        QVERIFY(preferences->isVisible());
+        QVERIFY(!QApplication::activeModalWidget());
     }
     void preferencesAllowCaptureWithoutBlockingInput()
     {

@@ -15,6 +15,10 @@
 #include <QMimeData>
 #include <QProcess>
 
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
+
 namespace snipaste::app
 {
 
@@ -28,25 +32,27 @@ using snipaste::platform::pasteClipboardAsKeyboardInput;
 void ApplicationController::registerUtilityCommands()
 {
     m_commands.registerCommand({QStringLiteral("preferences.open"), QStringLiteral("首选项"), [this] {
-                                    if (m_preferences && m_preferences->isVisible())
+                                    if (!m_preferences || !m_preferences->isVisible())
                                     {
-                                        m_preferences->showNormal();
-                                        m_preferences->raise();
-                                        m_preferences->activateWindow();
-                                        return;
+                                        m_preferences = std::make_unique<ui::PreferencesDialog>(m_config);
+                                        m_preferences->setUpdateCheckHandler(
+                                            [this](QWidget *parent) { m_updates.checkNow(parent); });
+                                        QObject::connect(m_preferences.get(), &QDialog::accepted, this,
+                                                         [this] { applySettings(); });
+                                        // Release the hidden widget tree after the dialog finishes closing.
+                                        QObject::connect(m_preferences.get(), &QDialog::finished, this,
+                                                         [this] {
+                                                             if (m_preferences && !m_preferences->isVisible())
+                                                                 m_preferences.reset();
+                                                         }, Qt::QueuedConnection);
                                     }
-                                    m_preferences = std::make_unique<ui::PreferencesDialog>(m_config);
-                                    m_preferences->setUpdateCheckHandler(
-                                        [this](QWidget *parent) { m_updates.checkNow(parent); });
-                                    QObject::connect(m_preferences.get(), &QDialog::accepted, this,
-                                                     [this] { applySettings(); });
-                                    // Release the hidden widget tree after the dialog finishes closing.
-                                    QObject::connect(m_preferences.get(), &QDialog::finished, this,
-                                                     [this] {
-                                                         if (m_preferences && !m_preferences->isVisible())
-                                                             m_preferences.reset();
-                                                     }, Qt::QueuedConnection);
-                                    m_preferences->show();
+                                    m_preferences->showNormal();
+#ifdef Q_OS_WIN
+                                    // Build tools can launch us with SW_HIDE, overriding Qt's first ShowWindow.
+                                    ShowWindow(reinterpret_cast<HWND>(m_preferences->winId()), SW_SHOWNORMAL);
+#endif
+                                    m_preferences->raise();
+                                    m_preferences->activateWindow();
                                 }});
     m_commands.registerCommand({
         QStringLiteral("history.clear"),
